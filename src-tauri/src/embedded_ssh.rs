@@ -595,8 +595,25 @@ pub fn remove_system_known_host(host_name: &str, port: u16) -> Result<usize> {
     if !ssh_path.exists() {
         return Err(anyhow!("{} not found", ssh_path.display()));
     }
-    let raw = std::fs::read_to_string(&ssh_path)
-        .with_context(|| format!("failed to read {}", ssh_path.display()))?;
+    remove_known_host_lines(&ssh_path, host_name, port)
+}
+
+/// The rewrite half of `remove_system_known_host`, split out so the matching
+/// rules can be tested against a file the test owns.
+///
+/// The split is not cosmetic. The resolution above goes through
+/// `dirs::home_dir()`, which on Windows reads `FOLDERID_Profile` /
+/// `USERPROFILE` and never looks at `HOME` — so a case that rewrote only `HOME`
+/// left the function pointing at the developer's *real* `~/.ssh/known_hosts`
+/// while its assertions compared a temporary fixture nothing had touched. Those
+/// cases failed on Windows and passed wherever `HOME` is honoured, and the
+/// failure mode was the bad one: a test that edits live data when it happens to
+/// match. Taking the path as an argument takes the environment out of the
+/// question and keeps the file the test owns identical to the file the product
+/// edits.
+fn remove_known_host_lines(path: &Path, host_name: &str, port: u16) -> Result<usize> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
 
     // Compare `(host, port)` pairs, not spellings.
     //
@@ -655,11 +672,11 @@ pub fn remove_system_known_host(host_name: &str, port: u16) -> Result<usize> {
 
     if removed > 0 {
         // Write backup.
-        let bak_path = ssh_path.with_extension("bak");
+        let bak_path = path.with_extension("bak");
         std::fs::write(&bak_path, &raw)
             .with_context(|| format!("failed to write backup {}", bak_path.display()))?;
-        std::fs::write(&ssh_path, &kept)
-            .with_context(|| format!("failed to rewrite {}", ssh_path.display()))?;
+        std::fs::write(path, &kept)
+            .with_context(|| format!("failed to rewrite {}", path.display()))?;
     }
 
     Ok(removed)
@@ -699,7 +716,7 @@ fn trailing_port(after: &str) -> u16 {
 
 #[cfg(test)]
 mod remove_system_known_host_matching {
-    use super::{remove_system_known_host, split_host_port};
+    use super::{remove_known_host_lines, split_host_port};
     use std::path::PathBuf;
 
     /// One `known_hosts` line, far enough from a real key to be unreadable as
@@ -708,44 +725,46 @@ mod remove_system_known_host_matching {
         format!("{host_field} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample\n")
     }
 
-    struct Home {
-        dir: PathBuf,
+    /// A `known_hosts` file the case owns outright.
+    ///
+    /// These cases used to point `HOME` at a temporary directory and call
+    /// `remove_system_known_host`, exercising the real resolution. That only
+    /// works where `dirs::home_dir()` reads `HOME`: on Windows it reads
+    /// `USERPROFILE`, so the product edited the developer's actual
+    /// `~/.ssh/known_hosts` while the assertions compared a fixture nothing had
+    /// touched — three cases failed there, and the failure was the dangerous
+    /// direction. Passing the path in tests the same rewrite with no environment
+    /// to get wrong, and no `serial` is needed because nothing process-wide is
+    /// changed.
+    struct KnownHostsFile {
+        path: PathBuf,
     }
 
-    impl Home {
-        /// A `$HOME` with `~/.ssh/known_hosts` holding `body`.
-        fn with_known_hosts(body: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("agent2ssh-home-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(dir.join(".ssh")).unwrap();
-            std::fs::write(dir.join(".ssh").join("known_hosts"), body).unwrap();
-            Self { dir }
+    impl KnownHostsFile {
+        fn with_body(body: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("agent2ssh-known-hosts-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("known_hosts");
+            std::fs::write(&path, body).unwrap();
+            Self { path }
         }
 
-        fn known_hosts(&self) -> String {
-            std::fs::read_to_string(self.dir.join(".ssh").join("known_hosts")).unwrap()
+        fn forget(&self, host: &str, port: u16) -> usize {
+            remove_known_host_lines(&self.path, host, port).unwrap()
+        }
+
+        fn contents(&self) -> String {
+            std::fs::read_to_string(&self.path).unwrap()
         }
     }
 
-    impl Drop for Home {
+    impl Drop for KnownHostsFile {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.dir);
+            if let Some(dir) = self.path.parent() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
         }
-    }
-
-    /// `remove_system_known_host` resolves the file through `dirs::home_dir()`,
-    /// which reads the process environment, so these cases cannot run beside each
-    /// other — nor beside anything else that rewrites `HOME`. `serial` is what
-    /// keeps them honest instead of flaky.
-    fn with_home<R>(body: &str, run: impl FnOnce(&Home) -> R) -> R {
-        let home = Home::with_known_hosts(body);
-        let previous = std::env::var_os("HOME");
-        std::env::set_var("HOME", &home.dir);
-        let result = run(&home);
-        match previous {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        result
     }
 
     /// `[::1]:22` is a spelling no OpenSSH writes — it brackets only a
@@ -761,25 +780,22 @@ mod remove_system_known_host_matching {
     /// here: `forget` removes more spellings than the reference, and says so in
     /// the function's doc comment.
     #[test]
-    #[serial_test::serial]
     fn an_ipv6_literal_at_port_22_is_removed() {
         let body = line("[::1]:22") + &line("[::1]:2222") + &line("other.example");
-        let removed = with_home(&body, |home| {
-            let removed = remove_system_known_host("::1", 22).unwrap();
-            // Assert on the line, not on a substring: `[::1]:2222` contains
-            // `[::1]:22` and would make a `contains` check pass for the wrong
-            // reason.
-            let left = home.known_hosts();
-            assert!(
-                !left.lines().any(|l| l.starts_with("[::1]:22 ")),
-                "the [::1]:22 line survived: {left}"
-            );
-            assert!(
-                left.contains("[::1]:2222"),
-                "the other port must survive, left: {left}"
-            );
-            removed
-        });
+        let hosts = KnownHostsFile::with_body(&body);
+        let removed = hosts.forget("::1", 22);
+        // Assert on the line, not on a substring: `[::1]:2222` contains
+        // `[::1]:22` and would make a `contains` check pass for the wrong
+        // reason.
+        let left = hosts.contents();
+        assert!(
+            !left.lines().any(|l| l.starts_with("[::1]:22 ")),
+            "the [::1]:22 line survived: {left}"
+        );
+        assert!(
+            left.contains("[::1]:2222"),
+            "the other port must survive, left: {left}"
+        );
         assert_eq!(removed, 1, "one line matched, not zero");
     }
 
@@ -788,22 +804,18 @@ mod remove_system_known_host_matching {
     /// beside them has to stay, which is what keeps this from becoming "match
     /// any line mentioning the host".
     #[test]
-    #[serial_test::serial]
     fn other_spellings_of_the_same_endpoint_are_removed() {
         let body = line("[example.internal]:22")
             + &line("example.internal:22")
             + &line("mixed.example,example.internal")
             + &line("[example.internal]:2222");
-        let removed = with_home(&body, |home| {
-            let removed = remove_system_known_host("example.internal", 22).unwrap();
-            let left = home.known_hosts();
-            assert_eq!(
-                left,
-                line("[example.internal]:2222"),
-                "only the [example.internal]:2222 line may survive"
-            );
-            removed
-        });
+        let hosts = KnownHostsFile::with_body(&body);
+        let removed = hosts.forget("example.internal", 22);
+        assert_eq!(
+            hosts.contents(),
+            line("[example.internal]:2222"),
+            "only the [example.internal]:2222 line may survive"
+        );
         assert_eq!(removed, 3, "three lines name this endpoint");
     }
 
@@ -820,19 +832,15 @@ mod remove_system_known_host_matching {
     /// comparing `split_host_port(host_field)` against `(host_name, port)` — the
     /// parse `the_address_forms_this_file_must_handle` already pins.
     #[test]
-    #[serial_test::serial]
     fn forgetting_one_port_leaves_the_other_port_alone() {
         let body = line("example.internal") + &line("[example.internal]:2222");
-        let removed = with_home(&body, |home| {
-            let removed = remove_system_known_host("example.internal", 2222).unwrap();
-            let left = home.known_hosts();
-            assert_eq!(
-                left,
-                line("example.internal"),
-                "forgetting :2222 must leave the :22 line byte-identical"
-            );
-            removed
-        });
+        let hosts = KnownHostsFile::with_body(&body);
+        let removed = hosts.forget("example.internal", 2222);
+        assert_eq!(
+            hosts.contents(),
+            line("example.internal"),
+            "forgetting :2222 must leave the :22 line byte-identical"
+        );
         assert_eq!(removed, 1);
     }
 
@@ -843,18 +851,11 @@ mod remove_system_known_host_matching {
     /// cannot see it". Today both are `Ok(0)` and the CLI prints the idempotent
     /// miss line, which is true and useless.
     #[test]
-    #[serial_test::serial]
     fn a_hashed_entry_is_reported_as_unmatched_rather_than_removed() {
         let hashed = "|1|F1e1Ke1yqYqYqYqYqYqYqY=|AbCdEfGhIjKlMnOpQrStUvWxYz0123456789=\n";
-        let removed = with_home(hashed, |home| {
-            let removed = remove_system_known_host("example.internal", 22).unwrap();
-            assert_eq!(
-                home.known_hosts(),
-                hashed,
-                "a hashed line must be left alone"
-            );
-            removed
-        });
+        let hosts = KnownHostsFile::with_body(hashed);
+        let removed = hosts.forget("example.internal", 22);
+        assert_eq!(hosts.contents(), hashed, "a hashed line must be left alone");
         assert_eq!(removed, 0);
     }
 
