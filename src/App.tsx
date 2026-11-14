@@ -1184,19 +1184,21 @@ export default function App() {
             );
           })}
         </nav>
-        <div className={cn("w-full", sidebarCollapsed && "hidden")}>
+        {/* Bottom tool area: connectivity entry + command palette, both pinned
+            to the sidebar's foot. The ping results live in PingPanel's popover,
+            not inline — the old list grew with the host count and pushed the
+            palette button out of the viewport. */}
+        <div className={cn("mt-auto flex w-full flex-col gap-0.5", sidebarCollapsed && "hidden")}>
           <PingPanel hosts={hosts} />
-        </div>
-        {!sidebarCollapsed && (
           <button
             type="button"
             onClick={() => setCommandPaletteOpen(true)}
-            className="mt-auto flex items-center justify-between rounded-lg px-2.5 py-1.5 text-[13px] text-sidebar-foreground/70 transition-colors hover:bg-white/5 hover:text-sidebar-foreground"
+            className="flex items-center justify-between rounded-lg px-2.5 py-1.5 text-[13px] text-sidebar-foreground/70 transition-colors hover:bg-white/5 hover:text-sidebar-foreground"
           >
             <span>{t("Command palette")}</span>
             <span className="font-mono text-[11px] text-faint">⌘K</span>
           </button>
-        )}
+        </div>
       </aside>
 
       <section
