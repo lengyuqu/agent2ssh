@@ -960,7 +960,10 @@ mod windows_shells {
     }
 
     fn child_command_line(pid: u32) -> Option<String> {
-        let mut system = sysinfo::System::new();
+        // `sysinfo` 0.40 made the constructor fallible; a test helper that
+        // cannot read the table reports "no command line" and lets the caller's
+        // own timeout produce the failure.
+        let mut system = sysinfo::System::new().ok()?;
         let pid = sysinfo::Pid::from_u32(pid);
         for _ in 0..20 {
             // The default refresh kind does not collect the command line; the

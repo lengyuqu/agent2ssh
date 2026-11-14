@@ -67,7 +67,10 @@ fn write_marker(path: &Path) -> String {
 
 fn child_running(pid: u32) -> bool {
     let pid = sysinfo::Pid::from_u32(pid);
-    let mut system = sysinfo::System::new();
+    // `sysinfo` 0.40 made the constructor fallible. Answering "not running"
+    // would let the assertions below pass for the wrong reason, so a table that
+    // cannot be built fails the test instead.
+    let mut system = sysinfo::System::new().expect("sysinfo could not build a process table");
     system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
     system
         .process(pid)

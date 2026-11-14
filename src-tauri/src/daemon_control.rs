@@ -280,9 +280,19 @@ pub fn process_is_alive(pid: u32) -> bool {
     daemon_process_start_time(pid).is_some()
 }
 
+/// `sysinfo` 0.40 made `System::new()` fallible. No caller here wants a partial
+/// view: each one asks "is this PID the process I recorded", and a table that
+/// cannot be built is one more *cannot observe* — never evidence of exit. The
+/// `None` is folded into the unknown state each caller already has, so a
+/// platform where sysinfo cannot initialise still refuses to signal rather
+/// than treating the PID as gone.
+fn new_process_system() -> Option<sysinfo::System> {
+    sysinfo::System::new().ok()
+}
+
 fn daemon_process_start_time(pid: u32) -> Option<u64> {
     let pid = sysinfo::Pid::from_u32(pid);
-    let mut system = sysinfo::System::new();
+    let mut system = new_process_system()?;
     // Linux truncates process names to 15 bytes, so the daemon's full name
     // must also be read from its command line for the identity check below.
     system.refresh_processes_specifics(
@@ -437,7 +447,7 @@ fn expected_config_dir() -> Option<String> {
 #[cfg(any(not(target_os = "macos"), test))]
 fn observable_live_start_time(pid: u32) -> Option<u64> {
     let sys_pid = sysinfo::Pid::from_u32(pid);
-    let mut system = sysinfo::System::new();
+    let mut system = new_process_system()?;
     system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
     system.process(sys_pid).and_then(|process| {
         (process.status() != sysinfo::ProcessStatus::Zombie && process.start_time() != 0)
@@ -543,7 +553,9 @@ pub fn daemon_pid_state(pid: u32) -> DaemonPidState {
         return DaemonPidState::RunningUnhealthy;
     }
     let sys_pid = sysinfo::Pid::from_u32(pid);
-    let mut system = sysinfo::System::new();
+    let Some(mut system) = new_process_system() else {
+        return DaemonPidState::Unverified;
+    };
     system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
     match system.process(sys_pid) {
         Some(process) if process.status() == sysinfo::ProcessStatus::Zombie => {
@@ -747,7 +759,11 @@ pub fn observe_pid(pid: u32) -> PidObservation {
         return PidObservation::Absent;
     }
     let sys_pid = sysinfo::Pid::from_u32(pid);
-    let mut system = sysinfo::System::new();
+    let Some(mut system) = new_process_system() else {
+        return PidObservation::Unknown {
+            reason: "the process table could not be initialized".to_string(),
+        };
+    };
     system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
     if let Some(process) = system.process(sys_pid) {
         if process.status() == sysinfo::ProcessStatus::Zombie {
@@ -1319,7 +1335,7 @@ fn daemon_owner_path() -> Result<PathBuf> {
 
 fn process_start_time(pid: u32) -> Option<u64> {
     let pid = sysinfo::Pid::from_u32(pid);
-    let mut system = sysinfo::System::new();
+    let mut system = new_process_system()?;
     system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
     system.process(pid).map(|process| process.start_time())
 }
@@ -1760,7 +1776,9 @@ fn terminate_for_stop(bound: Option<&BoundProcess>, pid: u32, expected_start: u6
 #[cfg(any(not(target_os = "macos"), test))]
 fn observe_process(pid: u32, expected_start: u64) -> ProcessObservation {
     let sys_pid = sysinfo::Pid::from_u32(pid);
-    let mut system = sysinfo::System::new();
+    let Some(mut system) = new_process_system() else {
+        return ProcessObservation::Unknown;
+    };
     system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
     let snapshot = system.process(sys_pid).map(|process| {
         (
@@ -1797,7 +1815,9 @@ fn wait_for_exit(pid: u32, expected_start: u64, within: Duration) -> ProcessObse
 #[cfg(all(not(target_os = "macos"), not(windows)))]
 fn signal_daemon(pid: u32, expected_start: u64, force: bool) -> Result<()> {
     let sys_pid = sysinfo::Pid::from_u32(pid);
-    let mut system = sysinfo::System::new();
+    let Some(mut system) = new_process_system() else {
+        return Ok(());
+    };
     system.refresh_processes_specifics(
         sysinfo::ProcessesToUpdate::Some(&[sys_pid]),
         true,

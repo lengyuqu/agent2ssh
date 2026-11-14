@@ -535,8 +535,9 @@ pub fn export_diagnostic_bundle() -> Result<PathBuf> {
 pub fn generate_system_report() -> Result<serde_json::Value> {
     let config_dir = config_dir()?;
 
-    // 1. Local system metrics via sysinfo
-    let mut sys = sysinfo::System::new_all();
+    // 1. Local system metrics via sysinfo. 0.40 made the constructors fallible;
+    // the report has no useful shape without them, so the failure surfaces.
+    let mut sys = sysinfo::System::new_all().context("failed to initialize system metrics")?;
     sys.refresh_all();
 
     let total_memory_gb = sys.total_memory() as f64 / 1_073_741_824.0;
@@ -550,7 +551,7 @@ pub fn generate_system_report() -> Result<serde_json::Value> {
         .map(|cpu| {
             json!({
                 "name": cpu.name().to_string(),
-                "usage_pct": cpu.cpu_usage(),
+                "usage_pct": cpu.usage(),
                 "frequency_mhz": cpu.frequency(),
             })
         })
@@ -623,7 +624,7 @@ pub fn generate_system_report() -> Result<serde_json::Value> {
             "platform": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
             "hostname": sysinfo::System::host_name().unwrap_or_default(),
-            "uptime_secs": sysinfo::System::uptime(),
+            "uptime_secs": sysinfo::System::uptime().unwrap_or_default(),
             "cpu": {
                 "core_count": sys.cpus().len(),
                 "global_usage_pct": sys.global_cpu_usage(),

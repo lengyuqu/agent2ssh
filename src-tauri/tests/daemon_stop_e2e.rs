@@ -738,7 +738,13 @@ fn shutdown_reaps_a_running_local_command_and_its_child() {
     }
     stopped.expect("stop during a local command");
     let alive = |pid: i32| {
-        let mut system = sysinfo::System::new();
+        // `sysinfo` 0.40 made the constructor fallible. Reporting "not alive"
+        // would let the wait below succeed without having observed anything, so
+        // an unbuildable table is treated as still running and the wait times
+        // out instead.
+        let Ok(mut system) = sysinfo::System::new() else {
+            return true;
+        };
         let sys_pid = sysinfo::Pid::from_u32(pid as u32);
         system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sys_pid]), true);
         system

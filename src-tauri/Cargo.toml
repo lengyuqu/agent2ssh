@@ -5,10 +5,12 @@ description = "SSH capability layer for general-purpose agents"
 authors = ["agent2ssh"]
 license = "MIT"
 edition = "2021"
-# Both russh 0.65 and this crate require 1.89: `store.rs` calls
-# `File::lock_shared`, which became stable there. `clippy::incompatible_msrv`
-# enforces the declared floor for this crate's own code.
-rust-version = "1.89"
+# The floor was 1.89 for `store.rs`'s `File::lock_shared`; sysinfo 0.40 is what
+# sets it now (the tauri plugins and tree-sitter want 1.90, the GTK pin would
+# want 1.92, sysinfo 0.40 wants 1.95). `clippy::incompatible_msrv` enforces the
+# declared floor for this crate's own code, so a dependency that demands more
+# shows up as a compile error here instead of on someone else's machine.
+rust-version = "1.95"
 default-run = "agent2ssh-app"
 
 [lib]
@@ -122,7 +124,7 @@ futures-util = { version = "0.3", optional = true }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optional = true }
 fs2 = "0.4"
-sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 # App-managed credential encryption (K1, master-password model): Argon2id KDF +
 # AES-256-GCM. No OS keychain, no plaintext key on disk.
 aes-gcm = "0.10"
@@ -143,7 +145,7 @@ sha1 = "0.10"
 # extraction that is resilient to flag reordering, wrapper stacking, and
 # alias variation — unlike glob/substring matching which can be trivially
 # bypassed (e.g. "docker system prune -a" != "docker system prune -af").
-tree-sitter = "0.25"
+tree-sitter = "0.27"
 tree-sitter-bash = "0.25"
 # Structured error handling (P1 #4): thiserror for ergonomic error enums,
 # regex for redaction pattern validation and NoExpand (P1 #7).
@@ -154,7 +156,7 @@ tempfile = "3"
 # Windows raw-mode (console API) for byte-stream stdin/stdout bridging.
 libc = "0.2"
 # B24/font: System font enumeration for terminal font selection.
-fontdb = "0.23"
+fontdb = "0.24"
 
 # GHSA-wrw7-89jp-8q8g: `glib` 0.18.x's `VariantStrIter` iterators are unsound
 # (a `&`-pointed out-argument the optimiser now discards), fixed in 0.20.
@@ -237,8 +239,8 @@ axum = "0.7"
 tower = { version = "0.4", features = ["util"] }
 http-body-util = "0.1"
 serde_json = "1"
-serial_test = "3"
-ctor = "0.8"
+serial_test = "4"
+ctor = "1"
 
 # RSA key generation is pure big-integer arithmetic, and `num-bigint-dig` is
 # roughly two orders of magnitude slower when built without optimisation: the
