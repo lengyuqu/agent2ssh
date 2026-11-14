@@ -2936,6 +2936,53 @@ mod tests {
         let _ = child.wait();
     }
 
+    /// The remaining half of the reuse window, pinned as it stands today: a
+    /// PID replaced by **another daemon-named image** inside the same whole
+    /// second as the recorded start still binds, because the seconds-resolution
+    /// start time cannot tell the two objects apart (`sysinfo` truncates on
+    /// every platform while `GetProcessTimes` has 100 ns resolution). This is
+    /// #24's documented boundary, not a defect to fix here: when #22's
+    /// versioned instance record carries the 100 ns creation time, the
+    /// comparison inside `bound_identity_matches` must start failing for two
+    /// distinct processes — and this test is the one that should turn red
+    /// then, so the migration flips it deliberately rather than silently.
+    #[cfg(windows)]
+    #[test]
+    fn a_same_second_daemon_image_reuse_still_binds_the_replacement() {
+        // Two back-to-back stand-ins almost always share the whole second;
+        // retry across a second boundary instead of assuming the race outcome.
+        let mut first;
+        let mut second;
+        let recorded = loop {
+            first = spawn_sleeper();
+            second = spawn_sleeper();
+            let starts = (creation_time_of(first.id()), creation_time_of(second.id()));
+            if let (Some(a), Some(b)) = starts {
+                if a == b {
+                    break a;
+                }
+            }
+            for child in [&mut first, &mut second] {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        };
+        assert_eq!(
+            creation_time_of(second.id()),
+            Some(recorded),
+            "the retry loop guarantees a same-second pair"
+        );
+        assert!(
+            BoundProcess::open(second.id(), recorded).is_some(),
+            "a same-second daemon-named replacement binds today: the seconds-resolution \
+             record cannot distinguish it, and #22's 100 ns creation time is the fix"
+        );
+        let _ = first.kill();
+        let _ = second.kill();
+        let _ = first.wait();
+        let _ = second.wait();
+    }
+
     /// The acceptance rules themselves, stated without an OS: the refusal
     /// matrix every handle must pass through, testable on every platform.
     #[test]
