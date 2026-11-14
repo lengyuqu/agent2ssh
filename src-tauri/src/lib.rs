@@ -68,6 +68,7 @@ pub mod types;
 pub mod url_safety;
 pub mod wayland;
 pub mod webdav_sync;
+pub mod win_proc;
 pub mod ws_drain;
 
 #[cfg(feature = "tauri")]

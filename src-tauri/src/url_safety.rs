@@ -64,8 +64,9 @@ pub fn open_external_url(url: &str) -> Result<()> {
     {
         // Invoke the URL protocol handler directly. Routing through
         // `cmd /C start` would make shell metacharacters in an otherwise
-        // valid http(s) URL observable to cmd.exe.
-        std::process::Command::new("rundll32.exe")
+        // valid http(s) URL observable to cmd.exe. CREATE_NO_WINDOW keeps the
+        // helper itself from flashing a console; the browser window still opens.
+        crate::win_proc::no_window(std::process::Command::new("rundll32.exe"))
             .args(["url.dll,FileProtocolHandler", url])
             .spawn()
             .map_err(|e| anyhow!("failed to open URL: {e}"))?;

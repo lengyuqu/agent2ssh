@@ -190,7 +190,7 @@ fn current_process_path_contains(dir: &Path) -> bool {
 
 #[cfg(windows)]
 fn read_user_path_value() -> Result<String, String> {
-    let output = Command::new("reg.exe")
+    let output = crate::win_proc::no_window(Command::new("reg.exe"))
         .args(["query", "HKCU\\Environment", "/v", "Path"])
         .output()
         .map_err(|e| format!("failed to query user PATH: {e}"))?;
@@ -230,7 +230,7 @@ fn read_user_path_value() -> Result<String, String> {
 
 #[cfg(windows)]
 fn write_user_path_value(path_value: &str) -> Result<(), String> {
-    let status = Command::new("reg.exe")
+    let status = crate::win_proc::no_window(Command::new("reg.exe"))
         .args([
             "add",
             "HKCU\\Environment",
@@ -1615,20 +1615,34 @@ pub fn redact_for_clipboard(text: String) -> String {
 /// working: `all` defaults to false (running containers only) and `runtime`
 /// defaults to auto-detection across every installed runtime.
 #[tauri::command]
-pub fn discover_containers(
+pub async fn discover_containers(
     all: Option<bool>,
     runtime: Option<String>,
 ) -> Result<Vec<crate::container_discovery::ContainerDiscoveryTarget>, String> {
-    crate::container_discovery::discover_containers(all.unwrap_or(false), runtime.as_deref())
-        .map_err(|e| e.to_string())
+    // Discovery shells out to runtime CLIs serially — `wslc ps` cold-starts WSL
+    // and blocked for 3.2s measured on a machine with WSL but no containers. A
+    // sync command runs on the main thread, so the whole window froze for the
+    // probe duration every time the Containers panel mounted. Off-thread it is.
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::container_discovery::discover_containers(all.unwrap_or(false), runtime.as_deref())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("container discovery task failed: {e}"))?
 }
 
 /// State of every container runtime this build knows about on this host
 /// (supported / installed / selected), so the UI can explain an empty list
 /// instead of showing nothing.
 #[tauri::command]
-pub fn container_runtimes() -> Vec<crate::container_runtime::ContainerRuntimeInfo> {
-    crate::container_runtime::infos()
+pub async fn container_runtimes(
+) -> Result<Vec<crate::container_runtime::ContainerRuntimeInfo>, String> {
+    // Same main-thread rule as `discover_containers`: the runtime table walks
+    // binaries and (for runtimes with a service) probes them under a 5s
+    // timeout, so it must not run on the main thread either.
+    tauri::async_runtime::spawn_blocking(crate::container_runtime::infos)
+        .await
+        .map_err(|e| format!("container runtime probe task failed: {e}"))
 }
 
 /// Start a container runtime's background service from the desktop.
@@ -1638,11 +1652,17 @@ pub fn container_runtimes() -> Vec<crate::container_runtime::ContainerRuntimeInf
 /// command themselves. This wraps the same core function the CLI and the MCP tool
 /// call, so the three cannot drift.
 #[tauri::command]
-pub fn containers_start_service(
+pub async fn containers_start_service(
     runtime: Option<String>,
 ) -> Result<crate::container_runtime::ServiceStartOutcome, String> {
-    crate::container_runtime::start_local_service(runtime.as_deref())
-        .map_err(|error| error.to_string())
+    // Service start may legitimately block up to SERVICE_START_TIMEOUT (60s);
+    // on the main thread that is a one-minute window freeze.
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::container_runtime::start_local_service(runtime.as_deref())
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|e| format!("container service start task failed: {e}"))?
 }
 
 /// Open a discovered container target in the user's terminal.

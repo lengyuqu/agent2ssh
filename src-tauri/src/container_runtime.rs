@@ -367,7 +367,7 @@ fn autostart_enabled() -> bool {
 /// it exited within `timeout`; `None` when it could not be spawned or had to be
 /// killed for running over.
 fn run_to_exit(binary: &Path, args: &[&str], timeout: Duration) -> Option<bool> {
-    let mut child = Command::new(binary)
+    let mut child = crate::win_proc::no_window(Command::new(binary))
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

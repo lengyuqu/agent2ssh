@@ -347,7 +347,9 @@ fn resolve_kubectl() -> Result<std::path::PathBuf> {
 /// WSL session on first use, and to Apple's `container`, which talks to a
 /// system service.
 fn run_capture(binary: &std::path::Path, args: &[&str]) -> Result<String> {
-    let child = Command::new(binary)
+    // CREATE_NO_WINDOW: the runtime CLIs are console programs; a bare spawn
+    // from the desktop app allocates a visible console per probe.
+    let child = crate::win_proc::no_window(Command::new(binary))
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -404,7 +406,7 @@ fn kill_process_by_pid(pid: u32) {
     }
     #[cfg(windows)]
     {
-        let _ = Command::new("taskkill")
+        let _ = crate::win_proc::no_window(Command::new("taskkill"))
             .args(["/PID", &pid.to_string(), "/F"])
             .output();
     }

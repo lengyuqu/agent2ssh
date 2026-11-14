@@ -569,7 +569,7 @@ fn vs_install_path_from_vswhere(vs_root: &Path) -> Option<PathBuf> {
     if !vswhere.is_file() {
         return None;
     }
-    let output = Command::new(&vswhere)
+    let output = crate::win_proc::no_window(Command::new(&vswhere))
         .args([
             "-latest",
             "-products",
@@ -1159,7 +1159,7 @@ pub(crate) fn kill_process_tree(child: &mut Child) {
     // `/T` walks the child tree, `/F` forces it. A Job Object would be the more
     // precise tool but has to be assigned at spawn time; this is the same
     // pid-based form the container path already uses.
-    let _ = Command::new("taskkill")
+    let _ = crate::win_proc::no_window(Command::new("taskkill"))
         .args(["/T", "/F", "/PID", &child.id().to_string()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())

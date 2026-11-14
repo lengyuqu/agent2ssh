@@ -437,7 +437,7 @@ fn restrict_file_to_owner_windows(path: &std::path::Path) -> Result<()> {
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("path is not valid UTF-8: {}", path.display()))?;
 
-    let output = Command::new("icacls")
+    let output = crate::win_proc::no_window(Command::new("icacls"))
         .arg(path_str)
         .arg("/inheritance:r")
         .arg("/grant:r")
@@ -482,9 +482,11 @@ fn resolve_windows_user_principal() -> Result<String> {
         }
     }
 
-    // Env var missing or contains unsafe chars — ask the OS via `whoami`.
+    // Env var missing or unsafe — ask the OS via `whoami`.
     // `whoami` returns `DOMAIN\username` (or just `username` in workgroup).
-    let output = std::process::Command::new("whoami")
+    // CREATE_NO_WINDOW: this runs during store initialization on the desktop;
+    // a bare spawn allocates a visible console per call.
+    let output = crate::win_proc::no_window(std::process::Command::new("whoami"))
         .output()
         .context("failed to invoke whoami for ACL principal lookup")?;
     if output.status.success() {
