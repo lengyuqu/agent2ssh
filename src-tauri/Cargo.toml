@@ -77,10 +77,18 @@ reqwest = { version = "0.12", features = ["json", "blocking"] }
 # Key generation. The private half is written as traditional PKCS#1 PEM because
 # that is the encoding `rsa` itself produces; russh reads it like any other
 # format, so the old WinCNG constraint that forced this shape is gone but the
-# shape is harmless. `rsa` stays on 0.9 for the encoder API this path uses;
-# russh brings its own `rsa 0.10.0-rc` for signing, and the two majors coexist
-# without exchanging types, so that duplication is deliberate.
-rsa = "0.9"
+# shape is harmless.
+#
+# The pin matches what `russh` already requires (`rsa = "=0.10.0-rc.18"`,
+# `pkcs1 = "=0.8.0-rc.4"`, both exact, opened by its `rsa` feature). Declaring
+# 0.9 here instead — the last stable — would put a second `rsa` in the graph,
+# and with it a second big-integer implementation (`num-bigint-dig` beside
+# `crypto-bigint`). Moving to 0.10.0 *stable* is not available yet: it asks for
+# `pkcs1 = ^0.8` → 0.8.0, while russh's exact `=0.8.0-rc.4` must unify with it
+# (same 0.8.0, so cargo cannot keep both) and fails to resolve. That was
+# measured, not assumed. When russh drops the release candidate, this line
+# becomes `rsa = "0.10"` and the rc-era API may need one more pass.
+rsa = "=0.10.0-rc.18"
 # Ed25519 key generation. Replaces `ssh-key`, whose exact pins on RustCrypto
 # pre-releases could not coexist with the transport (see
 # docs/plans/russh-migration.md §5). Only the public-key derivation is needed
@@ -99,10 +107,10 @@ ed25519-dalek = "3"
 # the transport already does: `russh 0.65` depends on sha1 0.11, sha2 0.11,
 # hmac 0.13, aes 0.9 and digest 0.11. Both generations would compile (digest
 # traits do not cross majors, so nothing forces a choice), but the older one
-# would be a second copy of primitives the binary already contains, and any
-# later `rsa` alignment would stop at a type mismatch. `rand_core` is the one
-# exception and stays 0.6: `rsa 0.9` requires that trait, and `rsa 0.10` cannot
-# be taken while `russh` pins `pkcs1 = 0.8.0-rc.4` (see that pin below).
+# would be a second copy of primitives the binary already contains. `rand_core`
+# follows the same rule: `rsa` 0.10 asks for its 0.10 trait generation, so the
+# adapter in `keys.rs` implements `TryRng`/`TryCryptoRng` rather than 0.6's
+# `RngCore`.
 aes = "0.9"
 md-5 = "0.11"
 # The signature trait, for the local-key signer behind RSA certificates.
@@ -111,19 +119,21 @@ md-5 = "0.11"
 signature = "3"
 russh = { version = "0.65.1", default-features = false, features = ["rsa", "ring"] }
 russh-sftp = { version = "2", default-features = false }
-# `pkcs1` is still pinned to the exact release candidate `russh` declares, and
-# has to be: 0.8.0-rc.5 re-generalised `RsaPrivateKey<B>` and dropped the API
-# this crate's PEM writer calls, so a plain `cargo update` would drift into a
-# build that no longer compiles. `pkcs5` is only pinned to the 0.8 line now;
-# russh 0.64 accepts the finished 0.8.1, which is why the old `=0.8.0-rc.13`
-# pin is gone.
+# `pkcs1` mirrors the exact release candidate `russh` requires. It is not a
+# choice we have: 0.8.0-rc.4 and the finished 0.8.0 are the same semver version,
+# so cargo must unify them and the exact pin wins — declaring `0.8.0` here makes
+# the graph unresolvable ("failed to select a version for pkcs1"), not newer.
+# The finished 0.8.0 and `rsa 0.10.0` arrive together, when russh stops asking
+# for release candidates. `pkcs5` is only pinned to the 0.8 line; russh accepts
+# the finished 0.8.1, which is why the old `=0.8.0-rc.13` pin is gone.
 pkcs1 = { version = "=0.8.0-rc.4", default-features = false }
 pkcs5 = { version = "0.8", default-features = false }
-# Traits only: `rsa` requires a `CryptoRngCore`, and the adapter in `keys.rs`
-# fulfils it from the crate's existing `fill_entropy`. The `getrandom` feature is
-# deliberately left off so this does not add a second entropy source — nor a
-# second `getrandom` major version next to the 0.4 this crate already uses.
-rand_core = "0.6"
+# Traits only, and the trait generation has to match `rsa`: the adapter in
+# `keys.rs` implements `TryRng` + `TryCryptoRng` with `Error = Infallible`, which
+# is what 0.10 derives `Rng` and `CryptoRng` from, and it draws from the crate's
+# existing `fill_entropy` rather than a second entropy source. 0.10 has no
+# feature flags at all, so there is no `getrandom` feature to leave off.
+rand_core = "0.10"
 getrandom = "0.4"
 hmac = "0.13"
 sha2 = "0.11"
@@ -249,16 +259,3 @@ http-body-util = "0.1"
 serde_json = "1"
 serial_test = "4"
 ctor = "1"
-
-# RSA key generation is pure big-integer arithmetic, and `num-bigint-dig` is
-# roughly two orders of magnitude slower when built without optimisation: the
-# 3072-bit key the key-generation tests produce took long enough to look like a
-# hang, turning a unit test into a timeout. Optimising this one crate keeps the
-# debug profile's fast builds for everything else while making the tests usable.
-[profile.dev.package.num-bigint-dig]
-opt-level = 3
-
-# Same reasoning for the test profile, which `cargo test` uses for dependencies
-# by default only at `opt-level = 0`.
-[profile.test.package.num-bigint-dig]
-opt-level = 3

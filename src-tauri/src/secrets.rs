@@ -1852,7 +1852,7 @@ mod tests {
             let nonce_bytes = random_bytes::<12>().unwrap();
             let cipher = Aes256Gcm::new((&key).into());
             let ct = cipher
-                .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_ref())
+                .encrypt(&Nonce::from(nonce_bytes), plaintext.as_ref())
                 .unwrap();
             (nonce_bytes.to_vec(), ct)
         };

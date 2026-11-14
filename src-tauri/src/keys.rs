@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use base64::Engine as _;
-use rand_core::{CryptoRng, RngCore};
+use rand_core::{TryCryptoRng, TryRng};
 use rsa::pkcs1::{EncodeRsaPrivateKey, LineEnding as PemLineEnding};
 use rsa::traits::PublicKeyParts;
 use rsa::RsaPrivateKey;
@@ -290,35 +290,37 @@ impl EntropyRng {
     }
 }
 
-impl RngCore for EntropyRng {
-    fn next_u32(&mut self) -> u32 {
+/// `rand_core` 0.10 asks for the fallible `TryRng` instead of `RngCore`, and
+/// derives the infallible traits from it: `Rng` applies to any `TryRng` whose
+/// error is `Infallible`, `CryptoRng` to any `TryCryptoRng` that also is one.
+///
+/// The source here either fills the buffer or panics (see `read`), so nothing
+/// is fallible from this side and `Infallible` is the honest error type — 0.6
+/// forced a hand-written `try_fill_bytes` that could only ever return `Ok`,
+/// because constructing its `Error` would have pulled in a second `getrandom`
+/// major. The panic is caught by [`generate_rsa_pair`] anyway.
+impl TryRng for EntropyRng {
+    type Error = core::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> std::result::Result<u32, Self::Error> {
         let mut bytes = [0u8; 4];
         self.read(&mut bytes);
-        u32::from_le_bytes(bytes)
+        Ok(u32::from_le_bytes(bytes))
     }
 
-    fn next_u64(&mut self) -> u64 {
+    fn try_next_u64(&mut self) -> std::result::Result<u64, Self::Error> {
         let mut bytes = [0u8; 8];
         self.read(&mut bytes);
-        u64::from_le_bytes(bytes)
+        Ok(u64::from_le_bytes(bytes))
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> std::result::Result<(), Self::Error> {
         self.read(dest);
-    }
-
-    /// Delegates to [`RngCore::fill_bytes`], which the trait explicitly allows.
-    ///
-    /// A `rand_core::Error` cannot be built here without pulling in a second
-    /// `getrandom` major version, and inventing one would hide the reason the
-    /// source gave. The panic is caught by [`generate_rsa_pair`] anyway.
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> std::result::Result<(), rand_core::Error> {
-        self.fill_bytes(dest);
         Ok(())
     }
 }
 
-impl CryptoRng for EntropyRng {}
+impl TryCryptoRng for EntropyRng {}
 
 /// The message inside a panic payload, for reporting a caught panic.
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
@@ -426,8 +428,10 @@ fn generate_rsa_pair(bits: usize, comment: &str) -> Result<GeneratedKeyPair> {
 fn encode_ssh_rsa_public_key(key: &RsaPrivateKey, comment: &str) -> String {
     let mut blob = Vec::new();
     push_ssh_string(&mut blob, b"ssh-rsa");
-    push_ssh_mpint(&mut blob, &key.e().to_bytes_be());
-    push_ssh_mpint(&mut blob, &key.n().to_bytes_be());
+    // `BoxedUint` in crypto-bigint 0.7 carries no `to_bytes_be`; the trimmed
+    // form is the same minimal big-endian magnitude `num-bigint` produced.
+    push_ssh_mpint(&mut blob, &key.e().to_be_bytes_trimmed_vartime());
+    push_ssh_mpint(&mut blob, &key.n().to_be_bytes_trimmed_vartime());
 
     let encoded = base64::engine::general_purpose::STANDARD.encode(&blob);
     if comment.is_empty() {
@@ -807,11 +811,11 @@ mod tests {
             };
             assert_eq!(
                 strip_leading_zeros(&exponent),
-                strip_leading_zeros(&private.e().to_bytes_be())
+                strip_leading_zeros(&private.e().to_be_bytes_trimmed_vartime())
             );
             assert_eq!(
                 strip_leading_zeros(&modulus),
-                strip_leading_zeros(&private.n().to_bytes_be())
+                strip_leading_zeros(&private.n().to_be_bytes_trimmed_vartime())
             );
         });
     }
@@ -847,11 +851,12 @@ mod tests {
     fn entropy_failure_aborts_instead_of_returning_unusable_bytes() {
         let mut rng = EntropyRng::with_source(failing_entropy);
 
-        // `RngCore::fill_bytes` cannot report an error, so the adapter aborts.
+        // `Rng::fill_bytes` cannot report an error, so the adapter aborts.
         // Returning zeroed bytes instead would be worse than a failure: a fixed
         // candidate makes the prime search spin forever, and a derivable one
         // would be a broken key.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            use rand_core::Rng as _;
             rng.fill_bytes(&mut [0u8; 8])
         }));
         assert!(outcome.is_err(), "a failed read must not return bytes");
