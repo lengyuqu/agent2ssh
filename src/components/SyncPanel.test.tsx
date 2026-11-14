@@ -225,6 +225,33 @@ describe("SyncPanel encrypted upload settings", () => {
     expect(screen.queryByText(/Cloud backup restored/)).toBeNull();
   });
 
+  it("persists the current form before testing the connection", async () => {
+    // Regression: the backend test reads the *saved* config, so a freshly
+    // typed URL that was never saved used to fail with "WebDAV URL is
+    // required" without any request being made.
+    await renderPanel();
+    fireEvent.change(screen.getByLabelText("WebDAV URL"), {
+      target: { value: "https://unsaved.example/dav" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+
+    await waitFor(() => expect(mockApi.testWebDavSync).toHaveBeenCalledTimes(1));
+    expect(mockApi.setWebDavSyncConfig).toHaveBeenCalledTimes(1);
+    expect(mockApi.setWebDavSyncConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ url: "https://unsaved.example/dav" })
+    );
+    expect(await screen.findByText("WebDAV connection test completed.")).toBeTruthy();
+  });
+
+  it("does not test the connection when persisting the form fails", async () => {
+    mockApi.setWebDavSyncConfig.mockRejectedValue(new Error("save rejected"));
+    await renderPanel();
+    fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
+
+    await waitFor(() => expect(screen.getByText("Error: save rejected")).toBeTruthy());
+    expect(mockApi.testWebDavSync).not.toHaveBeenCalled();
+  });
+
   it("blocks recovery with missing password or unsaved settings", async () => {
     mockApi.getWebDavSyncConfig.mockResolvedValue({ ...configured, syncPasswordConfigured: false });
     const view = await renderPanel();

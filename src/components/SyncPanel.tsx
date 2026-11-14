@@ -118,9 +118,11 @@ function SyncPanel({ onRestored }: { onRestored?: () => Promise<void> } = {}) {
     }
   }
 
-  async function save(event?: FormEvent) {
-    event?.preventDefault();
-    setBusy("save");
+  // Shared by Save and Test connection: persists the current form values and
+  // returns the error on failure (null on success). Status refresh and success
+  // toasts stay with the caller — L2-66 requires a failed status read after a
+  // successful save to surface as an error, not as the green "saved" toast.
+  async function persistConfig(): Promise<unknown> {
     savingRef.current = true;
     formDirtyRef.current = false;
     try {
@@ -135,16 +137,34 @@ function SyncPanel({ onRestored }: { onRestored?: () => Promise<void> } = {}) {
       setForm(saved);
       setPassword("");
       setSyncPassword("");
-      setStatus(await api.getWebDavSyncStatus());
-      showToast("success", t("WebDAV sync settings saved."));
+      return null;
     } catch (err) {
       // T1-7: On save failure, mark the form as dirty so a subsequent
       // load doesn't overwrite the user's edits.
       formDirtyRef.current = true;
-      showToast("error", String(err));
-      reportError("sync-panel", "save webdav sync config failed", err);
+      return err;
     } finally {
       savingRef.current = false;
+    }
+  }
+
+  async function save(event?: FormEvent) {
+    event?.preventDefault();
+    setBusy("save");
+    const saveErr = await persistConfig();
+    if (saveErr !== null) {
+      showToast("error", String(saveErr));
+      reportError("sync-panel", "save webdav sync config failed", saveErr);
+      setBusy(null);
+      return;
+    }
+    try {
+      setStatus(await api.getWebDavSyncStatus());
+      showToast("success", t("WebDAV sync settings saved."));
+    } catch (statusErr) {
+      showToast("error", String(statusErr));
+      reportError("sync-panel", "refresh webdav sync status after save failed", statusErr);
+    } finally {
       setBusy(null);
     }
   }
@@ -179,6 +199,16 @@ function SyncPanel({ onRestored }: { onRestored?: () => Promise<void> } = {}) {
 
   async function testConnection() {
     setBusy("test");
+    // The backend test reads the *saved* configuration, not the form values,
+    // so persist the current form first; otherwise a freshly typed URL that
+    // was never saved fails with "WebDAV URL is required" without any request.
+    const saveErr = await persistConfig();
+    if (saveErr !== null) {
+      showToast("error", String(saveErr));
+      reportError("sync-panel", "save webdav sync config before test failed", saveErr);
+      setBusy(null);
+      return;
+    }
     try {
       const nextStatus = await api.testWebDavSync();
       setStatus(nextStatus);
