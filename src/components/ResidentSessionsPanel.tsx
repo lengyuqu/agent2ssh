@@ -1,5 +1,5 @@
 import { RefreshCw, Timer, XCircle } from "lucide-react";
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState  } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { ResidentSessionSummary } from "../types";
@@ -17,7 +17,7 @@ import { useToast } from "./ui/toast";
  * an inventory panel. The data lives in the daemon, so when the daemon is not
  * running the panel says that instead of rendering an empty list.
  */
-export default function ResidentSessionsPanel() {
+function ResidentSessionsPanel() {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [sessions, setSessions] = useState<ResidentSessionSummary[]>([]);
@@ -127,3 +127,5 @@ export default function ResidentSessionsPanel() {
     </Card>
   );
 }
+
+export default memo(ResidentSessionsPanel);

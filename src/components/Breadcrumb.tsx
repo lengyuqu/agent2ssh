@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { ChevronRight, type LucideIcon } from "lucide-react";
 import { useI18n } from "../i18n";
 
@@ -11,7 +12,7 @@ type Props = {
 
 /** V3-4: mesh navigation between related modules (Host→Exec, Host→Audit, Approvals→Exec, …),
  *  not a linear tab trail — there is no "back", just jumps to whatever else is relevant here. */
-export default function Breadcrumb({ current, related, onNavigate }: Props) {
+function Breadcrumb({ current, related, onNavigate }: Props) {
   const { t } = useI18n();
   if (related.length === 0) return null;
   return (
@@ -36,3 +37,5 @@ export default function Breadcrumb({ current, related, onNavigate }: Props) {
     </nav>
   );
 }
+
+export default memo(Breadcrumb);

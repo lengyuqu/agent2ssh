@@ -1,5 +1,5 @@
 import { Key, Plus, Trash2, Copy, Download, Check } from "lucide-react";
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState  } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { KeyAlgorithm, SshKeyInfo } from "../types";
@@ -16,7 +16,7 @@ type Props = {
   onChanged?: () => void | Promise<void>;
 };
 
-export default function KeysPanel({ onChanged }: Props) {
+function KeysPanel({ onChanged }: Props) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [keys, setKeys] = useState<SshKeyInfo[]>([]);
@@ -287,3 +287,5 @@ export default function KeysPanel({ onChanged }: Props) {
     </Card>
   );
 }
+
+export default memo(KeysPanel);

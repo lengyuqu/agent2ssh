@@ -1,5 +1,5 @@
 import { X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState  } from "react";
 import {
   isTerminalThemeId,
   TERMINAL_THEME_STORAGE_KEY,
@@ -42,7 +42,7 @@ const REPLAY_DELAY_MS = 400;
  *  the Terminal module already uses, so no backend changes and no risk to
  *  existing terminal tabs. Raised from the approval workbench ("approve and
  *  execute") and audit rows ("replay"); Esc or the overlay dismisses it. */
-export default function TerminalDrawer({ open, host, command, onClose }: Props) {
+function TerminalDrawer({ open, host, command, onClose }: Props) {
   const { t } = useI18n();
   const { theme: appTheme } = useTheme();
   const [terminalTheme] = useState<TerminalThemeId>(initialTerminalTheme);
@@ -136,3 +136,5 @@ export default function TerminalDrawer({ open, host, command, onClose }: Props) 
     </div>
   );
 }
+
+export default memo(TerminalDrawer);

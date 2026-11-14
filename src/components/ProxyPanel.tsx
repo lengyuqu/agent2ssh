@@ -1,5 +1,5 @@
 import { Edit3, Network, Plus, Save, Trash2, X } from "lucide-react";
-import { FormEvent, useMemo, useState } from "react";
+import { memo, FormEvent, useMemo, useState  } from "react";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import { labelCls } from "../lib/ui-classes";
@@ -51,7 +51,7 @@ function formFromProxy(proxy: ProxyProfile) {
   };
 }
 
-export default function ProxyPanel({ proxies, hosts, onChanged }: Props) {
+function ProxyPanel({ proxies, hosts, onChanged }: Props) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [form, setForm] = useState(emptyForm);
@@ -273,3 +273,5 @@ export default function ProxyPanel({ proxies, hosts, onChanged }: Props) {
     </div>
   );
 }
+
+export default memo(ProxyPanel);

@@ -21,7 +21,7 @@ import {
   XCircle,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState  } from "react";
 import { api, getDaemonUrl, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { DaemonDiagnosis, DaemonHealth, DiagnosticLogEntry, ExecutionGateStatus } from "../types";
@@ -44,8 +44,8 @@ type Props = {
   daemonHealth: DaemonHealth | null;
   daemonHealthCheckedAt: number | null;
   onGateToggle: () => void;
-  onGateRefresh: () => void | Promise<void>;
-  onDaemonHealthRefresh: () => void | Promise<void>;
+  onGateRefresh: (options?: { bumpCheckedAt?: boolean }) => void | Promise<void>;
+  onDaemonHealthRefresh: (options?: { bumpCheckedAt?: boolean }) => void | Promise<void>;
   onImportConfig: () => void;
   onOpenSetup: () => void;
 };
@@ -63,7 +63,7 @@ const SHORTCUTS: Array<{ keys: string[]; label: string }> = [
   { keys: ["Ctrl/⌘", "Shift", "A"], label: "Jump to pending approval" },
 ];
 
-export default function SettingsMenu({
+function SettingsMenu({
   gateStatus,
   gateBusy,
   gateCheckedAt,
@@ -264,7 +264,9 @@ export default function SettingsMenu({
   async function handleGateRefresh() {
     setRefreshBusy(true);
     try {
-      await onGateRefresh();
+      // Explicit refresh: always move the "checked at" clock, even when the
+      // polled value is unchanged (background polls only bump on change).
+      await onGateRefresh({ bumpCheckedAt: true });
     } finally {
       setRefreshBusy(false);
     }
@@ -295,7 +297,7 @@ export default function SettingsMenu({
   async function handleDaemonHealthRefresh() {
     setHealthBusy(true);
     try {
-      await onDaemonHealthRefresh();
+      await onDaemonHealthRefresh({ bumpCheckedAt: true });
     } finally {
       await refreshDaemonDiagnosis();
       setHealthBusy(false);
@@ -320,13 +322,13 @@ export default function SettingsMenu({
       if (action !== "stop") {
         await new Promise((resolve) => window.setTimeout(resolve, 700));
       }
-      await onDaemonHealthRefresh();
-      await onGateRefresh();
+      await onDaemonHealthRefresh({ bumpCheckedAt: true });
+      await onGateRefresh({ bumpCheckedAt: true });
     } catch (err) {
       setDaemonActionMessage(String(err));
       reportError("settings-menu", "daemon action failed", err, { action });
       try {
-        await onDaemonHealthRefresh();
+        await onDaemonHealthRefresh({ bumpCheckedAt: true });
       } catch (refreshError) {
         reportError("settings-menu", "daemon health refresh failed", refreshError);
       }
@@ -360,11 +362,11 @@ export default function SettingsMenu({
     try {
       const message = await api.daemonStopUnboundGraceful();
       setDaemonActionMessage(message);
-      await onDaemonHealthRefresh();
+      await onDaemonHealthRefresh({ bumpCheckedAt: true });
     } catch (err) {
       setDaemonActionMessage(String(err));
       try {
-        await onDaemonHealthRefresh();
+        await onDaemonHealthRefresh({ bumpCheckedAt: true });
       } catch (refreshError) {
         reportError("settings-menu", "daemon health refresh failed", refreshError);
       }
@@ -1128,3 +1130,5 @@ export default function SettingsMenu({
     </div>
   );
 }
+
+export default memo(SettingsMenu);

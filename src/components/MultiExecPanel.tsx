@@ -1,5 +1,5 @@
 import { Play, Server } from "lucide-react";
-import { useState } from "react";
+import { memo, useState  } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import { labelCls } from "../lib/ui-classes";
@@ -18,7 +18,7 @@ type Props = {
   onExecComplete: () => void;
 };
 
-export default function MultiExecPanel({ hosts, onExecComplete }: Props) {
+function MultiExecPanel({ hosts, onExecComplete }: Props) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [selected, setSelected] = useState<string[]>([]);
@@ -178,3 +178,5 @@ export default function MultiExecPanel({ hosts, onExecComplete }: Props) {
     </Card>
   );
 }
+
+export default memo(MultiExecPanel);

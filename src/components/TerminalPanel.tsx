@@ -14,7 +14,7 @@ import {
   TerminalSquare,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState  } from "react";
 import { useI18n } from "../i18n";
 import { api } from "../api";
 import type { HostProfile, TerminalBroadcastResponse } from "../types";
@@ -113,7 +113,7 @@ function systemTheme(): AppTheme {
   return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
 }
 
-export default function TerminalPanel({ hosts, initialHost = "" }: Props) {
+function TerminalPanel({ hosts, initialHost = "" }: Props) {
   const { t } = useI18n();
   const { theme: appTheme } = useTheme();
   const [tabs, setTabs] = useState<Tab[]>([]);
@@ -928,3 +928,5 @@ export default function TerminalPanel({ hosts, initialHost = "" }: Props) {
     </Card>
   );
 }
+
+export default memo(TerminalPanel);

@@ -1,5 +1,5 @@
 import { Boxes, Check, Copy, Play, RefreshCw, SquareTerminal } from "lucide-react";
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState  } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { ContainerDiscoveryTarget, ContainerPlatform, ContainerRuntimeInfo } from "../types";
@@ -59,7 +59,7 @@ function runtimeState(
   return info.supported ? t("not installed") : t("unsupported here");
 }
 
-export default function ContainersPanel() {
+function ContainersPanel() {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [targets, setTargets] = useState<ContainerDiscoveryTarget[]>([]);
@@ -280,3 +280,5 @@ export default function ContainersPanel() {
     </Card>
   );
 }
+
+export default memo(ContainersPanel);

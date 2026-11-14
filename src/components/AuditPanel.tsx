@@ -1,5 +1,5 @@
 import { Clipboard, History, RefreshCw, RotateCcw, SlidersHorizontal } from "lucide-react";
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState  } from "react";
 import {
   createColumnHelper,
   getCoreRowModel,
@@ -89,7 +89,7 @@ type Props = {
 
 const columnHelper = createColumnHelper<AuditEntry>();
 
-export default function AuditPanel({ audit, onRefresh, onReplay }: Props) {
+function AuditPanel({ audit, onRefresh, onReplay }: Props) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [showFilters, setShowFilters] = useState(false);
@@ -402,3 +402,5 @@ export default function AuditPanel({ audit, onRefresh, onReplay }: Props) {
     </Card>
   );
 }
+
+export default memo(AuditPanel);

@@ -14,7 +14,7 @@ import {
   Square,
   X,
 } from "lucide-react";
-import { lazy, Suspense, useRef, useState } from "react";
+import { memo, lazy, Suspense, useRef, useState  } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
@@ -235,7 +235,7 @@ function applyFilter(entries: FileEntry[], filter: LsFilter): FileEntry[] {
 
 const DRAG_MIME = "application/x-agent2ssh-sftp";
 
-export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
+function SFTPPanel({ hosts, initialHost = "" }: Props) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [left, setLeft] = useState<SideState>(() => makeSide("remote", initialHost));
@@ -1239,3 +1239,5 @@ export default function SFTPPanel({ hosts, initialHost = "" }: Props) {
     </Card>
   );
 }
+
+export default memo(SFTPPanel);

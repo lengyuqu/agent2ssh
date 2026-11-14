@@ -1,5 +1,5 @@
 import { ArrowUpCircle, BookOpen, Bot, BrainCircuit, CheckCircle2, Clipboard, Code2, Globe, Laptop, PlugZap, RefreshCw, Send, ShieldAlert, Trash2, Users, Wrench } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState  } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { AgentSkillStatus, McpAgentConfigStatus } from "../types";
@@ -35,7 +35,7 @@ function agentIconFor(agent: McpAgentConfigStatus) {
   }
 }
 
-export default function McpAgentsPanel() {
+function McpAgentsPanel() {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [agents, setAgents] = useState<McpAgentConfigStatus[]>([]);
@@ -343,3 +343,5 @@ export default function McpAgentsPanel() {
     </Card>
   );
 }
+
+export default memo(McpAgentsPanel);

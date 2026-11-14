@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronUp, Play, ShieldAlert } from "lucide-react";
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState  } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import { labelCls } from "../lib/ui-classes";
@@ -19,7 +19,7 @@ type Props = {
   onExecComplete: () => void;
 };
 
-export default function ExecPanel({ hosts, initialHost = "", onExecComplete }: Props) {
+function ExecPanel({ hosts, initialHost = "", onExecComplete }: Props) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [targetHost, setTargetHost] = useState(initialHost);
@@ -240,3 +240,5 @@ export default function ExecPanel({ hosts, initialHost = "", onExecComplete }: P
     </Card>
   );
 }
+
+export default memo(ExecPanel);

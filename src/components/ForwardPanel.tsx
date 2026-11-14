@@ -1,5 +1,5 @@
 import { ArrowLeftRight, Plus, RefreshCw, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState  } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { ForwardDirection, ForwardRule, ForwardRuleStats, HostProfile } from "../types";
@@ -21,7 +21,7 @@ type Props = {
   onChanged?: () => void | Promise<void>;
 };
 
-export default function ForwardPanel({ hosts, initialHost = "", onChanged }: Props) {
+function ForwardPanel({ hosts, initialHost = "", onChanged }: Props) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [tunnelHost, setTunnelHost] = useState(initialHost);
@@ -261,3 +261,5 @@ function TunnelEndpoint({ label, value }: { label: string; value: string }) {
 function isValidPort(port: number): boolean {
   return Number.isInteger(port) && port >= 1 && port <= 65535;
 }
+
+export default memo(ForwardPanel);

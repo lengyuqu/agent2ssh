@@ -1,5 +1,5 @@
 import { Activity, ChevronDown, ChevronRight, RefreshCw, Search, ShieldAlert } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState  } from "react";
 import { api } from "../api";
 import { useAgentEvents, useEventsStatus } from "../eventsBus";
 import { useI18n } from "../i18n";
@@ -117,7 +117,7 @@ const statusCls: Record<string, string> = {
   offline: "bg-destructive/15 text-destructive",
 };
 
-export default function LiveActivityPanel() {
+function LiveActivityPanel() {
   const { t } = useI18n();
   const status = useEventsStatus();
   const [events, setEvents] = useState<AgentEvent[]>([]);
@@ -383,3 +383,5 @@ export default function LiveActivityPanel() {
     </Card>
   );
 }
+
+export default memo(LiveActivityPanel);

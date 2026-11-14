@@ -1,5 +1,5 @@
 import { Camera, History, RefreshCw, RotateCcw, Trash2, Wand2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState  } from "react";
 import { api, reportError } from "../api";
 import { CONFIG_TEMPLATES, type ConfigTemplate } from "../lib/configTemplates";
 import { formatDateTime } from "../lib/format";
@@ -14,7 +14,7 @@ import { EmptyState, InlineAlert } from "./ui/state";
 import { useToast } from "./ui/toast";
 
 /** V4-3: built-in policy/limits templates + snapshot save/restore of the config dir. */
-export default function ConfigSnapshotsPanel() {
+function ConfigSnapshotsPanel() {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [snapshots, setSnapshots] = useState<ConfigSnapshotInfo[]>([]);
@@ -253,3 +253,5 @@ export default function ConfigSnapshotsPanel() {
     </div>
   );
 }
+
+export default memo(ConfigSnapshotsPanel);

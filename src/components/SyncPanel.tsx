@@ -9,7 +9,7 @@ import {
   UploadCloud,
   XCircle,
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { memo, FormEvent, useEffect, useMemo, useRef, useState  } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { WebDavRecoveryResult, WebDavSyncConfig, WebDavSyncStatus } from "../types";
@@ -34,7 +34,7 @@ const defaultForm: WebDavSyncConfig = {
   syncPasswordConfigured: false,
 };
 
-export default function SyncPanel({ onRestored }: { onRestored?: () => Promise<void> } = {}) {
+function SyncPanel({ onRestored }: { onRestored?: () => Promise<void> } = {}) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [form, setForm] = useState<WebDavSyncConfig>(defaultForm);
@@ -518,3 +518,5 @@ export default function SyncPanel({ onRestored }: { onRestored?: () => Promise<v
     </div>
   );
 }
+
+export default memo(SyncPanel);

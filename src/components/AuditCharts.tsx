@@ -1,5 +1,5 @@
 import { Activity, BarChart3, Flame, Radar } from "lucide-react";
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { memo, Fragment, useEffect, useMemo, useRef, useState  } from "react";
 import {
   Area,
   AreaChart,
@@ -83,7 +83,7 @@ function SourceTooltip({ active, payload }: { active?: boolean; payload?: Array<
 }
 
 /** V2-3: audit visualizations — execution trend, risk distribution, source ranking, host×hour heatmap. */
-export default function AuditCharts() {
+function AuditCharts() {
   const { t } = useI18n();
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -380,3 +380,5 @@ export default function AuditCharts() {
     </Card>
   );
 }
+
+export default memo(AuditCharts);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState  } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { HostProfile, SshKeyInfo } from "../types";
@@ -28,7 +28,7 @@ const codeCls = "rounded bg-muted px-1.5 py-0.5 font-mono text-sm text-primary";
 const hintCls = "text-sm text-muted-foreground";
 const stepTextCls = "m-0 leading-relaxed text-foreground/80";
 const previewCls = "rounded-lg border border-border bg-muted/40 p-3.5";
-export default function SetupWizard({ onComplete, onSkip, onImportNetcatty }: SetupWizardProps) {
+function SetupWizard({ onComplete, onSkip, onImportNetcatty }: SetupWizardProps) {
   const { t } = useI18n();
   const [step, setStep] = useState(0);
   const [importedHosts, setImportedHosts] = useState<HostProfile[]>([]);
@@ -329,3 +329,5 @@ export default function SetupWizard({ onComplete, onSkip, onImportNetcatty }: Se
     </div>
   );
 }
+
+export default memo(SetupWizard);

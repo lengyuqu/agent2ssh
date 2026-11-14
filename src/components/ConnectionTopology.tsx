@@ -8,7 +8,7 @@ import {
   type SimulationNodeDatum,
 } from "d3-force";
 import { RefreshCw, Waypoints } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState  } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { ConnectionStatus, DaemonHealth, ForwardRule, HostProfile, ProxyProfile } from "../types";
@@ -60,7 +60,7 @@ function hostTone(status: ConnectionStatus | undefined): Tone {
 }
 
 /** V4-1: force-directed connection topology — daemon → host → proxy/jump-host/tunnel. */
-export default function ConnectionTopology({
+function ConnectionTopology({
   hosts,
   proxies,
   connectionStatuses,
@@ -327,3 +327,5 @@ export default function ConnectionTopology({
     </Card>
   );
 }
+
+export default memo(ConnectionTopology);

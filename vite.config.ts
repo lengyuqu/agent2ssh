@@ -7,6 +7,13 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   test: {
     environment: "jsdom",
+    // vmThreads, not the default threads pool: with the default worker_threads
+    // pool the setup file's afterEach intermittently runs before the runner
+    // establishes the file suite ("Vitest failed to find the current suite"),
+    // failing every file — flaky per invocation and worse on node >= 26.
+    // The vm-isolated pool keeps the setup hooks in the same VM context and
+    // runs green deterministically on node 24 and 26.
+    pool: "vmThreads",
     include: ["src/**/*.test.{ts,tsx}"],
     setupFiles: ["./src/test-setup.ts"],
   },
@@ -28,50 +35,17 @@ export default defineConfig({
     target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13",
     minify: !process.env.TAURI_ENV_DEBUG ? "esbuild" : false,
     sourcemap: Boolean(process.env.TAURI_ENV_DEBUG),
-    rollupOptions: {
-      output: {
-        manualChunks(id) {
-          if (!id.includes("node_modules")) {
-            return undefined;
-          }
-          if (id.includes("/react/") || id.includes("/react-dom/")) {
-            return "vendor-react";
-          }
-          if (id.includes("/lucide-react/") || id.includes("/lucide-react/dist/")) {
-            return "vendor-icons";
-          }
-          if (id.includes("/@xterm/")) {
-            return "vendor-terminal";
-          }
-          if (id.includes("/@tauri-apps/")) {
-            return "vendor-tauri";
-          }
-          if (
-            id.includes("/recharts/") ||
-            id.includes("/d3-") ||
-            id.includes("/victory-vendor/") ||
-            id.includes("/react-smooth/") ||
-            id.includes("/react-transition-group/") ||
-            id.includes("/decimal.js-light/")
-          ) {
-            return "vendor-charts";
-          }
-          if (id.includes("/@tanstack/")) {
-            return "vendor-table";
-          }
-          if (id.includes("/monaco-editor/") || id.includes("/@monaco-editor/")) {
-            return "vendor-monaco";
-          }
-          if (
-            id.includes("/class-variance-authority/") ||
-            id.includes("/clsx/") ||
-            id.includes("/tailwind-merge/")
-          ) {
-            return "vendor-ui";
-          }
-          return "vendor";
-        }
-      }
-    }
+    // No manualChunks here, deliberately. A previous vendor-split config
+    // (vendor-react / vendor-monaco / vendor / …) produced a chunk cycle:
+    // vendor-react imported the monaco loader chunk, which imported the
+    // generic vendor chunk, whose CJS packages eagerly require("react") at
+    // module top level. Function-declaration hoisting let react's require run
+    // before react's module body initialized its exports object, crashing at
+    // boot with "Cannot set properties of undefined (setting 'Children')" —
+    // a fully blank window in the packaged app (0.4.5 Windows install).
+    // Any react-out-of-tree split is unsafe while eager CJS requires exist,
+    // so node_modules stay in the entry chunk; the monaco/FilePreview chain
+    // remains a separate chunk on its own because it is lazy-imported.
+    rollupOptions: {}
   }
 });

@@ -1,5 +1,5 @@
 import { Search, type LucideIcon } from "lucide-react";
-import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { memo, type KeyboardEvent, useEffect, useMemo, useRef, useState  } from "react";
 import { useI18n } from "../i18n";
 import { cn } from "../lib/utils";
 import type { ApprovalRequest } from "../types";
@@ -157,7 +157,7 @@ const MAX_RESULTS = 30;
  *  navigate → quick actions → MCP tools (`>` prefix narrows to this group) →
  *  connect host (last). Floating layer on bg-popover (canvas-3), 460px, no
  *  shadow (v3 §4.5 layer discipline). */
-export default function CommandPalette({
+function CommandPalette({
   open,
   onClose,
   modules,
@@ -456,3 +456,5 @@ export default function CommandPalette({
     </div>
   );
 }
+
+export default memo(CommandPalette);

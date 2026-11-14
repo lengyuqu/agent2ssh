@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { memo, useRef  } from "react";
 import { api, reportError } from "../api";
 import { useAgentEvents } from "../eventsBus";
 import { useI18n } from "../i18n";
@@ -19,7 +19,7 @@ function asString(value: unknown): string | undefined {
  * but nothing currently publishes them, so that notification is driven from
  * App.tsx's existing 5s connection-status poll instead (see pollConnections).
  */
-export default function NotificationCenter() {
+function NotificationCenter() {
   const { t } = useI18n();
   const { showToast, dismissToast } = useToast();
   const approvalToastIds = useRef<Map<string, number>>(new Map());
@@ -90,3 +90,5 @@ export default function NotificationCenter() {
 
   return null;
 }
+
+export default memo(NotificationCenter);

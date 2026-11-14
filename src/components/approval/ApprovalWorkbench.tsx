@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronRight, ShieldCheck } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState  } from "react";
 import { api, reportError } from "../../api";
 import { useAgentEvents } from "../../eventsBus";
 import { useI18n } from "../../i18n";
@@ -60,7 +60,7 @@ function isSameLocalDay(iso: string): boolean {
  * pending queue + detail column, and a collapsed "decided today" group.
  * Owns its own 10s history poll + SSE nudge (pattern inherited from the
  * retired approval history timeline); the pending list itself streams from App. */
-export default function ApprovalWorkbench({ pending, onApprove, onReject, onGoExecute }: Props) {
+function ApprovalWorkbench({ pending, onApprove, onReject, onGoExecute }: Props) {
   const { t } = useI18n();
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [confirmTarget, setConfirmTarget] = useState<ApprovalRequest | null>(null);
@@ -311,3 +311,5 @@ export default function ApprovalWorkbench({ pending, onApprove, onReject, onGoEx
     </div>
   );
 }
+
+export default memo(ApprovalWorkbench);

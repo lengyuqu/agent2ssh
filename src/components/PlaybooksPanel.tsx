@@ -13,7 +13,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { dump as dumpYaml, load as loadYaml } from "js-yaml";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState  } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { HostProfile, Playbook, PlaybookRunResult, RiskLevel } from "../types";
@@ -133,7 +133,7 @@ function stepCount(playbook: Playbook): number {
   return playbook.advanced_steps?.length || playbook.steps.length;
 }
 
-export default function PlaybooksPanel({ hosts }: Props) {
+function PlaybooksPanel({ hosts }: Props) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [playbooks, setPlaybooks] = useState<Playbook[]>([]);
@@ -688,3 +688,5 @@ export default function PlaybooksPanel({ hosts }: Props) {
     </Card>
   );
 }
+
+export default memo(PlaybooksPanel);

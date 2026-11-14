@@ -8,7 +8,7 @@ import {
   ShieldAlert,
   XCircle,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState  } from "react";
 import { api } from "../api";
 import { useAgentEvents, useEventsStatus } from "../eventsBus";
 import { useI18n } from "../i18n";
@@ -74,7 +74,7 @@ function StatCard({ icon, label, value, hint, tone = "default", onClick }: StatC
 }
 
 /** V1-1: landing dashboard aggregating host health, approvals, anomalies, 24h volume, credentials, daemon. */
-export default function Dashboard({
+function Dashboard({
   hosts,
   connectionStatuses,
   pendingApprovalsCount,
@@ -177,3 +177,5 @@ export default function Dashboard({
     </div>
   );
 }
+
+export default memo(Dashboard);

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState  } from "react";
 import { Lock } from "lucide-react";
 import { api } from "../api";
 import { useI18n } from "../i18n";
@@ -11,7 +11,7 @@ type Props = {
 // K1: blocking startup dialog shown when the app-managed credential store is
 // initialized but locked. The user must enter the master password to decrypt
 // stored SSH passwords; until then, password-auth hosts are unavailable.
-export default function SecretsUnlock({ onUnlocked }: Props) {
+function SecretsUnlock({ onUnlocked }: Props) {
   const { t } = useI18n();
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -65,3 +65,5 @@ export default function SecretsUnlock({ onUnlocked }: Props) {
     </Dialog>
   );
 }
+
+export default memo(SecretsUnlock);

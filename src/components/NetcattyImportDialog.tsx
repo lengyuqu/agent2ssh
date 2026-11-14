@@ -1,6 +1,6 @@
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { AlertTriangle, FileUp, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState  } from "react";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import type { NetcattyImportReport } from "../types";
@@ -28,7 +28,7 @@ type Stage = "pick" | "previewing" | "preview" | "importing" | "done";
  * A locked credential store makes the real import fail loudly rather than
  * writing passwords in plaintext, and that error is surfaced verbatim.
  */
-export default function NetcattyImportDialog({ open, onClose, onImported }: Props) {
+function NetcattyImportDialog({ open, onClose, onImported }: Props) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [stage, setStage] = useState<Stage>("pick");
@@ -264,3 +264,5 @@ function ErrorBox({ message }: { message: string }) {
     </div>
   );
 }
+
+export default memo(NetcattyImportDialog);

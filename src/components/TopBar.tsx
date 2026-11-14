@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { Lock, LockOpen, Radio, ShieldAlert, Unplug } from "lucide-react";
 import type { ReactNode } from "react";
 import { useI18n } from "../i18n";
@@ -22,7 +23,7 @@ type TopBarProps = {
  * active connections, migrated from the bottom status bar) on canvas-0,
  * version + ⌘K entry on the right. Single 36px row; low-priority pills hide
  * below lg so narrow windows (<1024px) never wrap. */
-export default function TopBar({
+function TopBar({
   daemonHealth,
   gateStatus,
   secretsLocked,
@@ -119,3 +120,5 @@ export default function TopBar({
     </header>
   );
 }
+
+export default memo(TopBar);

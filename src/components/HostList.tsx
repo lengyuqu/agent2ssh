@@ -12,7 +12,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState  } from "react";
 import {
   createColumnHelper,
   getCoreRowModel,
@@ -71,7 +71,7 @@ type Row = {
 
 const columnHelper = createColumnHelper<Row>();
 
-export default function HostList({
+function HostList({
   hosts,
   groups,
   proxies,
@@ -583,3 +583,5 @@ function matchesFilter(value: string | null | undefined, filter: string): boolea
   if (!normalized) return true;
   return (value ?? "").trim().toLowerCase() === normalized;
 }
+
+export default memo(HostList);

@@ -1,5 +1,5 @@
 import { Radio, Wifi, WifiOff } from "lucide-react";
-import { useState } from "react";
+import { memo, useState  } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { HostProfile, PingResult } from "../types";
@@ -10,7 +10,7 @@ type Props = {
   hosts: HostProfile[];
 };
 
-export default function PingPanel({ hosts }: Props) {
+function PingPanel({ hosts }: Props) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [results, setResults] = useState<PingResult[]>([]);
@@ -72,3 +72,5 @@ export default function PingPanel({ hosts }: Props) {
     </section>
   );
 }
+
+export default memo(PingPanel);

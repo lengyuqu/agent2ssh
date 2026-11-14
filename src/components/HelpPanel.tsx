@@ -1,5 +1,5 @@
 import { BookOpen, CheckCircle2, Clipboard, FileText, ShieldCheck, Terminal } from "lucide-react";
-import { useState } from "react";
+import { memo, useState  } from "react";
 import { useI18n } from "../i18n";
 import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
@@ -23,7 +23,7 @@ const docs = [
   { title: "MCP client templates", path: "docs/guides/mcp-client-templates.md" },
 ];
 
-export default function HelpPanel() {
+function HelpPanel() {
   const { t } = useI18n();
   const [copied, setCopied] = useState<string | null>(null);
 
@@ -164,3 +164,5 @@ export default function HelpPanel() {
     </div>
   );
 }
+
+export default memo(HelpPanel);

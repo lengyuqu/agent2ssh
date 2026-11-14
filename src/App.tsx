@@ -60,6 +60,12 @@ const APPROVAL_POLL_MS = 2000;
 const DAEMON_START_RECHECK_MS = 700;
 const WEBDAV_AUTO_SYNC_MS = 10 * 60 * 1000;
 
+// Explicit refresh (SettingsMenu button) always bumps the "checked at" clock;
+// background polls only bump it — and re-render the tree — when the polled
+// value actually changed. Without this the 5s/10s polls re-render the whole
+// app twice per 5 seconds even when nothing changed.
+type PollOptions = { bumpCheckedAt?: boolean };
+
 // Poll setState guard: keep the previous state object when a fresh poll
 // result is structurally identical, so the 2s/5s/10s polls only re-render
 // the app (and re-trigger downstream memos/effects, e.g. the topology force
@@ -130,6 +136,10 @@ export default function App() {
       return false;
     }
   });
+  // Previous poll signatures: background polls bump gateCheckedAt /
+  // daemonHealthCheckedAt (and thus re-render) only on a real change.
+  const gateSignatureRef = useRef<string | null>(null);
+  const daemonSignatureRef = useRef<string | null>(null);
   const webDavSyncInFlight = useRef(false);
   // V2-1: previous connection-status snapshot, used to detect connect/disconnect
   // transitions for the connection-status notification. No backend SSE event
@@ -146,6 +156,19 @@ export default function App() {
     () => proxies.find((proxy) => proxy.id === currentHost?.proxy_id),
     [currentHost?.proxy_id, proxies]
   );
+
+  const openModule = useCallback((id: (typeof MODULES)[number]["id"]) => {
+    setActiveModule(id);
+  }, []);
+
+  // v3 §1.3: jump to the approval workbench and focus the first pending card
+  // (shared by ⌘⇧A and the ⌘K pending-approvals group).
+  const openApprovalsWorkbench = useCallback(() => {
+    openModule("approvals");
+    window.setTimeout(() => {
+      document.getElementById("approval-queue-card-0")?.focus();
+    }, 80);
+  }, [openModule]);
 
   const refresh = useCallback(async () => {
     const [hostList, groupList, proxyList] = await Promise.all([
@@ -195,23 +218,23 @@ export default function App() {
     }
   }, []);
 
-  async function handleHostSaved() {
+  const handleHostSaved = useCallback(async () => {
     await refresh();
     void runAutoWebDavSync("host_saved");
-  }
+  }, [refresh, runAutoWebDavSync]);
 
-  async function handleProxyChanged() {
+  const handleProxyChanged = useCallback(async () => {
     await refresh();
     void runAutoWebDavSync("proxy_changed");
-  }
+  }, [refresh, runAutoWebDavSync]);
 
-  function handleForwardChanged() {
+  const handleForwardChanged = useCallback(() => {
     void runAutoWebDavSync("forward_changed");
-  }
+  }, [runAutoWebDavSync]);
 
-  function handleKeyChanged() {
+  const handleKeyChanged = useCallback(() => {
     void runAutoWebDavSync("key_changed");
-  }
+  }, [runAutoWebDavSync]);
 
   function groupIdFromName(name: string): string {
     const base = name
@@ -222,45 +245,54 @@ export default function App() {
     return base || `group-${Date.now()}`;
   }
 
-  async function handleCreateGroup(name: string) {
-    const trimmed = name.trim();
-    if (!trimmed) return;
-    try {
-      let id = groupIdFromName(trimmed);
-      let suffix = 2;
-      while (groups.some((group) => group.id === id)) {
-        id = `${groupIdFromName(trimmed)}-${suffix}`;
-        suffix += 1;
+  const handleCreateGroup = useCallback(
+    async (name: string) => {
+      const trimmed = name.trim();
+      if (!trimmed) return;
+      try {
+        let id = groupIdFromName(trimmed);
+        let suffix = 2;
+        while (groups.some((group) => group.id === id)) {
+          id = `${groupIdFromName(trimmed)}-${suffix}`;
+          suffix += 1;
+        }
+        await api.saveHostGroup({ id, name: trimmed, color: "#4A6CF7", sort_order: 0 });
+        setSelectedGroup(id);
+        await refresh();
+      } catch (err) {
+        showToast("error", String(err));
       }
-      await api.saveHostGroup({ id, name: trimmed, color: "#4A6CF7", sort_order: 0 });
-      setSelectedGroup(id);
-      await refresh();
-    } catch (err) {
-      showToast("error", String(err));
-    }
-  }
+    },
+    [groups, refresh, showToast],
+  );
 
-  async function handleRenameGroup(id: string, name: string) {
-    const trimmed = name.trim();
-    if (!trimmed) return;
-    try {
-      await api.saveHostGroup({ id, name: trimmed, color: "#4A6CF7", sort_order: 0 });
-      await refresh();
-    } catch (err) {
-      showToast("error", String(err));
-    }
-  }
+  const handleRenameGroup = useCallback(
+    async (id: string, name: string) => {
+      const trimmed = name.trim();
+      if (!trimmed) return;
+      try {
+        await api.saveHostGroup({ id, name: trimmed, color: "#4A6CF7", sort_order: 0 });
+        await refresh();
+      } catch (err) {
+        showToast("error", String(err));
+      }
+    },
+    [refresh, showToast],
+  );
 
-  async function handleDeleteGroup(id: string) {
-    if (id === "default") return;
-    try {
-      await api.deleteHostGroup(id);
-      if (selectedGroup === id) setSelectedGroup("default");
-      await refresh();
-    } catch (err) {
-      showToast("error", String(err));
-    }
-  }
+  const handleDeleteGroup = useCallback(
+    async (id: string) => {
+      if (id === "default") return;
+      try {
+        await api.deleteHostGroup(id);
+        if (selectedGroup === id) setSelectedGroup("default");
+        await refresh();
+      } catch (err) {
+        showToast("error", String(err));
+      }
+    },
+    [selectedGroup, refresh, showToast],
+  );
 
   useEffect(() => {
     refresh()
@@ -354,10 +386,15 @@ export default function App() {
     return () => clearInterval(id);
   }, [pollConnections]);
 
-  const pollGateStatus = useCallback(async () => {
+  const pollGateStatus = useCallback(async (options?: PollOptions) => {
     const status = await api.getGateStatus();
     setGateStatus((prev) => keepIfEqual(prev, status));
-    setGateCheckedAt(Date.now());
+    const signature = JSON.stringify(status);
+    const changed = signature !== gateSignatureRef.current;
+    gateSignatureRef.current = signature;
+    if (options?.bumpCheckedAt || changed) {
+      setGateCheckedAt(Date.now());
+    }
   }, []);
 
   useEffect(() => {
@@ -366,10 +403,15 @@ export default function App() {
     return () => clearInterval(id);
   }, [pollGateStatus]);
 
-  const pollDaemonHealth = useCallback(async () => {
+  const pollDaemonHealth = useCallback(async (options?: PollOptions) => {
     const health = await api.getDaemonHealth();
     setDaemonHealth((prev) => keepIfEqual(prev, health));
-    setDaemonHealthCheckedAt(Date.now());
+    const signature = JSON.stringify(health);
+    const changed = signature !== daemonSignatureRef.current;
+    daemonSignatureRef.current = signature;
+    if (options?.bumpCheckedAt || changed) {
+      setDaemonHealthCheckedAt(Date.now());
+    }
   }, []);
 
   const ensureLocalDaemon = useCallback(async () => {
@@ -443,9 +485,9 @@ export default function App() {
     }
     window.addEventListener("keydown", handleGlobalKeyDown);
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
-  }, [showToast, t]);
+  }, [showToast, t, openApprovalsWorkbench]);
 
-  async function handleGateToggle() {
+  const handleGateToggle = useCallback(async () => {
     setGateBusy(true);
     try {
       const status =
@@ -458,30 +500,39 @@ export default function App() {
     } finally {
       setGateBusy(false);
     }
-  }
+  }, [gateStatus, showToast, t]);
 
-  async function handleApprove(approval: ApprovalRequest, command?: string) {
-    try {
-      await api.approvalApprove(approval.id, command);
-      setPendingApprovals((prev) => prev.filter((a) => a.id !== approval.id));
-      // v3 §3.4: raise the terminal drawer as a live viewport onto the host.
-      // The daemon runs the approved command itself (the original exec caller
-      // was waiting on approval_wait), so the drawer must NOT re-type the
-      // command — that would execute it twice.
-      setTerminalDrawer({ host: approval.host, command: null });
-    } catch (err) {
-      await reportUndecided(err, approval, "approve");
-    }
-  }
+  const handleApprove = useCallback(
+    async (approval: ApprovalRequest, command?: string) => {
+      try {
+        await api.approvalApprove(approval.id, command);
+        setPendingApprovals((prev) => prev.filter((a) => a.id !== approval.id));
+        // v3 §3.4: raise the terminal drawer as a live viewport onto the host.
+        // The daemon runs the approved command itself (the original exec caller
+        // was waiting on approval_wait), so the drawer must NOT re-type the
+        // command — that would execute it twice.
+        setTerminalDrawer({ host: approval.host, command: null });
+      } catch (err) {
+        await reportUndecided(err, approval, "approve");
+      }
+    },
+    // reportUndecided is a stable useCallback below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [showToast, t],
+  );
 
-  async function handleReject(approval: ApprovalRequest) {
-    try {
-      await api.approvalReject(approval.id);
-      setPendingApprovals((prev) => prev.filter((a) => a.id !== approval.id));
-    } catch (err) {
-      await reportUndecided(err, approval, "reject");
-    }
-  }
+  const handleReject = useCallback(
+    async (approval: ApprovalRequest) => {
+      try {
+        await api.approvalReject(approval.id);
+        setPendingApprovals((prev) => prev.filter((a) => a.id !== approval.id));
+      } catch (err) {
+        await reportUndecided(err, approval, "reject");
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [showToast, t],
+  );
 
   /**
    * The daemon answers 400 for every refusal, so "already Approved" (the
@@ -491,60 +542,69 @@ export default function App() {
    * retire the card here: a still-pending request must stay in the queue, or a
    * refusal would quietly drop the operator's decision.
    */
-  async function reportUndecided(err: unknown, approval: ApprovalRequest, action: "approve" | "reject") {
-    showToast(
-      "error",
-      t(action === "approve" ? "Failed to approve: {error}" : "Failed to reject: {error}", {
-        error: String(err),
-      }),
-    );
-    if (!isAlreadyDecided(String(err))) return;
-    // The review's L2-121: without this the card outlives every later click,
-    // each one repeating the same 400, because the `approval_responded` event
-    // that would have refreshed the list is the one that went missing. This
-    // read only says what the daemon has on record; when it is unreachable the
-    // entry `fetchApprovals` would substitute (`[]`) is no evidence of a
-    // decision, so only drop an id the daemon itself listed as decided.
-    const listed = (await api.fetchApprovals()).find((a) => a.id === approval.id);
-    if (listed && listed.status !== "pending") {
-      setPendingApprovals((prev) => prev.filter((a) => a.id !== approval.id));
-    }
-  }
+  const reportUndecided = useCallback(
+    async (err: unknown, approval: ApprovalRequest, action: "approve" | "reject") => {
+      showToast(
+        "error",
+        t(action === "approve" ? "Failed to approve: {error}" : "Failed to reject: {error}", {
+          error: String(err),
+        }),
+      );
+      if (!isAlreadyDecided(String(err))) return;
+      // The review's L2-121: without this the card outlives every later click,
+      // each one repeating the same 400, because the `approval_responded` event
+      // that would have refreshed the list is the one that went missing. This
+      // read only says what the daemon has on record; when it is unreachable the
+      // entry `fetchApprovals` would substitute (`[]`) is no evidence of a
+      // decision, so only drop an id the daemon itself listed as decided.
+      const listed = (await api.fetchApprovals()).find((a) => a.id === approval.id);
+      if (listed && listed.status !== "pending") {
+        setPendingApprovals((prev) => prev.filter((a) => a.id !== approval.id));
+      }
+    },
+    [showToast, t],
+  );
 
-  async function handleRemoveHost(name: string) {
-    try {
-      await api.removeHost(name);
-      if (selectedHost === name) setSelectedHost("");
-      await refresh();
-    } catch (err) {
-      showToast("error", String(err));
-    }
-  }
+  const handleRemoveHost = useCallback(
+    async (name: string) => {
+      try {
+        await api.removeHost(name);
+        if (selectedHost === name) setSelectedHost("");
+        await refresh();
+      } catch (err) {
+        showToast("error", String(err));
+      }
+    },
+    [selectedHost, refresh, showToast],
+  );
 
   // V3-3: batch remove from the Host table's row-selection action bar.
-  async function handleBatchRemoveHosts(names: string[]) {
-    try {
-      await Promise.all(names.map((name) => api.removeHost(name)));
-      if (names.includes(selectedHost)) setSelectedHost("");
-      await refresh();
-    } catch (err) {
-      showToast("error", String(err));
-    }
-  }
+  const handleBatchRemoveHosts = useCallback(
+    async (names: string[]) => {
+      try {
+        await Promise.all(names.map((name) => api.removeHost(name)));
+        if (names.includes(selectedHost)) setSelectedHost("");
+        await refresh();
+      } catch (err) {
+        showToast("error", String(err));
+      }
+    },
+    [selectedHost, refresh, showToast],
+  );
 
-  async function handleImportConfig() {
+  const handleImportConfig = useCallback(async () => {
     try {
       await api.importSshConfig();
       await refresh();
     } catch (err) {
       showToast("error", String(err));
     }
-  }
+  }, [refresh, showToast]);
 
   // G13: the two halves of OpenSSH known_hosts interop. Import pulls the system
   // file's trust into the app-managed store; forget drops a host from the
   // system file (`ssh-keygen -R`) without touching the app's own store.
-  async function handleImportOpensshTrust() {
+  const handleImportOpensshTrust = useCallback(async () => {
     try {
       const summary = await api.importKnownHosts();
       await refresh();
@@ -558,37 +618,27 @@ export default function App() {
     } catch (err) {
       showToast("error", String(err));
     }
-  }
+  }, [refresh, showToast, t]);
 
-  async function handleForgetOpenssh(host: HostProfile) {
-    try {
-      const removed = await api.forgetSystemKnownHost(host.host, host.port ?? 22);
-      showToast(
-        removed > 0 ? "success" : "warning",
-        removed > 0
-          ? t("Removed {count} OpenSSH known_hosts entry(ies) for {name}.", {
-              count: removed,
-              name: host.host,
-            })
-          : t("{name} had no entry in the system OpenSSH known_hosts.", { name: host.host }),
-      );
-    } catch (err) {
-      showToast("error", String(err));
-    }
-  }
-
-  function openModule(id: (typeof MODULES)[number]["id"]) {
-    setActiveModule(id);
-  }
-
-  // v3 §1.3: jump to the approval workbench and focus the first pending card
-  // (shared by ⌘⇧A and the ⌘K pending-approvals group).
-  function openApprovalsWorkbench() {
-    openModule("approvals");
-    window.setTimeout(() => {
-      document.getElementById("approval-queue-card-0")?.focus();
-    }, 80);
-  }
+  const handleForgetOpenssh = useCallback(
+    async (host: HostProfile) => {
+      try {
+        const removed = await api.forgetSystemKnownHost(host.host, host.port ?? 22);
+        showToast(
+          removed > 0 ? "success" : "warning",
+          removed > 0
+            ? t("Removed {count} OpenSSH known_hosts entry(ies) for {name}.", {
+                count: removed,
+                name: host.host,
+              })
+            : t("{name} had no entry in the system OpenSSH known_hosts.", { name: host.host }),
+        );
+      } catch (err) {
+        showToast("error", String(err));
+      }
+    },
+    [showToast, t],
+  );
 
   // v3 §3.5: ⌘K quick actions — sync / unlock credentials / new host. The
   // unlock entry surfaces the credential gate (or the Keys module when already
@@ -639,104 +689,171 @@ export default function App() {
     [t, secretsLocked]
   );
 
+  // Stable replacements for the inline closures previously passed as panel
+  // props: with React.memo on the panels below, an unstable prop would defeat
+  // the bail-out and re-render the active panel on every App state change.
+  const openCommandPalette = useCallback(() => setCommandPaletteOpen(true), []);
+  const closeCommandPalette = useCallback(() => setCommandPaletteOpen(false), []);
+  const openNetcattyImport = useCallback(() => setNetcattyOpen(true), []);
+  const closeNetcattyImport = useCallback(() => setNetcattyOpen(false), []);
+  const cancelHostEdit = useCallback(() => setEditingHost(null), []);
+  const closeTerminalDrawer = useCallback(() => setTerminalDrawer(null), []);
+  const openSetupWizard = useCallback(() => {
+    setWizardDismissed(false);
+    setShowWizard(true);
+  }, []);
+  const navigateModule = useCallback(
+    (id: string) => openModule(id as (typeof MODULES)[number]["id"]),
+    [openModule],
+  );
+  const replayAuditEntry = useCallback(
+    (entry: AuditEntry) => setTerminalDrawer({ host: entry.host, command: entry.command }),
+    [],
+  );
+  const goToExecuteForApproval = useCallback(
+    (approval: ApprovalRequest) => {
+      setSelectedHost(approval.host);
+      openModule("execute");
+    },
+    [openModule],
+  );
+
+  // TopBar's `actions` slot: memoized element identity keeps memo(TopBar) and
+  // the memoized SettingsMenu from re-rendering on unrelated App state churn.
+  const settingsActions = useMemo(
+    () => (
+      <SettingsMenu
+        gateStatus={gateStatus}
+        gateBusy={gateBusy}
+        gateCheckedAt={gateCheckedAt}
+        daemonHealth={daemonHealth}
+        daemonHealthCheckedAt={daemonHealthCheckedAt}
+        onGateToggle={handleGateToggle}
+        onGateRefresh={pollGateStatus}
+        onDaemonHealthRefresh={pollDaemonHealth}
+        onImportConfig={handleImportConfig}
+        onOpenSetup={openSetupWizard}
+      />
+    ),
+    [
+      gateStatus,
+      gateBusy,
+      gateCheckedAt,
+      daemonHealth,
+      daemonHealthCheckedAt,
+      handleGateToggle,
+      pollGateStatus,
+      pollDaemonHealth,
+      handleImportConfig,
+      openSetupWizard,
+    ],
+  );
+
   const activeModuleMeta = MODULES.find((module) => module.id === activeModule) ?? MODULES[0];
   const ActiveModuleIcon = activeModuleMeta.icon;
   const relatedModules = (RELATED_MODULES[activeModule] ?? [])
     .map((id) => MODULES.find((module) => module.id === id))
     .filter((module): module is (typeof MODULES)[number] => Boolean(module));
 
-  function updateConnectionProgress(next: ConnectionProgress | null) {
+  const updateConnectionProgress = useCallback((next: ConnectionProgress | null) => {
     setConnectionProgress(next);
-  }
+  }, []);
 
-  function showConnectionProgress(
-    host: string,
-    message: string,
-    percent: number,
-    title = t("Connecting to {host}", { host })
-  ) {
-    updateConnectionProgress({
-      host,
-      title,
-      message,
-      percent,
-      busy: true,
-      variant: "active",
-    });
-  }
+  const showConnectionProgress = useCallback(
+    (host: string, message: string, percent: number, title?: string) => {
+      updateConnectionProgress({
+        host,
+        title: title ?? t("Connecting to {host}", { host }),
+        message,
+        percent,
+        busy: true,
+        variant: "active",
+      });
+    },
+    [t, updateConnectionProgress],
+  );
 
-  function completeConnectionProgress(host: string, message: string) {
-    updateConnectionProgress({
-      host,
-      title: t("Connection complete"),
-      message,
-      percent: 100,
-      busy: false,
-      variant: "success",
-    });
-    window.setTimeout(() => {
-      setConnectionProgress((current) =>
-        current?.host === host && current.variant === "success" ? null : current
-      );
-    }, 900);
-  }
+  const completeConnectionProgress = useCallback(
+    (host: string, message: string) => {
+      updateConnectionProgress({
+        host,
+        title: t("Connection complete"),
+        message,
+        percent: 100,
+        busy: false,
+        variant: "success",
+      });
+      window.setTimeout(() => {
+        setConnectionProgress((current) =>
+          current?.host === host && current.variant === "success" ? null : current
+        );
+      }, 900);
+    },
+    [t, updateConnectionProgress],
+  );
 
-  function failConnectionProgress(host: string, message: string) {
-    updateConnectionProgress({
-      host,
-      title: t("Connection failed"),
-      message,
-      percent: 100,
-      busy: false,
-      variant: "error",
-    });
-  }
+  const failConnectionProgress = useCallback(
+    (host: string, message: string) => {
+      updateConnectionProgress({
+        host,
+        title: t("Connection failed"),
+        message,
+        percent: 100,
+        busy: false,
+        variant: "error",
+      });
+    },
+    [t, updateConnectionProgress],
+  );
 
-  async function handleConnect(name: string) {
-    showConnectionProgress(name, t("Checking SSH fingerprint..."), 15);
-    try {
-      const status = await api.getHostFingerprintStatus(name);
-      if (status.expectedFingerprintSha256 && !status.trusted) {
-        updateConnectionProgress(null);
-        setFingerprintPrompt({ host: name, status });
-        return;
-      }
-      showConnectionProgress(name, t("Opening SSH connection..."), 60);
-      await api.sshConnect(name);
-      showConnectionProgress(name, t("Refreshing connection status..."), 90);
-      await pollConnections();
-      completeConnectionProgress(name, t("Connected to {host}", { host: name }));
-    } catch (err) {
-      const message = String(err);
-      if (message.includes("SSH host fingerprint changed")) {
-        try {
-          showConnectionProgress(name, t("Verifying changed SSH fingerprint..."), 35);
-          const status = await api.getHostFingerprintStatus(name);
-          if (status.trusted) {
-            showConnectionProgress(name, t("Opening SSH connection..."), 60);
-            await api.sshConnect(name);
-            showConnectionProgress(name, t("Refreshing connection status..."), 90);
-            await pollConnections();
-            completeConnectionProgress(name, t("Connected to {host}", { host: name }));
-            return;
-          }
+  const handleConnect = useCallback(
+    async (name: string) => {
+      showConnectionProgress(name, t("Checking SSH fingerprint..."), 15);
+      try {
+        const status = await api.getHostFingerprintStatus(name);
+        if (status.expectedFingerprintSha256 && !status.trusted) {
           updateConnectionProgress(null);
           setFingerprintPrompt({ host: name, status });
           return;
-        } catch (probeErr) {
-          const errorMessage = t("Failed to verify host fingerprint: {error}", {
-            error: String(probeErr),
-          });
-          failConnectionProgress(name, errorMessage);
-          return;
         }
+        showConnectionProgress(name, t("Opening SSH connection..."), 60);
+        await api.sshConnect(name);
+        showConnectionProgress(name, t("Refreshing connection status..."), 90);
+        await pollConnections();
+        completeConnectionProgress(name, t("Connected to {host}", { host: name }));
+      } catch (err) {
+        const message = String(err);
+        if (message.includes("SSH host fingerprint changed")) {
+          try {
+            showConnectionProgress(name, t("Verifying changed SSH fingerprint..."), 35);
+            const status = await api.getHostFingerprintStatus(name);
+            if (status.trusted) {
+              showConnectionProgress(name, t("Opening SSH connection..."), 60);
+              await api.sshConnect(name);
+              showConnectionProgress(name, t("Refreshing connection status..."), 90);
+              await pollConnections();
+              completeConnectionProgress(name, t("Connected to {host}", { host: name }));
+              return;
+            }
+            updateConnectionProgress(null);
+            setFingerprintPrompt({ host: name, status });
+            return;
+          } catch (probeErr) {
+            const errorMessage = t("Failed to verify host fingerprint: {error}", {
+              error: String(probeErr),
+            });
+            failConnectionProgress(name, errorMessage);
+            return;
+          }
+        }
+        const errorMessage = t("Failed to connect: {error}", { error: message });
+        failConnectionProgress(name, errorMessage);
       }
-      const errorMessage = t("Failed to connect: {error}", { error: message });
-      failConnectionProgress(name, errorMessage);
-    }
-  }
+    },
+    [t, showConnectionProgress, completeConnectionProgress, failConnectionProgress, pollConnections, updateConnectionProgress],
+  );
 
-  async function handleTrustFingerprintAndReconnect() {
+  const handleTrustFingerprintAndReconnect = useCallback(async () => {
     if (!fingerprintPrompt) return;
     setFingerprintBusy(true);
     const progressHost = fingerprintPrompt.host;
@@ -768,16 +885,19 @@ export default function App() {
     } finally {
       setFingerprintBusy(false);
     }
-  }
+  }, [fingerprintPrompt, t, showConnectionProgress, completeConnectionProgress, failConnectionProgress, pollConnections]);
 
-  async function handleDisconnect(name: string) {
-    try {
-      await api.sshDisconnect(name);
-      await pollConnections();
-    } catch (err) {
-      showToast("error", t("Failed to disconnect: {error}", { error: String(err) }));
-    }
-  }
+  const handleDisconnect = useCallback(
+    async (name: string) => {
+      try {
+        await api.sshDisconnect(name);
+        await pollConnections();
+      } catch (err) {
+        showToast("error", t("Failed to disconnect: {error}", { error: String(err) }));
+      }
+    },
+    [pollConnections, showToast, t],
+  );
 
   if (loading) {
     return (
@@ -802,11 +922,11 @@ export default function App() {
             setShowWizard(false);
             setWizardDismissed(true);
           }}
-          onImportNetcatty={() => setNetcattyOpen(true)}
+          onImportNetcatty={openNetcattyImport}
         />
         <NetcattyImportDialog
           open={netcattyOpen}
-          onClose={() => setNetcattyOpen(false)}
+          onClose={closeNetcattyImport}
           onImported={refresh}
         />
       </>
@@ -831,12 +951,12 @@ export default function App() {
 
       <CommandPalette
         open={commandPaletteOpen}
-        onClose={() => setCommandPaletteOpen(false)}
+        onClose={closeCommandPalette}
         modules={MODULES}
         hosts={hosts}
         pending={pendingApprovals}
         quickActions={quickActions}
-        onNavigateModule={(id) => openModule(id as (typeof MODULES)[number]["id"])}
+        onNavigateModule={navigateModule}
         onSelectHost={setSelectedHost}
         onOpenApprovals={openApprovalsWorkbench}
       />
@@ -976,32 +1096,18 @@ export default function App() {
         </Dialog>
       )}
 
-      {/* v3: status top bar with agent pills + ⌘K entry */}
+      {/* v3: status top bar with agent pills + ⌘K entry. The actions element is
+          memoized so memo(TopBar) can bail out when only unrelated App state
+          (active module, dialogs, drawer) changed. */}
       <TopBar
         daemonHealth={daemonHealth}
         gateStatus={gateStatus}
         secretsLocked={secretsLocked}
         connectionStatuses={connectionStatuses}
         pendingApprovalsCount={pendingApprovals.length}
-        onOpenPalette={() => setCommandPaletteOpen(true)}
-        onOpenApprovals={() => openModule("approvals")}
-        actions={
-          <SettingsMenu
-            gateStatus={gateStatus}
-            gateBusy={gateBusy}
-            gateCheckedAt={gateCheckedAt}
-            daemonHealth={daemonHealth}
-            daemonHealthCheckedAt={daemonHealthCheckedAt}
-            onGateToggle={handleGateToggle}
-            onGateRefresh={pollGateStatus}
-            onDaemonHealthRefresh={pollDaemonHealth}
-            onImportConfig={handleImportConfig}
-            onOpenSetup={() => {
-              setWizardDismissed(false);
-              setShowWizard(true);
-            }}
-          />
-        }
+        onOpenPalette={openCommandPalette}
+        onOpenApprovals={openApprovalsWorkbench}
+        actions={settingsActions}
       />
 
       <main className={cn("flex min-h-0 flex-1 overflow-hidden", !sidebarCollapsed && "max-lg:flex-col max-lg:overflow-y-auto")}>
@@ -1121,7 +1227,7 @@ export default function App() {
           <Breadcrumb
             current={activeModuleMeta}
             related={relatedModules}
-            onNavigate={(id) => openModule(id as (typeof MODULES)[number]["id"])}
+            onNavigate={navigateModule}
           />
         )}
 
@@ -1133,7 +1239,7 @@ export default function App() {
               pendingApprovalsCount={pendingApprovals.length}
               secretsLocked={secretsLocked}
               daemonHealth={daemonHealth}
-              onNavigateModule={(id) => openModule(id as (typeof MODULES)[number]["id"])}
+              onNavigateModule={navigateModule}
             />
           )}
 
@@ -1159,7 +1265,7 @@ export default function App() {
                 onDisconnect={handleDisconnect}
                 onImportOpensshTrust={handleImportOpensshTrust}
                 onForgetOpenssh={handleForgetOpenssh}
-                onImportNetcatty={() => setNetcattyOpen(true)}
+                onImportNetcatty={openNetcattyImport}
               />
               <AddHostForm
                 hosts={hosts}
@@ -1167,9 +1273,9 @@ export default function App() {
                 proxies={proxies}
                 initialGroup={selectedGroup}
                 editingHost={editingHost}
-                onCancelEdit={() => setEditingHost(null)}
+                onCancelEdit={cancelHostEdit}
                 onSaved={handleHostSaved}
-                onImportNetcatty={() => setNetcattyOpen(true)}
+                onImportNetcatty={openNetcattyImport}
               />
             </div>
           )}
@@ -1219,7 +1325,7 @@ export default function App() {
               <AuditPanel
                 audit={audit}
                 onRefresh={refreshAudit}
-                onReplay={(entry) => setTerminalDrawer({ host: entry.host, command: entry.command })}
+                onReplay={replayAuditEntry}
               />
             </div>
           )}
@@ -1231,10 +1337,7 @@ export default function App() {
               pending={pendingApprovals}
               onApprove={handleApprove}
               onReject={handleReject}
-              onGoExecute={(approval) => {
-                setSelectedHost(approval.host);
-                openModule("execute");
-              }}
+              onGoExecute={goToExecuteForApproval}
             />
           )}
 
@@ -1250,7 +1353,7 @@ export default function App() {
               connectionStatuses={connectionStatuses}
               daemonHealth={daemonHealth}
               onSelectHost={setSelectedHost}
-              onNavigateModule={(id) => openModule(id as (typeof MODULES)[number]["id"])}
+              onNavigateModule={navigateModule}
             />
           )}
         </section>
@@ -1262,13 +1365,13 @@ export default function App() {
         open={terminalDrawer !== null}
         host={terminalDrawer?.host ?? ""}
         command={terminalDrawer?.command ?? null}
-        onClose={() => setTerminalDrawer(null)}
+        onClose={closeTerminalDrawer}
       />
 
       <ConfirmHost />
       <NetcattyImportDialog
         open={netcattyOpen}
-        onClose={() => setNetcattyOpen(false)}
+        onClose={closeNetcattyImport}
         onImported={refresh}
       />
     </div>

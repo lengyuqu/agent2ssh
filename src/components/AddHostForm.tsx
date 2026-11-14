@@ -1,5 +1,5 @@
 import { FileKey, Plus, X } from "lucide-react";
-import { FormEvent, useEffect, useState } from "react";
+import { memo, FormEvent, useEffect, useState  } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import { labelCls } from "../lib/ui-classes";
@@ -67,7 +67,7 @@ function formFromHost(host: HostProfile) {
   };
 }
 
-export default function AddHostForm({
+function AddHostForm({
   hosts,
   groups,
   proxies,
@@ -408,3 +408,5 @@ export default function AddHostForm({
     </Card>
   );
 }
+
+export default memo(AddHostForm);

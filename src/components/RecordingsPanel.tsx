@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState  } from "react";
 import { Pause, Play, RefreshCw, RotateCcw, ShieldAlert, Trash2 } from "lucide-react";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
@@ -13,7 +13,7 @@ import { confirmDialog } from "./ui/dialog";
 import { Spinner } from "./ui/state";
 import { formatBytes, formatDateTime } from "../lib/format";
 
-export default function RecordingsPanel() {
+function RecordingsPanel() {
   const { t } = useI18n();
   const { showToast } = useToast();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -305,3 +305,5 @@ export default function RecordingsPanel() {
     </div>
   );
 }
+
+export default memo(RecordingsPanel);
