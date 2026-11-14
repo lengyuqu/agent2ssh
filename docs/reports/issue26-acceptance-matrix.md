@@ -65,7 +65,8 @@
 |---|---|---|
 | Windows rename / 只读属性 / 共享删除 / 残留 tmp | **真机实测** | #27（`15e2ac5`） |
 | Windows `icacls` 失败路径、SMB、其他版本、断电与目录 `fsync` | **未验证** | #27 遗留 |
-| Linux `hidepid=1/2`、`ptrace_scope`、跨 uid 矩阵 | **未验证** | #28 遗留（本机无 Linux 环境） |
+| Linux `hidepid` × 跨 uid 矩阵 | **容器内实测（6.18.15）** | #28（`docs/reports/evidence/linux-exposure-2026-11-14/`） |
+| Linux `ptrace_scope` | **未验证** | #28 遗留（本机可用内核均未编入 Yama） |
 | Terminal.app 人工肉眼确认 | **未验证** | #28 遗留（本轮为 `openpty()` 伪终端） |
 | 真实断电 / 内核崩溃 / `fsync` 持久性 | **未验证** | 本轮只覆盖进程级 `SIGKILL` |
 
