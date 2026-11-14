@@ -1241,15 +1241,18 @@ paths:
         can do. The check narrows the race and cannot close it — see K14 in
         `docs/KNOWN-ISSUES.md`.
 
-        A `200` is `{"ok": true}` on every path that accepts the stop: the one
-        that compared `expect_pid`, the one that was sent an empty body, and —
-        from a daemon that ignores the body — the one that intended a check and
-        got none. The response carries no receipt, so it does not tell a caller
-        whether `expect_pid` was compared. `agent2ssh daemon stop` names a PID on
-        every real stop, so it cannot report the difference either: a stop that
-        succeeded is logged as unverified even when the daemon verified it. The
-        receipt that would separate them is not implemented (K14,
-        `OPT-LOOP-L2-PENDING.md` L2-137).
+        A successful request naming this PID returns `{"ok": true,
+        "checked_pid": N}`; the field says the responder compared that PID.
+        An empty-body request returns `{"ok": true}` without a receipt. Older
+        daemons may also return that response when they ignore `expect_pid`.
+        A new client continues the existing compatibility path when a receipt is
+        missing, malformed or mismatched, and reports the check as unverified;
+        on macOS, the explicit compatibility request additionally requires a
+        valid JSON acceptance with `ok: true` and otherwise reports an unknown
+        outcome. The response alone cannot establish the daemon version. A receipt is
+        not process authentication or proof of exit. Older clients can ignore
+        the additional field. On macOS normal stopping uses the Mach path; HTTP
+        is only an explicitly enabled unbound compatibility request.
 
         A non-empty body must have a JSON content type and parse as an object
         containing a numeric `expect_pid`. Malformed JSON, an invalid content
@@ -1275,8 +1278,10 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [ok]
                 properties:
                   ok: { type: boolean }
+                  checked_pid: { type: integer, minimum: 0, maximum: 4294967295, description: Present only when the daemon compared and accepted expect_pid. }
         "400":
           description: >
             The non-empty body is malformed, has a non-JSON content type, or

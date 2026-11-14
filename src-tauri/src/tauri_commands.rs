@@ -1793,8 +1793,9 @@ pub fn daemon_stop_unbound_graceful() -> Result<String, String> {
         let pid = crate::daemon_control::read_daemon_pid()
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "No daemon PID record; no request sent.".to_string())?;
-        crate::daemon_control::request_unbound_graceful_shutdown(pid).map_err(|e| e.to_string())?;
-        Ok("Shutdown request accepted without verified identity; process exit is not verified and this client did not remove the PID file.".into())
+        let receipt = crate::daemon_control::request_unbound_graceful_shutdown(pid)
+            .map_err(|e| e.to_string())?;
+        Ok(format!("Shutdown request accepted without verified identity; process exit is not verified and this client did not remove the PID file.{}", receipt.note()))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -1877,8 +1878,10 @@ pub fn daemon_start(app: AppHandle) -> Result<DaemonControlResult, String> {
 pub fn daemon_stop() -> Result<DaemonControlResult, String> {
     match crate::daemon_control::read_daemon_pid().map_err(|e| e.to_string())? {
         Some(pid) => {
-            crate::daemon_control::stop_daemon_process(pid).map_err(|e| e.to_string())?;
-            crate::daemon_control::remove_daemon_pid_file_if(pid).map_err(|e| e.to_string())?;
+            let outcome = crate::daemon_control::stop_daemon_process_detailed(pid)
+                .map_err(|e| e.to_string())?;
+            crate::daemon_control::remove_daemon_pid_file_if(pid)
+                .map_err(|e| format!("{e}{}", outcome.receipt_note()))?;
             let _ = append_diagnostic_log(
                 "info",
                 "tauri",
@@ -1888,7 +1891,7 @@ pub fn daemon_stop() -> Result<DaemonControlResult, String> {
             Ok(DaemonControlResult {
                 running: false,
                 pid: Some(pid),
-                message: format!("Daemon stopped (pid={pid})."),
+                message: format!("Daemon stopped (pid={pid}).{}", outcome.receipt_note()),
                 diagnosis: None,
             })
         }
@@ -1911,17 +1914,23 @@ pub fn daemon_stop() -> Result<DaemonControlResult, String> {
 
 #[tauri::command]
 pub fn daemon_restart(app: AppHandle) -> Result<DaemonControlResult, String> {
+    let mut receipt_note = "";
     if let Some(pid) = crate::daemon_control::read_daemon_pid().map_err(|e| e.to_string())? {
-        crate::daemon_control::stop_daemon_process(pid).map_err(|e| e.to_string())?;
+        let outcome =
+            crate::daemon_control::stop_daemon_process_detailed(pid).map_err(|e| e.to_string())?;
+        receipt_note = outcome.receipt_note();
         let _ = append_diagnostic_log(
             "info",
             "tauri",
             "daemon restart terminated existing process",
             Some(serde_json::json!({ "pid": pid })),
         );
-        crate::daemon_control::remove_daemon_pid_file_if(pid).map_err(|e| e.to_string())?;
+        crate::daemon_control::remove_daemon_pid_file_if(pid)
+            .map_err(|e| format!("{e}{receipt_note}"))?;
     }
-    daemon_start(app)
+    let mut result = daemon_start(app).map_err(|error| format!("{error}{receipt_note}"))?;
+    result.message.push_str(receipt_note);
+    Ok(result)
 }
 
 /// Stop the daemon at quit time — but only one this app started.

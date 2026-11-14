@@ -56,6 +56,18 @@ impl RunningDaemon {
     }
 
     fn start_with_name(_label: &str, extra_files: &[(&str, &str)], renamed: bool) -> Self {
+        Self::start_with_binary(
+            extra_files,
+            renamed,
+            std::path::Path::new(env!("CARGO_BIN_EXE_agent2ssh-daemon")),
+        )
+    }
+
+    fn start_with_binary(
+        extra_files: &[(&str, &str)],
+        renamed: bool,
+        original: &std::path::Path,
+    ) -> Self {
         let dir = fixture_root().join(format!(
             "a2s-{}-{:x}",
             std::process::id(),
@@ -79,7 +91,6 @@ impl RunningDaemon {
         std::env::set_var(CONFIG_DIR_ENV, &dir);
         std::env::set_var(ADDR_ENV, &addr);
 
-        let original = std::path::Path::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"));
         let binary = if renamed {
             let copy = dir.join(format!("renamed-daemon{}", std::env::consts::EXE_SUFFIX));
             std::fs::copy(original, &copy).expect("copy daemon under a different name");
@@ -168,6 +179,80 @@ impl RunningDaemon {
     }
 }
 
+/// Set both paths to binaries built from a pre-receipt revision to exercise
+/// real old/new combinations; ordinary CI still covers their protocol shapes.
+#[test]
+#[ignore = "requires AGENT2SSH_TEST_OLD_CLI and AGENT2SSH_TEST_OLD_DAEMON binaries"]
+#[serial_test::serial]
+fn real_old_and_new_daemon_clients_interoperate_when_old_binaries_are_supplied() {
+    let old_cli = std::env::var_os("AGENT2SSH_TEST_OLD_CLI").expect("old CLI path is required");
+    let old_daemon =
+        std::env::var_os("AGENT2SSH_TEST_OLD_DAEMON").expect("old daemon path is required");
+    for old_server in [false, true] {
+        let mut daemon = if old_server {
+            RunningDaemon::start_with_binary(&[], false, std::path::Path::new(&old_daemon))
+        } else {
+            RunningDaemon::start("new-daemon-old-client", &[])
+        };
+        let mut old_client = Command::new(&old_cli)
+            .args(["daemon", "stop"])
+            .env(CONFIG_DIR_ENV, &daemon.dir)
+            .env(ADDR_ENV, std::env::var(ADDR_ENV).unwrap())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run old CLI");
+        let guard = ChildGuard(&mut old_client);
+        // The old macOS observer does not recognize an unreaped child zombie.
+        // Reap it as an independently launched daemon would be reaped.
+        wait_until("old client to stop daemon", Duration::from_secs(10), || {
+            daemon.child.try_wait().unwrap().is_some()
+        });
+        let mut status = None;
+        wait_until("old client to exit", Duration::from_secs(10), || {
+            status = guard.0.try_wait().unwrap();
+            status.is_some()
+        });
+        let mut stderr = String::new();
+        use std::io::Read;
+        guard
+            .0
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        assert!(status.unwrap().success(), "old client: {stderr}");
+    }
+    {
+        let mut daemon =
+            RunningDaemon::start_with_binary(&[], false, std::path::Path::new(&old_daemon));
+        let pid = daemon.child.id();
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            agent2ssh::daemon_control::request_unbound_graceful_shutdown(pid).unwrap(),
+            agent2ssh::daemon_control::ShutdownReceipt::Unverified
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            agent2ssh::daemon_control::stop_daemon_process_detailed(pid).unwrap(),
+            agent2ssh::daemon_control::DaemonStopOutcome::Http(
+                agent2ssh::daemon_control::ShutdownReceipt::Unverified
+            )
+        );
+        wait_until(
+            "new client to stop old daemon",
+            Duration::from_secs(10),
+            || daemon.child.try_wait().unwrap().is_some(),
+        );
+        let log = std::fs::read_to_string(daemon.dir.join("app.log")).unwrap_or_default();
+        assert!(
+            log.contains("without a verifiable expect_pid receipt"),
+            "{log}"
+        );
+    }
+}
+
 /// Exercise daemon draining with an explicit compatibility request on macOS;
 /// this helper is not an implementation of the production stop contract.
 fn request_drain_for_test(pid: u32) -> Result<(), String> {
@@ -251,6 +336,11 @@ fn stop_daemon_process_waits_for_a_graceful_exit() {
 
     let started = Instant::now();
     request_drain_for_test(pid).expect("stop the daemon");
+    let log = std::fs::read_to_string(daemon.dir.join("app.log")).unwrap_or_default();
+    assert!(
+        !log.contains("without a verifiable expect_pid receipt"),
+        "a matching receipt must not be reported missing: {log}"
+    );
 
     assert!(
         started.elapsed() < Duration::from_secs(7),
@@ -1350,10 +1440,17 @@ fn startup_does_not_accept_another_process_health_response() {
 #[serial_test::serial]
 fn the_shutdown_route_stops_the_daemon_gracefully() {
     let mut daemon = RunningDaemon::start("route", &[]);
-    #[cfg(not(target_os = "macos"))]
-    assert!(request_graceful_shutdown(), "the admin token is accepted");
-    #[cfg(target_os = "macos")]
-    request_drain_for_test(daemon.child.id()).expect("explicit test compatibility request");
+    // The historical client sends no body and ignores any extra response fields.
+    let response = local_daemon_request(
+        "POST",
+        "/shutdown",
+        Some(&daemon.token),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    assert_eq!(response.status, 200);
+    let body: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+    assert_eq!(body, serde_json::json!({"ok": true}));
 
     wait_until("the daemon to exit", Duration::from_secs(10), || {
         daemon.child.try_wait().ok().flatten().is_some()
@@ -1364,6 +1461,19 @@ fn the_shutdown_route_stops_the_daemon_gracefully() {
         "a requested shutdown exits cleanly: {status:?}"
     );
     assert!(!daemon.pid_file().exists(), "and removes its pid file");
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+#[serial_test::serial]
+fn graceful_shutdown_client_still_sends_an_empty_request() {
+    let mut daemon = RunningDaemon::start("empty-client", &[]);
+    assert!(request_graceful_shutdown());
+    wait_until(
+        "empty-body client to stop daemon",
+        Duration::from_secs(10),
+        || daemon.child.try_wait().unwrap().is_some(),
+    );
 }
 
 #[test]
@@ -1817,8 +1927,7 @@ fn a_daemon_that_ignores_the_expected_pid_stops_and_says_so() {
         "the stop completes once the old daemon's 200 has been force-killed: {stopped:?}"
     );
     // The warning may say that the receipt is missing; it may not claim to know
-    // the daemon's version, because a current daemon that compared and matched
-    // answers the same 200 (#20).
+    // the daemon's version, because a response alone cannot establish it.
     let log = std::fs::read_to_string(dir.join("app.log")).unwrap_or_default();
     assert!(
         log.contains("without a verifiable expect_pid receipt"),
@@ -1831,6 +1940,144 @@ fn a_daemon_that_ignores_the_expected_pid_stops_and_says_so() {
     let _ = std::fs::remove_dir_all(&dir);
     common::restore_default_config_env();
     std::env::remove_var(ADDR_ENV);
+}
+
+/// A real stand-in process and HTTP responder exercise the actual stop client
+/// against wrong, malformed and fabricated receipts, not just the JSON parser.
+#[cfg(not(target_os = "macos"))]
+#[test]
+#[serial_test::serial]
+fn stop_classifies_untrusted_receipts_without_claiming_authentication() {
+    use agent2ssh::daemon_control::{
+        stop_daemon_process_detailed, DaemonStopOutcome, ShutdownReceipt,
+    };
+    use std::io::{Read, Write};
+    use std::sync::Mutex;
+
+    for response_kind in [
+        "wrong",
+        "malformed",
+        "fabricated",
+        "conflict_same",
+        "conflict_missing",
+    ] {
+        let dir = race_config_dir("receipt-stub");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        std::env::set_var(CONFIG_DIR_ENV, &dir);
+        std::env::set_var(ADDR_ENV, listener.local_addr().unwrap().to_string());
+        let child = Arc::new(Mutex::new(stand_in_named_daemon(&dir)));
+        let pid = child.lock().unwrap().id();
+        std::thread::sleep(Duration::from_millis(200));
+        let served_dir = std::fs::canonicalize(&dir).unwrap().display().to_string();
+        let process = child.clone();
+        let server = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0; 1024];
+                let header_end = loop {
+                    let n = stream.read(&mut chunk).unwrap();
+                    assert!(n > 0, "request ended before headers");
+                    request.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                };
+                let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                let post = request.starts_with(b"POST /shutdown ");
+                while request.len() < header_end + content_length {
+                    let n = stream.read(&mut chunk).unwrap();
+                    assert!(n > 0, "request ended before body");
+                    request.extend_from_slice(&chunk[..n]);
+                }
+                let body = if !post {
+                    serde_json::json!({"ok": true, "pid": pid, "config_dir": served_dir})
+                        .to_string()
+                } else {
+                    match response_kind {
+                        "wrong" => {
+                            serde_json::json!({"ok": true, "checked_pid": pid.wrapping_add(1)})
+                                .to_string()
+                        }
+                        "malformed" => "not json".to_string(),
+                        "conflict_same" => serde_json::json!({"error": format!("this daemon is pid {pid}, not the pid {pid}")}).to_string(),
+                        "conflict_missing" => serde_json::json!({"error": "conflict"}).to_string(),
+                        _ => serde_json::json!({"ok": true, "checked_pid": pid}).to_string(),
+                    }
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    if post && response_kind.starts_with("conflict_") {
+                        "409 Conflict"
+                    } else {
+                        "200 OK"
+                    },
+                    body.len(),
+                    body
+                )
+                .unwrap();
+                if post {
+                    if !response_kind.starts_with("conflict_") {
+                        process.lock().unwrap().kill().unwrap();
+                    }
+                    break;
+                }
+            }
+        });
+        let outcome = stop_daemon_process_detailed(pid);
+        server.join().unwrap();
+        if response_kind.starts_with("conflict_") {
+            let error = outcome.unwrap_err().to_string();
+            assert!(
+                error.contains("did not identify a different PID"),
+                "{error}"
+            );
+            let mut child = child.lock().unwrap();
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "a refused stop must not signal the process"
+            );
+            child.kill().unwrap();
+            child.wait().unwrap();
+            drop(child);
+            let _ = std::fs::remove_dir_all(&dir);
+            common::restore_default_config_env();
+            std::env::remove_var(ADDR_ENV);
+            continue;
+        }
+        let outcome = outcome.unwrap();
+        child.lock().unwrap().wait().unwrap();
+        let expected = if response_kind == "fabricated" {
+            ShutdownReceipt::Checked
+        } else {
+            ShutdownReceipt::Unverified
+        };
+        assert_eq!(
+            outcome,
+            DaemonStopOutcome::Http(expected),
+            "{response_kind}"
+        );
+        let log = std::fs::read_to_string(dir.join("app.log")).unwrap_or_default();
+        assert_eq!(
+            log.contains("without a verifiable expect_pid receipt"),
+            expected == ShutdownReceipt::Unverified
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        common::restore_default_config_env();
+        std::env::remove_var(ADDR_ENV);
+    }
 }
 
 /// The body limit is the third refusal these two routes can answer, and the
@@ -1983,6 +2230,11 @@ fn a_daemon_refuses_a_shutdown_that_names_another_process() {
     )
     .expect("the daemon answers its own stop");
     assert_eq!(accepted.status, 200, "{}", accepted.body);
+    let receipt: serde_json::Value = serde_json::from_str(&accepted.body).unwrap();
+    assert_eq!(
+        receipt,
+        serde_json::json!({"ok": true, "checked_pid": own_pid})
+    );
     wait_until(
         "the daemon to exit after its own stop",
         Duration::from_secs(10),

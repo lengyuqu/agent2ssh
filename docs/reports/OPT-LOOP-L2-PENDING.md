@@ -1680,6 +1680,10 @@ batch 7 判「不成立」时用的论据是「`code.is_some()` 时 `interrupted
 
 ### L2-137（新）：`/shutdown` 的 200 不带回执，每次成功停止都被记成「未核验」
 
+**2026-11-14 更新：已实现回执。** 命名 PID 且比较成功时返回 `checked_pid`；空 body 不返回该字段。客户端对缺失、无效或不匹配的回执保留旧版兼容行为，并向用户与日志报告未验证；回执不证明进程身份。macOS 默认使用 Mach 停止，HTTP 仅用于显式兼容路径。以下是实现前的分析记录。
+
+真实旧版二进制组合测试需显式提供同一平台的旧 CLI 与 daemon 路径，执行 `AGENT2SSH_TEST_OLD_CLI=<旧CLI> AGENT2SSH_TEST_OLD_DAEMON=<旧daemon> cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features daemon --test daemon_stop_e2e real_old_and_new_daemon_clients_interoperate_when_old_binaries_are_supplied -- --ignored`。测试为每个进程使用临时配置目录；不提供二进制时该用例显示 ignored，而不是伪装成通过。其余协议回归不依赖旧版二进制。
+
 **事实链**（本轮逐条读过，不是推断）
 
 - daemon 只有一处 200：`bin/agent2ssh-daemon.rs:227` 的 `Ok(Json(OkBody { ok: true }))`；`OkBody` 只有 `ok: bool`（`:1231-1233`，全文件 30 处引用），所以「加一个回执字段」不能改 `OkBody`，必须新起只给本路由用的类型。
@@ -1698,6 +1702,8 @@ batch 7 判「不成立」时用的论据是「`code.is_some()` 时 `interrupted
 **覆盖现状**：`git grep predates src-tauri/` 只命中实现处与一条测试注释，**没有任何断言**。「新 daemon 的停止不产生 predates 记录」仍是零覆盖（L2-3、L2-30 各记了一半）。本轮只把那条测试的自述改准，**没有加断言**——加了就是钉住一句要改的文案。
 
 ### L2-138（新）：`409` 报出的 PID 是对端文案里的字，可能与请求里的 PID 相同
+
+**2026-11-14 更新：已修复误导提示。** PID 缺失、为 0 或等于请求 PID 时，报告响应无法识别另一个 PID，不再生成自相矛盾的重试建议；仍拒绝该停止且不发送信号。以下是修复前记录。
 
 `reported_pid` 从错误文案里 `split("is pid ").nth(1)` 取词解析；`Refused { actual }` → `ExpectedPidRefused { expected, actual }` → `Display`（`daemon_control.rs:827-832`）输出「the daemon listening now is pid {actual}, not the pid {expected} … Retry the stop to address pid {actual}」。`actual == expected` 时这三句自相矛盾，并让用户去重试一个只会重复失败的动作用。
 

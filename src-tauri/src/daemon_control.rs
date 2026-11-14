@@ -1890,6 +1890,57 @@ impl From<anyhow::Error> for DaemonStopError {
     }
 }
 
+/// Evidence in a successful HTTP shutdown response. This is a protocol receipt,
+/// not authentication of the process that sent it or proof that it exited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownReceipt {
+    Checked,
+    Unverified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonStopOutcome {
+    Bound,
+    AlreadyExited,
+    Http(ShutdownReceipt),
+}
+
+impl DaemonStopOutcome {
+    pub fn receipt_note(self) -> &'static str {
+        match self {
+            Self::Http(ShutdownReceipt::Unverified) => " The shutdown response did not verify the PID check; the daemon version cannot be determined.",
+            _ => "",
+        }
+    }
+}
+
+impl ShutdownReceipt {
+    pub fn note(self) -> &'static str {
+        match self {
+            Self::Checked => " The responder reported a matching PID check.",
+            Self::Unverified => " The shutdown response did not verify the PID check; the daemon version cannot be determined.",
+        }
+    }
+}
+
+pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError> {
+    stop_daemon_process_detailed(pid).map(|_| ())
+}
+
+fn shutdown_receipt(body: &str, expected_pid: u32) -> ShutdownReceipt {
+    let value: serde_json::Value = match serde_json::from_str(body) {
+        Ok(value) => value,
+        Err(_) => return ShutdownReceipt::Unverified,
+    };
+    if value.get("ok").and_then(|v| v.as_bool()) == Some(true)
+        && value.get("checked_pid").and_then(|v| v.as_u64()) == Some(u64::from(expected_pid))
+    {
+        ShutdownReceipt::Checked
+    } else {
+        ShutdownReceipt::Unverified
+    }
+}
+
 /// The outcome of asking the daemon to shut itself down.
 #[cfg(not(target_os = "macos"))]
 enum ShutdownRequest {
@@ -1900,12 +1951,7 @@ enum ShutdownRequest {
     },
     /// Refused or unreadable for another reason, with something to print.
     NotAccepted(String),
-    /// A `200` to a request that named a PID — the only arm a `200` can reach
-    /// in that case, because the guarded arm above requires
-    /// `expected_pid.is_none()`. It therefore also catches a current daemon
-    /// that compared the PID and matched, so the answer says only "the request
-    /// was accepted", never "the check did or did not happen". Telling those
-    /// apart needs a receipt the daemon does not send yet (K14).
+    /// The accepted response did not contain a matching PID receipt.
     AcceptedUnchecked,
 }
 
@@ -1945,19 +1991,13 @@ fn request_shutdown(expected_pid: Option<u32>) -> ShutdownRequest {
         Ok(response) if response.status == 200 && expected_pid.is_none() => {
             ShutdownRequest::Accepted
         }
-        Ok(response) if response.status == 409 => match expected_pid {
-            // An older daemon rejects a body it cannot parse with 422, never
-            // 409, so a 409 here is the check answering.
-            Some(_) => ShutdownRequest::Refused {
-                actual: reported_pid(&response.body).unwrap_or(0),
-            },
-            None => ShutdownRequest::NotAccepted(
-                "the daemon refused an unspecified shutdown".to_string(),
-            ),
+        Ok(response) if response.status == 409 => shutdown_conflict(expected_pid, &response.body),
+        Ok(response) if response.status == 200 => match expected_pid {
+            Some(pid) if shutdown_receipt(&response.body, pid) == ShutdownReceipt::Checked => {
+                ShutdownRequest::Accepted
+            }
+            _ => ShutdownRequest::AcceptedUnchecked,
         },
-        // A daemon without the check ignores the body, so this is the old
-        // response to a request that asked for more than it can promise.
-        Ok(response) if response.status == 200 => ShutdownRequest::AcceptedUnchecked,
         // 401 and 403 are the same answer to this caller: the daemon did not
         // accept the token this config handed it, so it is not our daemon or the
         // token was replaced under us. Nothing was stopped either way.
@@ -1976,6 +2016,19 @@ fn request_shutdown(expected_pid: Option<u32>) -> ShutdownRequest {
         Err(error) => {
             ShutdownRequest::NotAccepted(format!("the shutdown request could not be sent: {error}"))
         }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn shutdown_conflict(expected_pid: Option<u32>, body: &str) -> ShutdownRequest {
+    match expected_pid {
+        Some(expected) => match reported_pid(body) {
+            Some(actual) if actual != 0 && actual != expected => ShutdownRequest::Refused { actual },
+            _ => ShutdownRequest::NotAccepted(
+                "the daemon refused the shutdown, but its response did not identify a different PID; no signal was sent and the PID file is retained. Inspect the daemon before retrying".into(),
+            ),
+        },
+        None => ShutdownRequest::NotAccepted("the daemon refused an unspecified shutdown".into()),
     }
 }
 
@@ -2019,10 +2072,12 @@ pub fn request_graceful_shutdown() -> bool {
 /// nothing. A stop that may have been delivered is not retried and does not
 /// delete records when exit was not observed.
 #[cfg(target_os = "macos")]
-pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError> {
+pub fn stop_daemon_process_detailed(
+    pid: u32,
+) -> std::result::Result<DaemonStopOutcome, DaemonStopError> {
     let config = config_dir_absolute()?;
     match crate::daemon_identity::macos_mach::stop(&config, pid) {
-        crate::daemon_identity::macos_mach::StopOutcome::Exited => Ok(()),
+        crate::daemon_identity::macos_mach::StopOutcome::Exited => Ok(DaemonStopOutcome::Bound),
         crate::daemon_identity::macos_mach::StopOutcome::Refused(detail) => {
             Err(DaemonStopError::UnverifiedIdentity(format!(
                 "daemon PID {pid} is not bound to an authenticated process object; {detail}; no shutdown or signal was sent and this client did not remove the PID file. Inspect the process and records before recovery"
@@ -2062,7 +2117,9 @@ fn unverified_stop_reason(pid: u32, access_error: Option<String>) -> String {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError> {
+pub fn stop_daemon_process_detailed(
+    pid: u32,
+) -> std::result::Result<DaemonStopOutcome, DaemonStopError> {
     use DaemonStopError as Refused;
     let Some(start_time) = daemon_process_start_time(pid) else {
         if daemon_pid_state(pid) != DaemonPidState::Stale {
@@ -2076,7 +2133,7 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
         }
         // With no start time we cannot distinguish an old marker from a
         // replacement process; a stale marker is safer than removing it.
-        return Ok(());
+        return Ok(DaemonStopOutcome::AlreadyExited);
     };
     // Bind the process object before asking for a shutdown, so the grace period
     // and any forced termination both address the object that was verified here
@@ -2133,20 +2190,11 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
     if crate::daemon_activity::read_admin_token().is_none() {
         return Err(Refused::NotAuthenticated);
     }
-    // The daemon that answered `/health` above is addressed by name here, so a
-    // listener that changed hands in between refuses instead of exiting.
-    match request_shutdown(Some(pid)) {
-        ShutdownRequest::Accepted => {}
-        // Every `200` to a stop that named a PID lands here, a current daemon
-        // that compared the PID and matched included: the guard on the first
-        // arm requires `expected_pid.is_none()`, which a real stop never is. So
-        // this arm cannot say that the daemon is old — only that its answer
-        // carried no receipt. It is still the daemon that health-checked a
-        // moment ago (its config directory matched), so continuing is the
-        // previous behaviour, not a hole this opened; claiming the check
-        // happened would be the lie. The warning therefore reports the missing
-        // receipt and says the version is undeterminable, rather than
-        // attributing it to an older daemon (#20).
+    // A matching receipt reports a PID comparison, not process identity.
+    let receipt = match request_shutdown(Some(pid)) {
+        ShutdownRequest::Accepted => ShutdownReceipt::Checked,
+        // Keep compatibility with older daemons; a missing or invalid receipt
+        // cannot establish which version answered or whether it checked.
         ShutdownRequest::AcceptedUnchecked => {
             let _ = crate::diagnostics::append_diagnostic_log(
                 "warn",
@@ -2154,6 +2202,7 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
                 "the daemon accepted the shutdown without a verifiable expect_pid receipt; its version cannot be determined from this response",
                 Some(serde_json::json!({ "pid": pid })),
             );
+            ShutdownReceipt::Unverified
         }
         ShutdownRequest::Refused { actual } => {
             return Err(Refused::ExpectedPidRefused {
@@ -2162,7 +2211,7 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
             })
         }
         ShutdownRequest::NotAccepted(detail) => return Err(Refused::NotAccepted(detail)),
-    }
+    };
     match wait_for_bound_exit(bound.as_ref(), pid, start_time, GRACEFUL_STOP_WAIT) {
         ProcessObservation::Exited => {}
         ProcessObservation::Unknown => {
@@ -2184,13 +2233,13 @@ pub fn stop_daemon_process(pid: u32) -> std::result::Result<(), DaemonStopError>
         }
     }
     clear_daemon_owner_if(pid, start_time)?;
-    Ok(())
+    Ok(DaemonStopOutcome::Http(receipt))
 }
 
 /// Explicit, unbound legacy compatibility attempt. Acceptance is not proof of
 /// process identity or exit. Never wait, signal, retry, or clean a PID record.
 #[cfg(target_os = "macos")]
-pub fn request_unbound_graceful_shutdown(pid: u32) -> Result<()> {
+pub fn request_unbound_graceful_shutdown(pid: u32) -> Result<ShutdownReceipt> {
     let addr = crate::local_daemon_connect_addr();
     let socket: std::net::SocketAddr = addr.parse().map_err(|_| {
         anyhow!("unbound shutdown requires a numeric loopback address; no request sent")
@@ -2277,12 +2326,69 @@ pub fn request_unbound_graceful_shutdown(pid: u32) -> Result<()> {
     if !accepted {
         anyhow::bail!("shutdown response was not a valid acceptance; process outcome is unknown and this client did not remove the PID file");
     }
-    Ok(())
+    let receipt = shutdown_receipt(&response.body, pid);
+    if receipt == ShutdownReceipt::Unverified {
+        let _ = crate::diagnostics::append_diagnostic_log(
+            "warn", "daemon_control",
+            "the daemon accepted the shutdown without a verifiable expect_pid receipt; its version cannot be determined from this response",
+            Some(serde_json::json!({"pid": pid})),
+        );
+    }
+    Ok(receipt)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shutdown_receipt_requires_true_ok_and_matching_numeric_pid() {
+        for body in [
+            r#"{}"#,
+            r#"{"ok":true}"#,
+            r#"{"ok":false,"checked_pid":42}"#,
+            r#"{"ok":true,"checked_pid":43}"#,
+            r#"{"ok":true,"checked_pid":"42"}"#,
+            r#"{"ok":true,"checked_pid":null}"#,
+            "not json",
+            "",
+        ] {
+            assert_eq!(
+                shutdown_receipt(body, 42),
+                ShutdownReceipt::Unverified,
+                "{body}"
+            );
+        }
+        assert_eq!(
+            shutdown_receipt(r#"{"ok":true,"checked_pid":42}"#, 42),
+            ShutdownReceipt::Checked
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn conflict_without_a_different_pid_does_not_report_a_fictitious_daemon() {
+        for body in [
+            r#"{}"#,
+            r#"{"error":"this daemon is pid 42, not the pid 42"}"#,
+            r#"{"error":"this daemon is pid 0, not the pid 42"}"#,
+        ] {
+            assert!(
+                matches!(
+                    shutdown_conflict(Some(42), body),
+                    ShutdownRequest::NotAccepted(_)
+                ),
+                "{body}"
+            );
+        }
+        assert!(matches!(
+            shutdown_conflict(
+                Some(42),
+                r#"{"error":"this daemon is pid 43, not the pid 42"}"#
+            ),
+            ShutdownRequest::Refused { actual: 43 }
+        ));
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

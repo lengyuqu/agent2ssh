@@ -214,6 +214,13 @@ struct ShutdownRequest {
     expect_pid: Option<u32>,
 }
 
+#[derive(Debug, serde::Serialize)]
+struct ShutdownResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checked_pid: Option<u32>,
+}
+
 /// Ask the daemon to shut down the way a termination signal would. Admin-only:
 /// stopping the daemon ends every session and forward it holds.
 ///
@@ -230,7 +237,7 @@ async fn daemon_shutdown(
     Extension(auth): Extension<AuthContext>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
-) -> Result<Json<OkBody>, (StatusCode, Json<ErrorBody>)> {
+) -> Result<Json<ShutdownResponse>, (StatusCode, Json<ErrorBody>)> {
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     require_admin(&auth)?;
     #[cfg(target_os = "macos")]
@@ -256,7 +263,7 @@ async fn daemon_shutdown(
         )
     };
     let own_pid = std::process::id();
-    match body {
+    let checked_pid = match body {
         Some(Json(ShutdownRequest {
             expect_pid: Some(expected),
         })) if expected != own_pid => {
@@ -278,7 +285,7 @@ async fn daemon_shutdown(
         // honour it.
         Some(Json(ShutdownRequest {
             expect_pid: Some(_),
-        })) => {}
+        })) => Some(own_pid),
         // An explicit `expect_pid: null` asks for an unchecked stop. Dropping
         // the check is not the same as making no claim, so say so rather than
         // quietly honouring it; an empty body is how a `curl` omits the check.
@@ -288,11 +295,14 @@ async fn daemon_shutdown(
                 "expect_pid must be a PID; send an empty body to stop without a check",
             ))
         }
-        None => {}
-    }
+        None => None,
+    };
     tracing::info!(pid = own_pid, "shutdown requested over HTTP");
     SHUTDOWN_REQUESTED.notify_one();
-    Ok(Json(OkBody { ok: true }))
+    Ok(Json(ShutdownResponse {
+        ok: true,
+        checked_pid,
+    }))
 }
 
 /// Resolve once a shutdown signal arrives: Ctrl-C on every platform, plus
@@ -6347,7 +6357,13 @@ mod tests {
         .await;
         #[cfg(target_os = "macos")]
         if std::env::var("AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN").as_deref() == Ok("1") {
-            assert!(matches!(accepted, Ok(Json(OkBody { ok: true }))));
+            assert!(matches!(
+                accepted,
+                Ok(Json(ShutdownResponse {
+                    ok: true,
+                    checked_pid: Some(_)
+                }))
+            ));
         } else {
             assert!(matches!(accepted, Err((StatusCode::FORBIDDEN, _))));
         }

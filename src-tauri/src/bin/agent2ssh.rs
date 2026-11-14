@@ -4,7 +4,7 @@ use agent2ssh::approval::{
 };
 use agent2ssh::daemon_control::{
     daemon_health_pid, daemon_pid_state, read_daemon_pid, remove_daemon_pid_file_if,
-    start_daemon_background, stop_daemon_process, DaemonPidState,
+    start_daemon_background, DaemonPidState,
 };
 use agent2ssh::embedded_ssh::{
     import_known_hosts_from_ssh, remove_system_known_host, spawn_terminal, TerminalCommand,
@@ -3197,15 +3197,17 @@ async fn async_main() -> Result<()> {
                         #[cfg(target_os = "macos")]
                         {
                             eprintln!("Warning: the endpoint is not bound to a process; this may stop the wrong daemon and expose the admin token. No automatic signal, retry or PID cleanup will occur.");
-                            agent2ssh::daemon_control::request_unbound_graceful_shutdown(pid)?;
-                            anyhow::bail!("Shutdown request accepted without verified identity; process exit is not verified and the PID file was not removed by this client. Inspect the process before acting again.");
+                            let receipt =
+                                agent2ssh::daemon_control::request_unbound_graceful_shutdown(pid)?;
+                            anyhow::bail!("Shutdown request accepted without verified identity; process exit is not verified and the PID file was not removed by this client.{} Inspect the process before acting again.", receipt.note());
                         }
                         #[cfg(not(target_os = "macos"))]
                         anyhow::bail!("--allow-unbound-graceful is available only on macOS");
                     }
-                    stop_daemon_process(pid)?;
-                    remove_daemon_pid_file_if(pid)?;
-                    println!("Daemon stopped (pid={}).", pid);
+                    let outcome = agent2ssh::daemon_control::stop_daemon_process_detailed(pid)?;
+                    remove_daemon_pid_file_if(pid)
+                        .map_err(|error| anyhow::anyhow!("{error}{}", outcome.receipt_note()))?;
+                    println!("Daemon stopped (pid={}).{}", pid, outcome.receipt_note());
                 }
                 DaemonCommands::Status { json } => {
                     let report = agent2ssh::daemon_control::daemon_status_report()?;
@@ -3219,7 +3221,10 @@ async fn async_main() -> Result<()> {
                     if let Some(pid) = read_daemon_pid()? {
                         // Waits for the old daemon to exit, so the new one can
                         // bind the port it was still holding while it drained.
-                        stop_daemon_process(pid)?;
+                        let outcome = agent2ssh::daemon_control::stop_daemon_process_detailed(pid)?;
+                        if !outcome.receipt_note().is_empty() {
+                            eprintln!("{}", outcome.receipt_note().trim());
+                        }
                         remove_daemon_pid_file_if(pid)?;
                     }
                     let daemon_bin = daemon_binary_path()?;
