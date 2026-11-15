@@ -3740,7 +3740,12 @@ pub fn run_tauri() {
     crate::diagnostics::install_panic_hook("tauri");
     // B58: Apply Wayland compatibility patches on Linux before Tauri builder.
     apply_wayland_compat();
-    // K1: migrate any legacy plaintext passwords into the app-managed encrypted store (no-op once clean).
+    // K1: auto-unlock from the OS-wrapped vault key (DPAPI/Keychain/libsecret)
+    // so the store is open before any surface asks a credential of it, then
+    // migrate any legacy plaintext passwords into the store (no-op once clean).
+    if !crate::secrets::try_auto_unlock() {
+        eprintln!("note: credential store stays locked until the master password is entered");
+    }
     if let Err(e) = crate::store::migrate_plaintext_secrets() {
         eprintln!("warning: secret migration skipped: {e}");
     }

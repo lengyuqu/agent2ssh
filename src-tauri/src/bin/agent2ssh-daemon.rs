@@ -5778,6 +5778,12 @@ async fn main() -> anyhow::Result<()> {
     agent2ssh::install_panic_hook("daemon");
 
     // K1: migrate any legacy plaintext passwords into the app-managed encrypted store (no-op once clean).
+    // K1: auto-unlock from the OS-wrapped vault key so agent sessions resolve
+    // credentials without a human typing the master password, then migrate
+    // any legacy plaintext (no-op once clean).
+    if !agent2ssh::secrets_try_auto_unlock() {
+        eprintln!("note: credential store stays locked (no OS autounlock wrap; set AGENT2SSH_MASTER_PASSWORD or unlock via the desktop)");
+    }
     if let Err(e) = agent2ssh::migrate_plaintext_secrets() {
         eprintln!("warning: secret migration skipped: {e}");
     }

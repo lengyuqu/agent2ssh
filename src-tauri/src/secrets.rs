@@ -790,7 +790,293 @@ pub fn is_unlocked() -> bool {
     if backend_is_memory() {
         return true;
     }
-    cached_key().is_some()
+    cached_key().is_some() || try_auto_unlock()
+}
+
+// ── OS-backed auto-unlock (K1 convenience layer) ─────────────────────────────
+
+// A master-password prompt on every launch made the app unusable as an agent
+// substrate: daemon / MCP / CLI surfaces start before any human has typed
+// anything, so the store sat locked and every credential reference failed to
+// resolve. The derived vault key is therefore wrapped by the OS credential
+// store — DPAPI (user scope) on Windows, Keychain on macOS, libsecret on
+// Linux — and silently re-unwrapped at startup. The master password stays as
+// the recovery path (wrong/corrupt wrap falls back to the prompt) and is
+// re-wrapped on change. This is exactly the trust model of Electron
+// safeStorage: same-user processes can decrypt, which is the boundary the
+// desktop already assumes.
+
+const AUTOUNLOCK_FILE: &str = "autounlock.bin";
+
+#[cfg(target_os = "macos")]
+const AUTOUNLOCK_KEYCHAIN_SERVICE: &str = "agent2ssh autounlock";
+
+fn autounlock_path() -> Result<std::path::PathBuf> {
+    Ok(config_dir()?.join(AUTOUNLOCK_FILE))
+}
+
+static AUTOUNLOCK_TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Unlock the store from the OS-wrapped key, once per process. Subsequent
+/// calls are no-ops so a deliberate `lock` stays locked and failed attempts
+/// fall back to the master-password prompt instead of retrying forever.
+pub fn try_auto_unlock() -> bool {
+    if backend_is_memory() {
+        return false;
+    }
+    if cached_key().is_some() {
+        return true;
+    }
+    if AUTOUNLOCK_TRIED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    let Some(key) = autounlock::load() else {
+        return false;
+    };
+    let Some(raw) = secrets_path()
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+    else {
+        return false;
+    };
+    if verify_derived_key(&key, &raw).is_err() {
+        // The wrap does not open this store (rebuilt profile, restored older
+        // store) — drop it so it cannot shadow a future re-wrap.
+        let _ = autounlock::clear();
+        return false;
+    }
+    set_cached_key(Some(key));
+    true
+}
+
+/// Remove the OS-wrapped key. The store then requires the master password on
+/// every launch again.
+pub fn disable_auto_unlock() -> Result<()> {
+    autounlock::clear()
+}
+
+/// Verify a candidate vault key against the on-disk store (v2 key-check
+/// first, legacy v1 whole-blob decrypt as the fallback).
+fn verify_derived_key(key: &[u8; 32], raw: &str) -> Result<()> {
+    let probe: serde_json::Value = serde_json::from_str(raw)?;
+    let version = probe.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+    if version >= 2 {
+        let store: EncryptedStoreV2 = serde_json::from_str(raw)?;
+        if !verify_key_check(key, &store.entries)? {
+            if let Some((account, entry)) = store.entries.iter().next() {
+                let nonce = b64().decode(entry.nonce.as_bytes())?;
+                let ciphertext = b64().decode(entry.ciphertext.as_bytes())?;
+                decrypt_entry(key, account, &nonce, &ciphertext)?;
+            }
+        }
+        Ok(())
+    } else {
+        let store: EncryptedStoreV1 = serde_json::from_str(raw)?;
+        let nonce = b64().decode(store.nonce.as_bytes())?;
+        let ciphertext = b64().decode(store.ciphertext.as_bytes())?;
+        decrypt_v1_map(key, &nonce, &ciphertext).map(|_| ())
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod autounlock {
+    use super::*;
+    use windows_sys::Win32::Security::Cryptography::{
+        CryptProtectData, CryptUnprotectData, CRYPT_INTEGER_BLOB,
+    };
+    use windows_sys::Win32::System::Memory::LocalFree;
+
+    pub fn store(key: &[u8; 32]) -> Result<()> {
+        let input = CRYPT_INTEGER_BLOB {
+            cbData: key.len() as u32,
+            pbData: key.as_ptr() as *mut u8,
+        };
+        let mut out = CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
+        // SAFETY: the input blob points at the live key for the call; the
+        // output buffer is allocated by the API and released with LocalFree.
+        let ok = unsafe {
+            CryptProtectData(
+                &input,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                &mut out,
+            )
+        };
+        if ok == 0 {
+            return Err(anyhow!("CryptProtectData failed"));
+        }
+        let slice = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) };
+        let blob = slice.to_vec();
+        unsafe {
+            LocalFree(out.pbData as isize);
+        }
+        std::fs::write(autounlock_path()?, blob)?;
+        Ok(())
+    }
+
+    pub fn load() -> Option<[u8; 32]> {
+        let blob = std::fs::read(autounlock_path().ok()?).ok()?;
+        let input = CRYPT_INTEGER_BLOB {
+            cbData: blob.len() as u32,
+            pbData: blob.as_ptr() as *mut u8,
+        };
+        let mut out = CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
+        // SAFETY: mirrors `store`; the output buffer is API-allocated.
+        let ok = unsafe {
+            CryptUnprotectData(
+                &input,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                &mut out,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        let slice = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) };
+        let mut key = [0u8; 32];
+        let valid = slice.len() == 32;
+        if valid {
+            key.copy_from_slice(slice);
+        }
+        unsafe {
+            LocalFree(out.pbData as isize);
+        }
+        valid.then_some(key)
+    }
+
+    pub fn clear() -> Result<()> {
+        let path = autounlock_path()?;
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod autounlock {
+    use super::*;
+
+    pub fn store(key: &[u8; 32]) -> Result<()> {
+        let hexkey = hex::encode(key);
+        let status = std::process::Command::new("security")
+            .args([
+                "add-generic-password",
+                "-a",
+                "agent2ssh",
+                "-s",
+                AUTOUNLOCK_KEYCHAIN_SERVICE,
+                "-w",
+                &hexkey,
+                "-U",
+            ])
+            .output()?;
+        if !status.status.success() {
+            return Err(anyhow!("security add-generic-password failed"));
+        }
+        Ok(())
+    }
+
+    pub fn load() -> Option<[u8; 32]> {
+        let out = std::process::Command::new("security")
+            .args([
+                "find-generic-password",
+                "-a",
+                "agent2ssh",
+                "-s",
+                AUTOUNLOCK_KEYCHAIN_SERVICE,
+                "-w",
+            ])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        decode_key(String::from_utf8(out.stdout).ok()?.trim())
+    }
+
+    pub fn clear() -> Result<()> {
+        let _ = std::process::Command::new("security")
+            .args([
+                "delete-generic-password",
+                "-a",
+                "agent2ssh",
+                "-s",
+                AUTOUNLOCK_KEYCHAIN_SERVICE,
+            ])
+            .output();
+        Ok(())
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+mod autounlock {
+    use super::*;
+
+    pub fn store(key: &[u8; 32]) -> Result<()> {
+        use std::io::Write;
+        let mut child = std::process::Command::new("secret-tool")
+            .args([
+                "store",
+                "--label=agent2ssh",
+                "application",
+                "agent2ssh",
+                "kind",
+                "autounlock",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin.write_all(hex::encode(key).as_bytes())?;
+        }
+        if !child.wait()?.success() {
+            return Err(anyhow!("secret-tool store failed"));
+        }
+        Ok(())
+    }
+
+    pub fn load() -> Option<[u8; 32]> {
+        let out = std::process::Command::new("secret-tool")
+            .args(["lookup", "application", "agent2ssh", "kind", "autounlock"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        decode_key(String::from_utf8(out.stdout).ok()?.trim())
+    }
+
+    pub fn clear() -> Result<()> {
+        let _ = std::process::Command::new("secret-tool")
+            .args(["clear", "application", "agent2ssh", "kind", "autounlock"])
+            .output();
+        Ok(())
+    }
+}
+
+fn decode_key(hexkey: &str) -> Option<[u8; 32]> {
+    let bytes = hex::decode(hexkey.trim()).ok()?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&bytes);
+    Some(key)
 }
 
 fn b64() -> base64::engine::general_purpose::GeneralPurpose {
@@ -1164,6 +1450,7 @@ pub fn unlock_or_init(password: &str) -> Result<()> {
             decrypt_v1_map(&key, &nonce, &ciphertext)?;
         }
         set_cached_key(Some(key));
+        let _ = autounlock::store(&key);
     } else {
         let salt = random_bytes::<16>()?;
         let key = derive_key(password, &salt)?;
@@ -1198,6 +1485,7 @@ pub fn unlock_or_init(password: &str) -> Result<()> {
                 f.write_all(json.as_bytes())?;
                 restrict_file_to_owner(&path)?;
                 set_cached_key(Some(key));
+                let _ = autounlock::store(&key);
             }
             Err(e) if e.kind() == ErrorKind::AlreadyExists => {
                 // Another process won the race. Re-read and verify our
@@ -1224,6 +1512,7 @@ pub fn unlock_or_init(password: &str) -> Result<()> {
                     decrypt_v1_map(&key, &nonce, &ciphertext)?;
                 }
                 set_cached_key(Some(key));
+                let _ = autounlock::store(&key);
             }
             Err(e) => {
                 return Err(anyhow!("failed to create secrets store: {e}"));
@@ -1287,6 +1576,7 @@ pub fn change_master_password(new_password: &str) -> Result<()> {
     atomic_write_file(&path, serde_json::to_string_pretty(&store)?.as_bytes())?;
     restrict_file_to_owner(&path)?;
     set_cached_key(Some(key));
+    let _ = autounlock::store(&key);
     set_retained_master_password(new_password);
     Ok(())
 }
@@ -1321,6 +1611,9 @@ pub fn lock() {
     #[cfg(test)]
     activate_thread_local_key();
     set_cached_key(None);
+    // A deliberate lock must stay locked: consume the auto-unlock attempt so
+    // `is_unlocked` does not silently re-open the store from the OS wrap.
+    AUTOUNLOCK_TRIED.store(true, std::sync::atomic::Ordering::Relaxed);
     *master_password_cell()
         .lock()
         .expect("master password lock poisoned") = None;

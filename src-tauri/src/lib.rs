@@ -174,6 +174,7 @@ pub use remote::{
     DaemonViewEntry, DiagnosticCheck, DiagnosticStatus, RemoteDaemon, VersionCompatibility,
     DEFAULT_DAEMON_ADDR, PROTOCOL_VERSION,
 };
+pub use secrets::try_auto_unlock as secrets_try_auto_unlock;
 pub use session::{
     session_close_core, session_list_core, session_open_core, session_read_core, session_write_core,
 };
