@@ -1,4 +1,4 @@
-import { Clipboard, History, RefreshCw, RotateCcw, SlidersHorizontal } from "lucide-react";
+import { Clipboard, History, RefreshCw, RotateCcw, SlidersHorizontal, Trash2 } from "lucide-react";
 import { memo, useMemo, useState  } from "react";
 import {
   createColumnHelper,
@@ -9,12 +9,14 @@ import {
   type SortingState,
 } from "@tanstack/react-table";
 import { useI18n } from "../i18n";
+import { api } from "../api";
 import type { AuditDecision, AuditEntry, AuditFilter, RiskLevel } from "../types";
 import RiskBadge from "./RiskBadge";
 import { Badge, type BadgeProps } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { ColumnVisibilityMenu, DataTable, selectColumn } from "./ui/data-table";
+import { confirmDialog } from "./ui/dialog";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { Select } from "./ui/select";
@@ -286,6 +288,29 @@ function AuditPanel({ audit, onRefresh, onReplay }: Props) {
         </IconButton>
         <IconButton onClick={() => onRefresh()} title={t("Refresh audit")}>
           <RefreshCw size={15} />
+        </IconButton>
+        <IconButton
+          onClick={async () => {
+            const confirmed = await confirmDialog({
+              title: t("Clear audit"),
+              description: t(
+                "Erase the whole audit trail? This cannot be undone — rotated files are removed too."
+              ),
+              confirmLabel: t("Clear audit"),
+              danger: true,
+            });
+            if (!confirmed) return;
+            try {
+              await api.clearAudit();
+              showToast("success", t("Audit cleared"));
+              onRefresh();
+            } catch (err) {
+              showToast("error", String(err));
+            }
+          }}
+          title={t("Clear audit")}
+        >
+          <Trash2 size={15} />
         </IconButton>
       </div>
 

@@ -3719,6 +3719,13 @@ pub fn list_local_environments_command(
     Ok(crate::local_environments::list_environments())
 }
 
+/// Erase the whole audit trail (audit.jsonl + rotated siblings). An explicit,
+/// UI-confirmed operator action — the audit log is otherwise append-only.
+#[tauri::command]
+pub fn clear_audit_command() -> Result<(), String> {
+    crate::store::clear_audit().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn set_approval_mode_command(mode: String) -> Result<String, String> {
     let parsed = crate::approval::ApprovalPosture::parse(&mode)
@@ -3835,6 +3842,8 @@ pub fn run_tauri() {
             set_approval_mode_command,
             // Local environments (local:<id> targets)
             list_local_environments_command,
+            // Audit
+            clear_audit_command,
             // Execution
             classify_command_risk,
             classify_command_risk_for_host,

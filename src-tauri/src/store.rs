@@ -251,6 +251,35 @@ pub fn audit_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("audit.jsonl"))
 }
 
+/// Erase the audit trail: truncate `audit.jsonl` (and any rotated
+/// `audit.jsonl.N` siblings) under the write lock. The audit log is
+/// append-only by design, so clearing is an explicit operator action — the
+/// UI must confirm before calling this.
+pub fn clear_audit() -> Result<()> {
+    ensure_config_dir()?;
+    let _guard = audit_write_lock()?;
+    let path = audit_path()?;
+    let mut removed_any = false;
+    if path.exists() {
+        std::fs::write(&path, b"")?;
+        removed_any = true;
+    }
+    for entry in std::fs::read_dir(
+        path.parent()
+            .ok_or_else(|| anyhow::anyhow!("audit path has no parent"))?,
+    )? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("audit.jsonl.") {
+            std::fs::remove_file(entry.path())?;
+            removed_any = true;
+        }
+    }
+    let _ = removed_any;
+    Ok(())
+}
+
 pub fn ensure_config_dir() -> Result<()> {
     fs::create_dir_all(config_dir()?).context("failed to create ~/.agent2ssh")
 }
@@ -1532,6 +1561,18 @@ pub fn redact_sensitive_text(input: &str) -> String {
     // notifications, playbook results and the diagnostic export.
     let regex_redacted = crate::redaction::redact_with_user_rules(input);
 
+    // Credential-shaped patterns the generic rules miss: URL inline credentials
+    // (`scheme://user:secret@host`) and `sshpass -p <pw>`. Applied on the
+    // regex output before the token walk.
+    let url_creds_redacted = regex::Regex::new(r"(?i)([a-z][a-z0-9+.-]*://[^/\s:@]+:)([^/\s@]+)@")
+        .map(|re| re.replace(&regex_redacted, "$1[REDACTED]@"))
+        .unwrap_or_else(|_| regex_redacted.clone().into());
+    let sshpass_redacted = match regex::Regex::new(r"(?i)(sshpass\s+-p\s+)(\S+)") {
+        Ok(re) => re.replace(&url_creds_redacted, "$1[REDACTED]").into_owned(),
+        Err(_) => url_creds_redacted.to_string(),
+    };
+    let regex_redacted = sshpass_redacted;
+
     // Second pass: existing token-based heuristics (keyword=value, bearer,
     // private keys, high-entropy strings).
     let upper = regex_redacted.to_ascii_uppercase();
@@ -1541,6 +1582,12 @@ pub fn redact_sensitive_text(input: &str) -> String {
 
     let mut out = Vec::new();
     let mut redact_next = false;
+    let lower_context_wants_attached_password = {
+        let lowered = regex_redacted.to_ascii_lowercase();
+        ["mysql", "mysqldump", "mongosh", "mongo "]
+            .iter()
+            .any(|tool| lowered.contains(tool))
+    };
     for token in regex_redacted.split_whitespace() {
         let lower = token.to_ascii_lowercase();
         if redact_next {
@@ -1550,6 +1597,26 @@ pub fn redact_sensitive_text(input: &str) -> String {
             }
             out.push("[REDACTED]".to_string());
             redact_next = false;
+            continue;
+        }
+        // Separated password options: `--password <pw>`, `--pass <pw>`,
+        // `--pwd <pw>`. Bare `-p` is NOT a trigger — `ssh -p 2222` is a port.
+        if matches!(lower.as_str(), "--password" | "--pass" | "--pwd") {
+            out.push(token.to_string());
+            redact_next = true;
+            continue;
+        }
+        // Attached password options: mysql-family glued `-p<pw>`. Applied only
+        // when the command mentions the tools whose `-p` convention this is —
+        // a bare `-p<pw>` heuristic would eat unrelated flags (`-prod`,
+        // `-profile`). A pure number (`-p2222`) is a port — keep it.
+        if token.len() > 2
+            && token.starts_with("-p")
+            && !token[2..].starts_with('-')
+            && !token[2..].chars().all(|c| c.is_ascii_digit())
+            && lower_context_wants_attached_password
+        {
+            out.push("-p[REDACTED]".to_string());
             continue;
         }
         if let Some((key, _)) = token.split_once('=') {
@@ -1640,6 +1707,10 @@ fn is_sensitive_key(key: &str) -> bool {
         key.trim_start_matches('-').trim_end_matches(':'),
         "password"
             | "passwd"
+            | "pwd"
+            | "pgpassword"
+            | "mysql_pwd"
+            | "mysql_password"
             | "token"
             | "secret"
             | "api-key"
@@ -1952,6 +2023,38 @@ fn csv_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redaction_covers_credential_shaped_commands() {
+        // mysql glued -p<pw>: redacted only in the mysql/mongo context.
+        assert_eq!(
+            redact_sensitive_text("mysql -uroot -pS3cret db"),
+            "mysql -uroot -p[REDACTED] db"
+        );
+        // ...and NOT outside that context: -production survives.
+        assert_eq!(
+            redact_sensitive_text("deploy -production all"),
+            "deploy -production all"
+        );
+        // A bare -p with a number is a port — kept verbatim.
+        assert_eq!(redact_sensitive_text("ssh -p 2222 zos"), "ssh -p 2222 zos");
+        // sshpass -p <pw>, glued by the dedicated regex.
+        assert!(redact_sensitive_text("sshpass -p hunter2 ssh host").contains("[REDACTED]"));
+        assert!(!redact_sensitive_text("sshpass -p hunter2 ssh host").contains("hunter2"));
+        // Separated long options keep the flag, lose the value.
+        let out = redact_sensitive_text("backup --password hunter2 --all");
+        assert!(out.contains("--password [REDACTED]"), "{out}");
+        // URL inline credentials: the secret must not survive (the built-in
+        // rule set may drop the whole userinfo — stricter, still acceptable).
+        let out = redact_sensitive_text("backup mysql://root:pw123@db1/app");
+        assert!(!out.contains("pw123"), "{out}");
+        assert!(out.contains("db1/app"), "{out}");
+        // Plain keyword=value still covered (existing heuristic).
+        assert_eq!(
+            redact_sensitive_text("export PGpassword=zzz"),
+            "export PGpassword=[REDACTED]"
+        );
+    }
 
     #[test]
     fn test_config_dir_uses_env_override() {

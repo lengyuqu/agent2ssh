@@ -578,6 +578,8 @@ export const api = {
   // Audit
   listAudit: (filter?: AuditFilter) =>
     invoke<AuditEntry[]>("list_audit", { filter: filter ?? null }),
+  /** Erase the whole audit trail (audit.jsonl + rotated siblings). */
+  clearAudit: () => invoke<void>("clear_audit_command"),
 
   // Diagnostics
   listDiagnosticLogs: (limit?: number) =>
