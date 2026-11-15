@@ -3702,6 +3702,23 @@ pub fn list_snippets_command() -> Result<Vec<Snippet>, String> {
     load_snippets().map_err(|error| format!("failed to load snippets: {error}"))
 }
 
+/// Workspace-wide approval posture for agent surfaces (daemon / MCP / CLI).
+/// The desktop never consults it — a human click is its own approval.
+#[tauri::command]
+pub fn get_approval_mode_command() -> Result<String, String> {
+    Ok(crate::approval::load_approval_posture()
+        .as_str()
+        .to_string())
+}
+
+#[tauri::command]
+pub fn set_approval_mode_command(mode: String) -> Result<String, String> {
+    let parsed = crate::approval::ApprovalPosture::parse(&mode)
+        .ok_or_else(|| format!("unknown approval mode '{mode}'"))?;
+    crate::approval::save_approval_posture(parsed).map_err(|e| e.to_string())?;
+    Ok(parsed.as_str().to_string())
+}
+
 #[tauri::command]
 pub fn save_snippet_command(snippet: Snippet) -> Result<Vec<Snippet>, String> {
     add_snippet(
@@ -3800,6 +3817,9 @@ pub fn run_tauri() {
             list_snippets_command,
             save_snippet_command,
             delete_snippet_command,
+            // Approval posture (agent surfaces)
+            get_approval_mode_command,
+            set_approval_mode_command,
             // Execution
             classify_command_risk,
             classify_command_risk_for_host,

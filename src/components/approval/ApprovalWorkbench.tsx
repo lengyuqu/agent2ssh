@@ -71,6 +71,8 @@ function ApprovalWorkbench({ pending, onApprove, onReject, onGoExecute }: Props)
   const [auditToday, setAuditToday] = useState<number>(0);
   const [inFlight, setInFlight] = useState<number>(0);
   const [showDecided, setShowDecided] = useState(false);
+  const [mode, setMode] = useState<string>("ask");
+  const [modeBusy, setModeBusy] = useState(false);
   const detailRef = useRef<HTMLDivElement>(null);
 
   const selected = pending[Math.min(selectedIndex, Math.max(0, pending.length - 1))] ?? null;
@@ -115,6 +117,29 @@ function ApprovalWorkbench({ pending, onApprove, onReject, onGoExecute }: Props)
       window.clearInterval(statsId);
     };
   }, [refreshHistory, refreshStats]);
+
+  useEffect(() => {
+    api
+      .getApprovalMode()
+      .then(setMode)
+      .catch(() => setMode("ask"));
+  }, []);
+
+  async function changeMode(next: string) {
+    if (next === mode || modeBusy) return;
+    setModeBusy(true);
+    const previous = mode;
+    setMode(next); // optimistic
+    try {
+      const saved = await api.setApprovalMode(next);
+      setMode(saved);
+    } catch (err) {
+      setMode(previous);
+      reportError("approval-workbench", "set approval mode failed", err);
+    } finally {
+      setModeBusy(false);
+    }
+  }
 
   // SSE nudge: refresh history/stats as soon as an approval or exec lands.
   useAgentEvents((event) => {
@@ -220,6 +245,49 @@ function ApprovalWorkbench({ pending, onApprove, onReject, onGoExecute }: Props)
 
   return (
     <div className="space-y-5">
+      {/* Approval posture: how agent-surface requests are decided. The desktop
+          itself never prompts (a human click is its own approval) — this dial
+          governs the daemon / MCP / CLI cards. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-bold uppercase tracking-wide text-muted-foreground">
+          {t("Approval mode")}
+        </span>
+        {(
+          [
+            ["ask", t("Ask"), t("Pop an approval card per policy or high-risk command")],
+            [
+              "auto",
+              t("AI auto-approve"),
+              t("Low/medium risk is approved by the risk engine; high risk still asks"),
+            ],
+            ["full", t("Full access"), t("No approval cards; blocked rules and audit still apply")],
+          ] as const
+        ).map(([value, label, description]) => (
+          <button
+            key={value}
+            type="button"
+            disabled={modeBusy}
+            title={description}
+            onClick={() => void changeMode(value)}
+            className={cn(
+              "rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50",
+              mode === value
+                ? "border-primary bg-primary/10 text-primary"
+                : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
+            )}
+          >
+            {label}
+          </button>
+        ))}
+        <span className="min-w-0 flex-1 truncate text-[11px] text-faint">
+          {mode === "ask"
+            ? t("Pop an approval card per policy or high-risk command")
+            : mode === "auto"
+              ? t("Low/medium risk is approved by the risk engine; high risk still asks")
+              : t("No approval cards; blocked rules and audit still apply")}
+        </span>
+      </div>
+
       {/* Opening header: 30px headline number + faint stats */}
       <div>
         <div className="flex items-end gap-3">

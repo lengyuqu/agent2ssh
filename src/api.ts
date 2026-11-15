@@ -606,6 +606,10 @@ export const api = {
   // K1: app-managed credential store (master password).
   secretsStatus: () => invoke<{ initialized: boolean; unlocked: boolean }>("secrets_status"),
   secretsUnlock: (password: string) => invoke<void>("secrets_unlock", { password }),
+
+  // Approval posture for agent surfaces (daemon / MCP / CLI): "ask" | "auto" | "full".
+  getApprovalMode: () => invoke<string>("get_approval_mode_command"),
+  setApprovalMode: (mode: string) => invoke<string>("set_approval_mode_command", { mode }),
   secretsChangePassword: (newPassword: string) =>
     invoke<void>("secrets_change_password", { newPassword }),
 

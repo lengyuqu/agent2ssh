@@ -495,12 +495,26 @@ where
 
     let approval_policy = check_approval_required(input.host, input.tags, input.command, risk)
         .map_err(|e| CommandAuthorizationError::Internal(e.to_string()))?;
+    // Agent-surface approval posture is a workspace setting, not a hardcoded
+    // behavior: ask per policy (default), let the risk engine auto-approve
+    // low/medium, or skip cards entirely. The human path (desktop click) is
+    // unaffected — it never consults the mode.
+    let mode = crate::approval::load_approval_posture();
     let needs_approval = !input.human_approved
-        && (approval_policy.is_some() || (risk == RiskLevel::High && !input.force));
+        && match mode {
+            crate::approval::ApprovalPosture::Full => false,
+            crate::approval::ApprovalPosture::Auto => risk == RiskLevel::High,
+            crate::approval::ApprovalPosture::Ask => {
+                approval_policy.is_some() || (risk == RiskLevel::High && !input.force)
+            }
+        };
     if !needs_approval {
         return Ok(CommandAuthorization {
             risk,
-            approved: input.human_approved,
+            // A mode-skip (auto/full) still counts as an approval downstream —
+            // multi-host exec flips `force` for high-risk hosts exactly as if
+            // a card had been waved through.
+            approved: input.human_approved || mode != crate::approval::ApprovalPosture::Ask,
             command: None,
         });
     }

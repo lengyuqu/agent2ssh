@@ -954,6 +954,74 @@ pub struct ApprovalPolicy {
 pub struct ApprovalPolicyFile {
     #[serde(default)]
     pub policies: Vec<ApprovalPolicy>,
+    /// Workspace-wide approval posture for agent surfaces (daemon / MCP / CLI):
+    /// `ask` — pop an approval card per policy / high-risk command;
+    /// `auto` — the risk engine approves low/medium on its own, high still asks;
+    /// `full` — no cards at all (blocked rules still apply).
+    /// The desktop UI never consults this: a human click is its own approval.
+    #[serde(default)]
+    pub mode: ApprovalPosture,
+}
+
+/// How agent-surface approval requests are decided. Defaults to `Ask`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ApprovalPosture {
+    /// Every policy match / high-risk command pops an approval card.
+    #[default]
+    Ask,
+    /// The risk engine auto-approves low/medium commands; only high (and
+    /// blocked, which never reaches here) still asks for a human decision.
+    Auto,
+    /// No approval cards. Blocked rules and the audit trail stay in force —
+    /// "full access" is not "no oversight".
+    Full,
+}
+
+impl ApprovalPosture {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ApprovalPosture::Ask => "ask",
+            ApprovalPosture::Auto => "auto",
+            ApprovalPosture::Full => "full",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<ApprovalPosture> {
+        match value.trim().to_lowercase().as_str() {
+            "ask" => Some(ApprovalPosture::Ask),
+            "auto" => Some(ApprovalPosture::Auto),
+            "full" => Some(ApprovalPosture::Full),
+            _ => None,
+        }
+    }
+}
+
+/// Load the approval posture from the policies file (default `Ask`).
+pub fn load_approval_posture() -> ApprovalPosture {
+    let path = approval_policies_path();
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return ApprovalPosture::Ask;
+    };
+    toml::from_str::<ApprovalPolicyFile>(&raw)
+        .map(|file| file.mode)
+        .unwrap_or_default()
+}
+
+/// Persist the approval posture, preserving the configured policies.
+pub fn save_approval_posture(posture: ApprovalPosture) -> Result<()> {
+    let path = approval_policies_path();
+    let mut file = if path.exists() {
+        toml::from_str::<ApprovalPolicyFile>(&std::fs::read_to_string(&path)?).unwrap_or_default()
+    } else {
+        ApprovalPolicyFile::default()
+    };
+    file.mode = posture;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, toml::to_string_pretty(&file)?)?;
+    Ok(())
 }
 
 /// Return the path to the approval policies TOML file.
@@ -988,9 +1056,14 @@ pub fn save_approval_policies(policies: &[ApprovalPolicy]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let file = ApprovalPolicyFile {
-        policies: policies.to_vec(),
+    // Preserve the mode: policy edits from the workbench must not silently
+    // reset the user's approval posture.
+    let mut file = if path.exists() {
+        toml::from_str::<ApprovalPolicyFile>(&std::fs::read_to_string(&path)?).unwrap_or_default()
+    } else {
+        ApprovalPolicyFile::default()
     };
+    file.policies = policies.to_vec();
     let raw = toml::to_string_pretty(&file)?;
     std::fs::write(&path, raw)?;
     Ok(())
@@ -1430,6 +1503,7 @@ mod tests {
 
         let file = ApprovalPolicyFile {
             policies: policies.clone(),
+            mode: ApprovalPosture::default(),
         };
         let toml_str = toml::to_string_pretty(&file).expect("serialize to TOML");
         let parsed: ApprovalPolicyFile = toml::from_str(&toml_str).expect("deserialize from TOML");
