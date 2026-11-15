@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { zh } from "./i18n";
-import { MODULES, RELATED_MODULES, SIDEBAR_ORDER } from "./nav";
+import { MODULES, RELATED_MODULES, SIDEBAR_GROUPS, SIDEBAR_ORDER } from "./nav";
 
 /**
  * The module registry has several lists that must agree, and a missing entry
@@ -26,6 +26,23 @@ describe("module registry", () => {
     // nothing.
     expect([...SIDEBAR_ORDER].sort()).toEqual([...ids].sort());
     expect(new Set(SIDEBAR_ORDER).size).toBe(SIDEBAR_ORDER.length);
+  });
+
+  it("covers every module in exactly one sidebar group, with titles translated", () => {
+    // The grouped rail is rendered from SIDEBAR_GROUPS; the flat SIDEBAR_ORDER
+    // is derived from it, so the groups are the real source. A module missing
+    // here is unreachable exactly as a missing SIDEBAR_ORDER entry used to be,
+    // and a duplicated id would render the same panel under two groups.
+    const grouped = SIDEBAR_GROUPS.flatMap((group) => group.modules);
+    expect([...grouped].sort()).toEqual([...ids].sort());
+    expect(new Set(grouped).size).toBe(grouped.length);
+    // The first group carries the approvals pin and must stay titleless so the
+    // pending-count badge sits at the very top of the rail.
+    expect(SIDEBAR_GROUPS[0]).toEqual({ title: "", modules: ["approvals"] });
+    for (const group of SIDEBAR_GROUPS) {
+      if (!group.title) continue;
+      expect(zh[group.title], `missing zh title for ${group.title}`).toBeTruthy();
+    }
   });
 
   it("keeps the first nine modules stable for the Ctrl/⌘+1..9 shortcuts", () => {

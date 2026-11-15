@@ -61,30 +61,27 @@ export const MODULES = [
 /** A module id, derived from the registry so the two cannot drift. */
 export type ModuleId = (typeof MODULES)[number]["id"];
 
-// v3 3.1: sidebar render order (approvals on top). MODULES order above is
-// frozen by the Ctrl/⌘+1..9 shortcuts; only the sidebar display order changes.
-export const SIDEBAR_ORDER: ModuleId[] = [
-  "approvals",
-  "hosts",
-  "audit",
-  "mcp-agents",
-  "dashboard",
-  "terminal",
-  "execute",
-  "files-sessions",
-  "tunnels",
-  "activity",
-  "proxies",
-  "sync",
-  "keys",
-  "playbooks",
-  "config",
-  "topology",
-  "recordings",
-  "containers",
-  "resident-sessions",
-  "help",
+// Sidebar display structure: approvals pinned above the groups (its
+// pending-count badge must stay the first thing in the rail), the rest in four
+// functional groups so twenty entries scan by domain instead of by position.
+// Group titles are i18n keys rendered through t() in App.tsx; the empty title
+// marks the pinned group.
+export const SIDEBAR_GROUPS: ReadonlyArray<{ title: string; modules: ModuleId[] }> = [
+  { title: "", modules: ["approvals"] },
+  { title: "Operations", modules: ["hosts", "terminal", "execute", "files-sessions", "tunnels", "playbooks"] },
+  { title: "Environments", modules: ["containers", "resident-sessions"] },
+  {
+    title: "Observability",
+    modules: ["dashboard", "topology", "activity", "audit", "recordings"],
+  },
+  { title: "System", modules: ["mcp-agents", "proxies", "keys", "sync", "config", "help"] },
 ];
+
+// v3 3.1: flat sidebar render order, now derived from the groups so the
+// set-equality invariants in `nav.test.ts` keep holding no matter how the
+// groups are arranged. MODULES order above is frozen by the Ctrl/⌘+1..9
+// shortcuts; only the sidebar display order changes.
+export const SIDEBAR_ORDER: ModuleId[] = SIDEBAR_GROUPS.flatMap((group) => group.modules);
 
 // V3-4: mesh navigation, not a tab trail — each module lists a handful of the
 // other modules an operator is likely to jump to from here.

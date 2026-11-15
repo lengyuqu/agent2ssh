@@ -6,10 +6,10 @@ import {
   RefreshCw,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, reportError } from "./api";
 import { isAlreadyDecided } from "./lib/approval-decision";
-import { MODULES, RELATED_MODULES, SIDEBAR_ORDER } from "./nav";
+import { MODULES, RELATED_MODULES, SIDEBAR_GROUPS, SIDEBAR_ORDER, type ModuleId } from "./nav";
 import AddHostForm from "./components/AddHostForm";
 import ApprovalWorkbench from "./components/approval/ApprovalWorkbench";
 import AuditCharts from "./components/AuditCharts";
@@ -82,6 +82,61 @@ type ConnectionProgress = {
   busy: boolean;
   variant?: "active" | "success" | "error";
 };
+
+// One sidebar entry. Memoized: a module switch flips `active` on exactly two
+// items, and with the group titles re-rendering too, per-item memo keeps the
+// whole rail from rebuilding on every click.
+const SidebarItem = memo(function SidebarItem({
+  id,
+  active,
+  collapsed,
+  pendingCount,
+  onOpen,
+}: {
+  id: ModuleId;
+  active: boolean;
+  collapsed: boolean;
+  pendingCount: number;
+  onOpen: (id: ModuleId) => void;
+}) {
+  const { t } = useI18n();
+  const meta = MODULES.find((module) => module.id === id) ?? MODULES[0];
+  const { label, icon: Icon } = meta;
+  // Action-color discipline: count badges stay neutral (foreground + border);
+  // only the active row wears cyan. On the cyan row the badge inverts to
+  // canvas-0 for contrast.
+  const badge = id === "approvals" && pendingCount > 0;
+  return (
+    <button
+      type="button"
+      title={collapsed ? t(label) : undefined}
+      className={cn(
+        "relative flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] font-medium transition-colors",
+        collapsed && "justify-center px-2",
+        active
+          ? "bg-sidebar-accent text-primary-foreground"
+          : "text-sidebar-foreground/80 hover:bg-white/5 hover:text-sidebar-foreground"
+      )}
+      onClick={() => onOpen(id)}
+    >
+      <Icon size={14} className={active ? "shrink-0" : "shrink-0 opacity-70"} />
+      <span className={cn("truncate", collapsed && "hidden")}>{t(label)}</span>
+      {badge && !collapsed && (
+        <span
+          className={cn(
+            "ml-auto shrink-0 rounded-full px-1.5 font-mono text-[10px] font-bold leading-4",
+            active ? "bg-canvas-0 text-primary" : "border border-line text-muted-foreground"
+          )}
+        >
+          {pendingCount}
+        </span>
+      )}
+      {badge && collapsed && (
+        <span className="absolute right-1.5 top-1.5 size-2 rounded-full bg-risk-medium" />
+      )}
+    </button>
+  );
+});
 
 
 export default function App() {
@@ -1116,7 +1171,7 @@ export default function App() {
           "flex shrink-0 flex-col gap-3 overflow-y-auto border-r border-line bg-sidebar p-3 text-sidebar-foreground",
           sidebarCollapsed
             ? "w-[68px] items-center"
-            : "w-[150px] max-lg:w-full max-lg:overflow-visible"
+            : "w-[180px] max-lg:w-full max-lg:overflow-visible"
         )}
       >
         <div className={cn("flex items-center gap-2", sidebarCollapsed && "flex-col")}>
@@ -1138,51 +1193,42 @@ export default function App() {
           </IconButton>
         </div>
         <nav
-          className={cn("flex flex-col gap-0.5", !sidebarCollapsed && "max-lg:flex-row max-lg:flex-wrap")}
+          className={cn(
+            "flex flex-col",
+            sidebarCollapsed ? "gap-0.5" : "gap-1.5 max-lg:flex-row max-lg:flex-wrap"
+          )}
           aria-label={t("Modules")}
         >
-          {SIDEBAR_ORDER.map((id) => {
-            const meta = MODULES.find((module) => module.id === id) ?? MODULES[0];
-            const { label, icon: Icon } = meta;
-            const active = activeModule === id;
-            // Action-color discipline: count badges stay neutral (foreground +
-            // border); only the active row wears cyan. On the cyan row the
-            // badge inverts to canvas-0 for contrast.
-            const badge = id === "approvals" && pendingApprovals.length > 0;
-            return (
-              <button
-                key={id}
-                type="button"
-                title={sidebarCollapsed ? t(label) : undefined}
-                className={cn(
-                  "relative flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] font-medium transition-colors",
-                  sidebarCollapsed && "justify-center px-2",
-                  active
-                    ? "bg-sidebar-accent text-primary-foreground"
-                    : "text-sidebar-foreground/80 hover:bg-white/5 hover:text-sidebar-foreground"
-                )}
-                onClick={() => openModule(id)}
-              >
-                <Icon size={14} className={active ? "shrink-0" : "shrink-0 opacity-70"} />
-                <span className={cn("truncate", sidebarCollapsed && "hidden")}>{t(label)}</span>
-                {badge && !sidebarCollapsed && (
-                  <span
-                    className={cn(
-                      "ml-auto shrink-0 rounded-full px-1.5 font-mono text-[10px] font-bold leading-4",
-                      active
-                        ? "bg-canvas-0 text-primary"
-                        : "border border-line text-muted-foreground"
-                    )}
-                  >
-                    {pendingApprovals.length}
-                  </span>
-                )}
-                {badge && sidebarCollapsed && (
-                  <span className="absolute right-1.5 top-1.5 size-2 rounded-full bg-risk-medium" />
-                )}
-              </button>
-            );
-          })}
+          {sidebarCollapsed
+            ? SIDEBAR_ORDER.map((id) => (
+                <SidebarItem
+                  key={id}
+                  id={id}
+                  active={activeModule === id}
+                  collapsed
+                  pendingCount={pendingApprovals.length}
+                  onOpen={openModule}
+                />
+              ))
+            : SIDEBAR_GROUPS.map((group) => (
+                <div key={group.title || "pinned"} className="flex flex-col gap-0.5">
+                  {group.title && (
+                    <div className="px-2.5 pb-0.5 pt-1 text-[10px] font-bold uppercase tracking-wide text-sidebar-foreground/40">
+                      {t(group.title)}
+                    </div>
+                  )}
+                  {group.modules.map((id) => (
+                    <SidebarItem
+                      key={id}
+                      id={id}
+                      active={activeModule === id}
+                      collapsed={false}
+                      pendingCount={pendingApprovals.length}
+                      onOpen={openModule}
+                    />
+                  ))}
+                </div>
+              ))}
         </nav>
         {/* Bottom tool area: connectivity entry + command palette, both pinned
             to the sidebar's foot. The ping results live in PingPanel's popover,
