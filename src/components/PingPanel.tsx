@@ -3,6 +3,9 @@ import { memo, useState } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { HostProfile, PingResult } from "../types";
+import { Badge } from "./ui/badge";
+import { Button } from "./ui/button";
+import { Card } from "./ui/card";
 import { Spinner } from "./ui/state";
 import { useToast } from "./ui/toast";
 import { cn } from "../lib/utils";
@@ -12,23 +15,21 @@ type Props = {
 };
 
 /**
- * Sidebar connectivity entry, styled like the "Command palette" row: one line,
- * pinned to the bottom of the sidebar. Clicking it pings every host and shows
- * the per-host verdicts in a popover anchored above the row — the old inline
- * result list grew with the host count and pushed the rest of the sidebar out
- * of the viewport (the 150px rail also wrapped its two-line label).
+ * Connectivity sweep, rendered as a card on the Dashboard. The ping button
+ * probes every host; the verdicts list below scrolls under a fixed cap so a
+ * large fleet (40+ hosts) cannot stretch the page. This display deliberately
+ * lives in the content area — the earlier sidebar/popover variants either
+ * crushed the narrow rail or floated a full-height overlay over it.
  */
 function PingPanel({ hosts }: Props) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [results, setResults] = useState<PingResult[]>([]);
   const [busy, setBusy] = useState(false);
-  const [open, setOpen] = useState(false);
 
   async function pingAll() {
     if (hosts.length === 0 || busy) return;
     setBusy(true);
-    setOpen(true);
     try {
       const names = hosts.map((h) => h.name);
       setResults(await api.pingHosts(names));
@@ -43,73 +44,65 @@ function PingPanel({ hosts }: Props) {
   const reachable = results.filter((r) => r.reachable).length;
 
   return (
-    <div className="relative">
-      <button
-        type="button"
-        className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-[13px] text-sidebar-foreground/70 transition-colors hover:bg-white/5 hover:text-sidebar-foreground disabled:opacity-50"
-        onClick={() => (open ? setOpen(false) : void pingAll())}
-        disabled={busy || hosts.length === 0}
-        title={t("Ping all hosts")}
-      >
-        <span className="flex items-center gap-2">
-          <Radio size={14} className={cn("shrink-0 opacity-70", busy && "animate-pulse")} />
+    <Card className="space-y-3 p-4">
+      <div className="flex items-center gap-2">
+        <h3 className="flex items-center gap-2 font-semibold">
+          <Radio size={16} className="text-muted-foreground" />
           {t("Connectivity")}
-        </span>
+        </h3>
         {results.length > 0 && !busy && (
-          <span
-            className={cn(
-              "rounded-full px-1.5 font-mono text-[10px] font-bold leading-4",
-              reachable === results.length
-                ? "bg-success/15 text-success"
-                : "bg-destructive/15 text-destructive"
-            )}
+          <Badge
+            variant={reachable === results.length ? "success" : "destructive"}
+            className="font-mono"
           >
             {reachable}/{results.length}
-          </span>
+          </Badge>
         )}
-      </button>
+        <Button
+          variant="secondary"
+          size="sm"
+          className="ml-auto"
+          onClick={() => void pingAll()}
+          disabled={busy || hosts.length === 0}
+          title={t("Ping all hosts")}
+        >
+          {busy ? <Spinner size={13} /> : <Radio size={14} />}
+          {t("Ping all hosts")}
+        </Button>
+      </div>
 
-      {open && (
-        <>
-          {/* Light-dismiss: click anywhere outside the popover to close it. */}
-          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute bottom-full left-0 z-50 mb-2 w-64 rounded-xl border border-edge bg-popover p-2 text-popover-foreground shadow-lg">
-            <div className="grid gap-1">
-              {results.map((r) => (
-                <div
-                  key={r.host}
-                  className={cn(
-                    "flex items-center gap-2 rounded-md px-2 py-1.5 text-xs",
-                    r.reachable
-                      ? "bg-success/15 text-success"
-                      : "bg-destructive/15 text-destructive"
-                  )}
-                >
-                  {r.reachable ? <Wifi size={13} /> : <WifiOff size={13} />}
-                  <strong className="min-w-0 truncate font-semibold">{r.host}</strong>
-                  {r.latency_ms != null && (
-                    <span className="ml-auto shrink-0 text-muted-foreground">
-                      {r.latency_ms}ms
-                    </span>
-                  )}
-                  {r.error && (
-                    <span className="ml-auto min-w-0 truncate text-destructive/80">
-                      {r.error}
-                    </span>
-                  )}
-                </div>
-              ))}
-              {results.length === 0 && (
-                <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground">
-                  <Spinner size={12} />
-                  {t("Ping all hosts")}…
-                </div>
+      {results.length > 0 ? (
+        <div className="grid max-h-72 gap-1 overflow-y-auto pr-1">
+          {results.map((r) => (
+            <div
+              key={r.host}
+              className={cn(
+                "flex items-center gap-2 rounded-md px-2.5 py-1.5 text-xs",
+                r.reachable
+                  ? "bg-success/15 text-success"
+                  : "bg-destructive/15 text-destructive"
+              )}
+            >
+              {r.reachable ? <Wifi size={13} /> : <WifiOff size={13} />}
+              <strong className="min-w-0 truncate font-semibold">{r.host}</strong>
+              {r.latency_ms != null && (
+                <span className="ml-auto shrink-0 text-muted-foreground">
+                  {r.latency_ms}ms
+                </span>
+              )}
+              {r.error && (
+                <span className="ml-auto min-w-0 truncate text-destructive/80">{r.error}</span>
               )}
             </div>
-          </div>
-        </>
+          ))}
+        </div>
+      ) : (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          {busy && <Spinner size={12} />}
+          {t("Click the icon to ping all hosts")}
+        </div>
       )}
-    </div>
+    </Card>
   );
 }
 

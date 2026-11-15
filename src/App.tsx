@@ -34,9 +34,7 @@ import LiveActivityPanel from "./components/LiveActivityPanel";
 import McpAgentsPanel from "./components/McpAgentsPanel";
 import MultiExecPanel from "./components/MultiExecPanel";
 import NotificationCenter from "./components/NotificationCenter";
-import PingPanel from "./components/PingPanel";
-import PlaybooksPanel from "./components/PlaybooksPanel";
-import ProxyPanel from "./components/ProxyPanel";
+import PlaybooksPanel from "./components/PlaybooksPanel";import ProxyPanel from "./components/ProxyPanel";
 import RecordingsPanel from "./components/RecordingsPanel";
 import SFTPPanel from "./components/SFTPPanel";
 import TerminalDrawer from "./components/TerminalDrawer";
@@ -1230,21 +1228,20 @@ export default function App() {
                 </div>
               ))}
         </nav>
-        {/* Bottom tool area: connectivity entry + command palette, both pinned
-            to the sidebar's foot. The ping results live in PingPanel's popover,
-            not inline — the old list grew with the host count and pushed the
-            palette button out of the viewport. */}
-        <div className={cn("mt-auto flex w-full flex-col gap-0.5", sidebarCollapsed && "hidden")}>
-          <PingPanel hosts={hosts} />
-          <button
-            type="button"
-            onClick={() => setCommandPaletteOpen(true)}
-            className="flex items-center justify-between rounded-lg px-2.5 py-1.5 text-[13px] text-sidebar-foreground/70 transition-colors hover:bg-white/5 hover:text-sidebar-foreground"
-          >
-            <span>{t("Command palette")}</span>
-            <span className="font-mono text-[11px] text-faint">⌘K</span>
-          </button>
-        </div>
+        {/* Command palette pinned to the sidebar's foot. The connectivity sweep
+            lives on the Dashboard as a card — sidebar rail and popover variants
+            both failed for a 37-host fleet (crushed labels, full-height overlay). */}
+        <button
+          type="button"
+          onClick={() => setCommandPaletteOpen(true)}
+            className={cn(
+              "mt-auto flex items-center justify-between rounded-lg px-2.5 py-1.5 text-[13px] text-sidebar-foreground/70 transition-colors hover:bg-white/5 hover:text-sidebar-foreground",
+              sidebarCollapsed && "hidden"
+            )}
+        >
+          <span>{t("Command palette")}</span>
+          <span className="font-mono text-[11px] text-faint">⌘K</span>
+        </button>
       </aside>
 
       <section

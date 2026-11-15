@@ -15,6 +15,7 @@ import { useI18n } from "../i18n";
 import { cn } from "../lib/utils";
 import type { ConnectionStatus, DaemonHealth, HostProfile } from "../types";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
+import PingPanel from "./PingPanel";
 
 const EXEC_COUNT_REFRESH_MS = 60_000;
 
@@ -174,6 +175,11 @@ function Dashboard({
           tone={daemonOk ? "success" : "destructive"}
         />
       </div>
+
+      {/* Connectivity sweep: content-area display for the per-host ping results.
+          It lived in the sidebar rail (crushed labels) and then a popover
+          (full-height overlay for a 37-host fleet) before landing here. */}
+      <PingPanel hosts={hosts} />
     </div>
   );
 }
