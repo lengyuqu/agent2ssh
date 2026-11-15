@@ -610,6 +610,20 @@ export const api = {
   // Approval posture for agent surfaces (daemon / MCP / CLI): "ask" | "auto" | "full".
   getApprovalMode: () => invoke<string>("get_approval_mode_command"),
   setApprovalMode: (mode: string) => invoke<string>("set_approval_mode_command", { mode }),
+
+  // Local environments (local:<id> exec targets): builtins + environments.toml customs.
+  listLocalEnvironments: () =>
+    invoke<
+      Array<{
+        id: string;
+        builtin: boolean;
+        base: string | null;
+        distro: string | null;
+        cwd: string | null;
+        env_count: number;
+        description: string | null;
+      }>
+    >("list_local_environments_command"),
   secretsChangePassword: (newPassword: string) =>
     invoke<void>("secrets_change_password", { newPassword }),
 

@@ -3711,6 +3711,14 @@ pub fn get_approval_mode_command() -> Result<String, String> {
         .to_string())
 }
 
+/// The built-in local environments plus the custom ones from
+/// `environments.toml` — the `local:<id>` targets exec can address.
+#[tauri::command]
+pub fn list_local_environments_command(
+) -> Result<Vec<crate::local_environments::LocalEnvironmentInfo>, String> {
+    Ok(crate::local_environments::list_environments())
+}
+
 #[tauri::command]
 pub fn set_approval_mode_command(mode: String) -> Result<String, String> {
     let parsed = crate::approval::ApprovalPosture::parse(&mode)
@@ -3825,6 +3833,8 @@ pub fn run_tauri() {
             // Approval posture (agent surfaces)
             get_approval_mode_command,
             set_approval_mode_command,
+            // Local environments (local:<id> targets)
+            list_local_environments_command,
             // Execution
             classify_command_risk,
             classify_command_risk_for_host,

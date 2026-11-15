@@ -39,6 +39,7 @@ import CommandPalette, {
   type PaletteQuickAction,
 } from "./components/CommandPalette";
 import Dashboard from "./components/Dashboard";
+import LocalEnvironmentsCard from "./components/LocalEnvironmentsCard";
 import ExecPanel from "./components/ExecPanel";
 import ForwardPanel from "./components/ForwardPanel";
 import HelpPanel from "./components/HelpPanel";
@@ -1438,6 +1439,8 @@ export default function App() {
           )}
 
           {activeModule === "hosts" && (
+            <div className="space-y-4">
+            <LocalEnvironmentsCard />
             <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(340px,0.6fr)] items-start gap-[18px] max-lg:grid-cols-1">
               <HostList
                 hosts={hosts}
@@ -1471,6 +1474,7 @@ export default function App() {
                 onSaved={handleHostSaved}
                 onImportNetcatty={openNetcattyImport}
               />
+            </div>
             </div>
           )}
 

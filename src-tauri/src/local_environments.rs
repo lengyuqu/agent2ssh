@@ -276,6 +276,62 @@ fn read_from_disk() -> EnvironmentRegistry {
 ///
 /// Never re-reads on its own — see the module note on why this file is not
 /// hot-reloaded.
+/// One entry of the local-environment listing surfaced in the desktop UI.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LocalEnvironmentInfo {
+    /// Addressed as `local:<id>` in exec targets, approval host patterns and
+    /// the audit log.
+    pub id: String,
+    pub builtin: bool,
+    /// Custom environments only: the built-in shell this one layers on.
+    pub base: Option<String>,
+    pub distro: Option<String>,
+    pub cwd: Option<String>,
+    pub env_count: usize,
+    pub description: Option<String>,
+}
+
+/// The built-in environments plus everything loaded from
+/// `environments.toml`, for the desktop host-management listing. Rejected
+/// definitions and a load error are surfaced so a hand-edited file that
+/// failed validation is visible instead of silently absent.
+pub fn list_environments() -> Vec<LocalEnvironmentInfo> {
+    let builtins = [
+        ("local", "Default shell"),
+        ("local:pwsh", "PowerShell"),
+        ("local:cmd", "Windows Command Prompt"),
+        ("local:gitbash", "Git Bash"),
+        ("local:vs", "Visual Studio Developer Shell"),
+        ("local:wsl", "WSL"),
+    ]
+    .into_iter()
+    .map(|(id, description)| LocalEnvironmentInfo {
+        id: id.to_string(),
+        builtin: true,
+        base: None,
+        distro: None,
+        cwd: None,
+        env_count: 0,
+        description: Some(description.to_string()),
+    });
+
+    let registry = current();
+    let custom = registry.ids().into_iter().filter_map(|id| {
+        let env = registry.get(&id)?;
+        Some(LocalEnvironmentInfo {
+            id: format!("local:{id}"),
+            builtin: false,
+            base: Some(env.base.id().to_string()),
+            distro: env.distro.clone(),
+            cwd: env.cwd.as_ref().map(|path| path.display().to_string()),
+            env_count: env.env.len(),
+            description: env.description.clone(),
+        })
+    });
+
+    builtins.chain(custom).collect()
+}
+
 pub fn current() -> Arc<EnvironmentRegistry> {
     let mut slot = registry_slot();
     Arc::clone(slot.get_or_insert_with(|| Arc::new(read_from_disk())))
