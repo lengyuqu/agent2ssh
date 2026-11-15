@@ -224,6 +224,43 @@ fn set_cached_key(key: Option<[u8; 32]>) {
     *key_cell().write().expect("secrets key lock poisoned") = key;
 }
 
+/// The master password, retained in memory only while the store is unlocked.
+/// Never persisted — but the daemon is a separate process with its own unlock
+/// state, and a desktop unlock seals only the app's own process. The spawn
+/// path (`daemon_control`) hands the password to the daemon through
+/// `AGENT2SSH_MASTER_PASSWORD`, the same channel a headless user already uses,
+/// so terminal sessions the daemon hosts can resolve secret references too.
+/// Wiped by [`lock`] and replaced by [`change_master_password`].
+fn master_password_cell() -> &'static Mutex<Option<zeroize::Zeroizing<String>>> {
+    static CELL: std::sync::OnceLock<Mutex<Option<zeroize::Zeroizing<String>>>> =
+        std::sync::OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+/// The in-memory master password, when the store is unlocked in this process.
+/// `None` when locked, uninitialized, or on the test memory backend (the
+/// memory backend has no password at all).
+pub fn master_password() -> Option<String> {
+    if backend_is_memory() {
+        return None;
+    }
+    if cached_key().is_none() {
+        return None;
+    }
+    master_password_cell()
+        .lock()
+        .expect("master password lock poisoned")
+        .as_ref()
+        .map(|value| value.to_string())
+}
+
+fn set_retained_master_password(password: &str) {
+    *master_password_cell()
+        .lock()
+        .expect("master password lock poisoned") =
+        Some(zeroize::Zeroizing::new(password.to_string()));
+}
+
 /// Activate the thread-local key cache (test-only). After calling this,
 /// `cached_key` / `set_cached_key` / `lock` operate on a per-thread cell
 /// instead of the global `key_cell()`.
@@ -1193,6 +1230,9 @@ pub fn unlock_or_init(password: &str) -> Result<()> {
             }
         }
     }
+    // Reached only after one of the success paths cached the key. Keep the
+    // password around for the daemon hand-off (see `master_password`).
+    set_retained_master_password(password);
     Ok(())
 }
 
@@ -1247,6 +1287,7 @@ pub fn change_master_password(new_password: &str) -> Result<()> {
     atomic_write_file(&path, serde_json::to_string_pretty(&store)?.as_bytes())?;
     restrict_file_to_owner(&path)?;
     set_cached_key(Some(key));
+    set_retained_master_password(new_password);
     Ok(())
 }
 
@@ -1280,6 +1321,9 @@ pub fn lock() {
     #[cfg(test)]
     activate_thread_local_key();
     set_cached_key(None);
+    *master_password_cell()
+        .lock()
+        .expect("master password lock poisoned") = None;
     crate::embedded_ssh::passphrase_cache_clear();
 }
 

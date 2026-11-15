@@ -3419,12 +3419,19 @@ pub async fn secrets_status() -> Result<SecretsStatus, String> {
 /// K1: unlock the credential store (or initialize it with `password` if no master
 /// password has been set yet), then migrate any leftover plaintext into it.
 #[tauri::command]
-pub async fn secrets_unlock(password: String) -> Result<(), String> {
+pub async fn secrets_unlock(app: AppHandle, password: String) -> Result<(), String> {
     crate::secrets::unlock_or_init(&password).map_err(|e| e.to_string())?;
     // Now that we have a key, encrypt any plaintext passwords still on disk.
     if let Err(e) = crate::store::migrate_plaintext_secrets() {
         eprintln!("warning: secret migration after unlock failed: {e}");
     }
+    // The daemon is a separate process: if it was spawned before this unlock
+    // (or at app startup, before any master password existed), it holds no key
+    // and its terminal sessions fail with an unresolved secret reference even
+    // though the host page shows credentials fine. Restart it so the spawn
+    // path hands it the now-retained master password. Best-effort — a restart
+    // failure must not undo the unlock.
+    let _ = daemon_restart(app);
     Ok(())
 }
 

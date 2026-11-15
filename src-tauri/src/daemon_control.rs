@@ -1222,6 +1222,16 @@ pub fn start_daemon_background(daemon_bin: &Path) -> Result<DaemonStartResult> {
             });
         }
     }
+    // The daemon is a separate process with its own credential-store unlock
+    // state: a desktop unlock seals only the launching process. When this
+    // process holds the master password, hand it to the daemon through the
+    // same env channel a headless user already uses, so `/terminal` and other
+    // daemon-hosted sessions resolve `$agent2ssh-secret$` references instead
+    // of failing with "unresolved app-managed secret reference". A headless
+    // CLI start inherits the user's own env untouched.
+    if let Some(password) = crate::secrets::master_password() {
+        command.env("AGENT2SSH_MASTER_PASSWORD", password);
+    }
     let mut child = command
         .spawn()
         .with_context(|| format!("failed to start daemon: {}", daemon_bin.display()))?;
