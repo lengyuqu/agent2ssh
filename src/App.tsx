@@ -1,4 +1,5 @@
 import {
+  ArrowLeft,
   KeyRound,
   PanelLeftClose,
   PanelLeftOpen,
@@ -6,10 +7,22 @@ import {
   RefreshCw,
   X,
 } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, reportError } from "./api";
 import { isAlreadyDecided } from "./lib/approval-decision";
-import { MODULES, RELATED_MODULES, SIDEBAR_GROUPS, SIDEBAR_ORDER, type ModuleId } from "./nav";
+import { MODULES, RELATED_MODULES, type ModuleId } from "./nav";
+import HostTree from "./features/workspace/HostTree";
+import WorkspaceTabBar from "./features/workspace/WorkspaceTabBar";
+import SessionWorkspace from "./features/workspace/SessionWorkspace";
+import ManagementOverlay from "./features/workspace/ManagementOverlay";
+import {
+  closeTab,
+  loadWorkspaceState,
+  openHostTab,
+  pruneMissingHosts,
+  saveWorkspaceState,
+  type WorkspaceTab,
+} from "./features/workspace/types";
 import AddHostForm from "./components/AddHostForm";
 import ApprovalWorkbench from "./components/approval/ApprovalWorkbench";
 import AuditCharts from "./components/AuditCharts";
@@ -81,61 +94,6 @@ type ConnectionProgress = {
   variant?: "active" | "success" | "error";
 };
 
-// One sidebar entry. Memoized: a module switch flips `active` on exactly two
-// items, and with the group titles re-rendering too, per-item memo keeps the
-// whole rail from rebuilding on every click.
-const SidebarItem = memo(function SidebarItem({
-  id,
-  active,
-  collapsed,
-  pendingCount,
-  onOpen,
-}: {
-  id: ModuleId;
-  active: boolean;
-  collapsed: boolean;
-  pendingCount: number;
-  onOpen: (id: ModuleId) => void;
-}) {
-  const { t } = useI18n();
-  const meta = MODULES.find((module) => module.id === id) ?? MODULES[0];
-  const { label, icon: Icon } = meta;
-  // Action-color discipline: count badges stay neutral (foreground + border);
-  // only the active row wears cyan. On the cyan row the badge inverts to
-  // canvas-0 for contrast.
-  const badge = id === "approvals" && pendingCount > 0;
-  return (
-    <button
-      type="button"
-      title={collapsed ? t(label) : undefined}
-      className={cn(
-        "relative flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] font-medium transition-colors",
-        collapsed && "justify-center px-2",
-        active
-          ? "bg-sidebar-accent text-primary-foreground"
-          : "text-sidebar-foreground/80 hover:bg-white/5 hover:text-sidebar-foreground"
-      )}
-      onClick={() => onOpen(id)}
-    >
-      <Icon size={14} className={active ? "shrink-0" : "shrink-0 opacity-70"} />
-      <span className={cn("truncate", collapsed && "hidden")}>{t(label)}</span>
-      {badge && !collapsed && (
-        <span
-          className={cn(
-            "ml-auto shrink-0 rounded-full px-1.5 font-mono text-[10px] font-bold leading-4",
-            active ? "bg-canvas-0 text-primary" : "border border-line text-muted-foreground"
-          )}
-        >
-          {pendingCount}
-        </span>
-      )}
-      {badge && collapsed && (
-        <span className="absolute right-1.5 top-1.5 size-2 rounded-full bg-risk-medium" />
-      )}
-    </button>
-  );
-});
-
 
 export default function App() {
   const { t } = useI18n();
@@ -200,6 +158,64 @@ export default function App() {
   // never published), so it is derived from the existing 5s poll instead.
   const prevConnectedRef = useRef<Map<string, boolean> | null>(null);
 
+  // ── Workspace (connection-first) state ──
+  // The shell has two surfaces: the workspace (host-tree → session tabs with
+  // paired terminal + files) and management module pages. `workspaceMode`
+  // selects which one the stage shows; `activeModule` keeps driving the
+  // management page rendering exactly as before.
+  const [workspaceMode, setWorkspaceMode] = useState(true);
+  const [workspace, setWorkspace] = useState<{ tabs: WorkspaceTab[]; activeTabId: string | null }>(
+    () => loadWorkspaceState()
+  );
+  const [fileDrawerOpen, setFileDrawerOpen] = useState(true);
+  const [focusMode, setFocusMode] = useState(false);
+  const [managementOpen, setManagementOpen] = useState(false);
+
+  const connectedHostNames = useMemo(
+    () => new Set(connectionStatuses.filter((c) => c.connected).map((c) => c.host)),
+    [connectionStatuses],
+  );
+
+  useEffect(() => {
+    saveWorkspaceState(workspace.tabs, workspace.activeTabId);
+  }, [workspace]);
+
+  // A host removed from the configuration takes its tab with it.
+  useEffect(() => {
+    const names = new Set(hosts.map((host) => host.name));
+    setWorkspace((current) => {
+      const pruned = pruneMissingHosts(current.tabs, names);
+      if (pruned.length === current.tabs.length) return current;
+      const activeTabId =
+        pruned.some((tab) => tab.id === current.activeTabId)
+          ? current.activeTabId
+          : (pruned[pruned.length - 1]?.id ?? null);
+      return { tabs: pruned, activeTabId };
+    });
+  }, [hosts]);
+
+  const openHostSession = useCallback((name: string) => {
+    setManagementOpen(false);
+    setWorkspaceMode(true);
+    setWorkspace((current) => {
+      const next = openHostTab(current.tabs, current.activeTabId, name);
+      return { tabs: next.tabs, activeTabId: next.activeTabId };
+    });
+  }, []);
+
+  const closeWorkspaceTab = useCallback((tabId: string) => {
+    setWorkspace((current) => closeTab(current.tabs, current.activeTabId, tabId));
+  }, []);
+
+  const toggleFocusMode = useCallback(() => {
+    setFocusMode((mode) => {
+      const next = !mode;
+      setSidebarCollapsed(next);
+      if (next) setFileDrawerOpen(false);
+      return next;
+    });
+  }, []);
+
   const currentHost = useMemo(
     () => hosts.find((h) => h.name === selectedHost),
     [hosts, selectedHost]
@@ -211,7 +227,14 @@ export default function App() {
   );
 
   const openModule = useCallback((id: (typeof MODULES)[number]["id"]) => {
+    // Opening a module leaves the workspace stage and renders the management
+    // page; "Back to workspace" flips `workspaceMode` back.
     setActiveModule(id);
+    setWorkspaceMode(false);
+  }, []);
+
+  const backToWorkspace = useCallback(() => {
+    setWorkspaceMode(true);
   }, []);
 
   // v3 §1.3: jump to the approval workbench and focus the first pending card
@@ -532,13 +555,13 @@ export default function App() {
         const module = MODULES[index];
         if (module) {
           e.preventDefault();
-          setActiveModule(module.id);
+          openModule(module.id);
         }
       }
     }
     window.addEventListener("keydown", handleGlobalKeyDown);
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
-  }, [showToast, t, openApprovalsWorkbench]);
+  }, [showToast, t, openApprovalsWorkbench, openModule]);
 
   const handleGateToggle = useCallback(async () => {
     setGateBusy(true);
@@ -1169,7 +1192,7 @@ export default function App() {
           "flex shrink-0 flex-col gap-3 overflow-y-auto border-r border-line bg-sidebar p-3 text-sidebar-foreground",
           sidebarCollapsed
             ? "w-[68px] items-center"
-            : "w-[180px] max-lg:w-full max-lg:overflow-visible"
+            : "w-[200px] max-lg:w-full max-lg:overflow-visible"
         )}
       >
         <div className={cn("flex items-center gap-2", sidebarCollapsed && "flex-col")}>
@@ -1190,93 +1213,107 @@ export default function App() {
             {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
           </IconButton>
         </div>
-        <nav
-          className={cn(
-            "flex flex-col",
-            sidebarCollapsed ? "gap-0.5" : "gap-1.5 max-lg:flex-row max-lg:flex-wrap"
-          )}
-          aria-label={t("Modules")}
-        >
-          {sidebarCollapsed
-            ? SIDEBAR_ORDER.map((id) => (
-                <SidebarItem
-                  key={id}
-                  id={id}
-                  active={activeModule === id}
-                  collapsed
-                  pendingCount={pendingApprovals.length}
-                  onOpen={openModule}
-                />
-              ))
-            : SIDEBAR_GROUPS.map((group) => (
-                <div key={group.title || "pinned"} className="flex flex-col gap-0.5">
-                  {group.title && (
-                    <div className="px-2.5 pb-0.5 pt-1 text-[10px] font-bold uppercase tracking-wide text-sidebar-foreground/40">
-                      {t(group.title)}
-                    </div>
-                  )}
-                  {group.modules.map((id) => (
-                    <SidebarItem
-                      key={id}
-                      id={id}
-                      active={activeModule === id}
-                      collapsed={false}
-                      pendingCount={pendingApprovals.length}
-                      onOpen={openModule}
-                    />
-                  ))}
-                </div>
-              ))}
-        </nav>
-        {/* Command palette pinned to the sidebar's foot. The connectivity sweep
-            lives on the Dashboard as a card — sidebar rail and popover variants
-            both failed for a 37-host fleet (crushed labels, full-height overlay). */}
-        <button
-          type="button"
-          onClick={() => setCommandPaletteOpen(true)}
-            className={cn(
-              "mt-auto flex items-center justify-between rounded-lg px-2.5 py-1.5 text-[13px] text-sidebar-foreground/70 transition-colors hover:bg-white/5 hover:text-sidebar-foreground",
-              sidebarCollapsed && "hidden"
-            )}
-        >
-          <span>{t("Command palette")}</span>
-          <span className="font-mono text-[11px] text-faint">⌘K</span>
-        </button>
+
+        {/* Connection-first rail: the host tree replaces the module list. */}
+        <HostTree
+          hosts={hosts}
+          groups={groups}
+          connectionStatuses={connectionStatuses}
+          openTabs={new Set(workspace.tabs.map((tab) => tab.host))}
+          collapsed={sidebarCollapsed}
+          onOpenHost={openHostSession}
+          onOpenManagement={() => setManagementOpen(true)}
+        />
       </aside>
 
-      <section
-        className={cn(
-          "flex min-h-0 min-w-0 flex-1 flex-col gap-5 overflow-y-auto p-6",
-          !sidebarCollapsed && "max-lg:overflow-visible"
-        )}
-      >
-        {/* v3: gate/approval pills and settings live in the TopBar now — the
-            module header keeps only the title. */}
-        <header className="flex items-start justify-between gap-4 max-md:flex-col">
-          <div className="min-w-0">
-            <h2 className="flex items-center gap-2 text-xl font-bold">
-              <ActiveModuleIcon size={20} className="text-muted-foreground" />
-              {t(activeModuleMeta.label)}
-            </h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {activeModule === "hosts" && currentHost
-                ? `${currentHost.user ? `${currentHost.user}@` : ""}${currentHost.host}:${currentHost.port ?? 22}${currentHost.jump_host ? ` via ${currentHost.jump_host}` : ""}${currentHostProxy ? ` · ${t("proxy")} ${currentHostProxy.name}` : ""}`
-                : hosts.length > 0
-                  ? t("{count} hosts configured", { count: hosts.length })
-                : t("Add a host to start issuing SSH commands")}
-            </p>
-          </div>
-        </header>
-
-        {relatedModules.length > 0 && (
-          <Breadcrumb
-            current={activeModuleMeta}
-            related={relatedModules}
-            onNavigate={navigateModule}
+      {workspaceMode ? (
+        <section className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <WorkspaceTabBar
+            tabs={workspace.tabs}
+            activeTabId={workspace.activeTabId}
+            connectedHosts={connectedHostNames}
+            focusMode={focusMode}
+            fileDrawerOpen={fileDrawerOpen}
+            onActivate={(id) =>
+              setWorkspace((current) => ({ ...current, activeTabId: id }))
+            }
+            onClose={closeWorkspaceTab}
+            onToggleFocusMode={toggleFocusMode}
+            onToggleFileDrawer={() => setFileDrawerOpen((open) => !open)}
           />
-        )}
+          <div className="relative min-h-0 flex-1">
+            {workspace.tabs.map((tab) => (
+              <div
+                key={tab.id}
+                className="absolute inset-0 flex flex-col"
+                style={{ display: tab.id === workspace.activeTabId ? "flex" : "none" }}
+              >
+                <SessionWorkspace tab={tab} hosts={hosts} fileDrawerOpen={fileDrawerOpen} />
+              </div>
+            ))}
+            {workspace.tabs.length === 0 && (
+              <div className="absolute inset-0 overflow-y-auto p-6">
+                <div className="grid gap-4">
+                  <div className="rounded-xl border border-dashed border-line bg-muted/20 p-6 text-sm text-muted-foreground">
+                    {t(
+                      "Pick a host on the left to open its terminal and files as one workspace tab."
+                    )}
+                  </div>
+                  <Dashboard
+                    hosts={hosts}
+                    connectionStatuses={connectionStatuses}
+                    pendingApprovalsCount={pendingApprovals.length}
+                    secretsLocked={secretsLocked}
+                    daemonHealth={daemonHealth}
+                    onNavigateModule={navigateModule}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+        </section>
+      ) : (
+        <section
+          className={cn(
+            "flex min-h-0 min-w-0 flex-1 flex-col gap-5 overflow-y-auto p-6",
+            !sidebarCollapsed && "max-lg:overflow-visible"
+          )}
+        >
+          <header className="flex items-start justify-between gap-4 max-md:flex-col">
+            <div className="flex min-w-0 items-center gap-3">
+              <button
+                type="button"
+                onClick={backToWorkspace}
+                title={t("Back to workspace")}
+                className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-border text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                <ArrowLeft size={15} />
+              </button>
+              <div className="min-w-0">
+                <h2 className="flex items-center gap-2 text-xl font-bold">
+                  <ActiveModuleIcon size={20} className="text-muted-foreground" />
+                  {t(activeModuleMeta.label)}
+                </h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {activeModule === "hosts" && currentHost
+                    ? `${currentHost.user ? `${currentHost.user}@` : ""}${currentHost.host}:${currentHost.port ?? 22}${currentHost.jump_host ? ` via ${currentHost.jump_host}` : ""}${currentHostProxy ? ` · ${t("proxy")} ${currentHostProxy.name}` : ""}`
+                    : hosts.length > 0
+                      ? t("{count} hosts configured", { count: hosts.length })
+                      : t("Add a host to start issuing SSH commands")}
+                </p>
+              </div>
+            </div>
+          </header>
 
-        <section className="module-page">
+          {relatedModules.length > 0 && (
+            <Breadcrumb
+              current={activeModuleMeta}
+              related={relatedModules}
+              onNavigate={navigateModule}
+            />
+          )}
+
+          <section className="module-page">
           {activeModule === "dashboard" && (
             <Dashboard
               hosts={hosts}
@@ -1402,8 +1439,18 @@ export default function App() {
             />
           )}
         </section>
-      </section>
+        </section>
+      )}
       </main>
+
+      {/* Management module grid — the governance/configuration surface for the
+          connection-first shell. */}
+      {managementOpen && (
+        <ManagementOverlay
+          onClose={() => setManagementOpen(false)}
+          onNavigate={openModule}
+        />
+      )}
 
       {/* v3 §3.4: terminal drawer — approvals + audit replay viewport */}
       <TerminalDrawer
