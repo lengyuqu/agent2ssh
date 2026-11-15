@@ -483,6 +483,7 @@ export const zh: Record<string, string> = {
   "System": "系统",
   "Search hosts": "搜索主机",
   "Management": "管理",
+  "Back to console": "返回控制台",
   "Back to workspace": "返回工作区",
   "Focus mode": "焦点模式",
   "Hide files": "隐藏文件",

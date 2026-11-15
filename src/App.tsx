@@ -5,16 +5,16 @@ import {
   PanelLeftOpen,
   Plus,
   RefreshCw,
+  SquareTerminal,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, reportError } from "./api";
 import { isAlreadyDecided } from "./lib/approval-decision";
-import { MODULES, RELATED_MODULES, type ModuleId } from "./nav";
+import { MODULES, RELATED_MODULES, SIDEBAR_GROUPS, SIDEBAR_ORDER, type ModuleId } from "./nav";
 import HostTree from "./features/workspace/HostTree";
 import WorkspaceTabBar from "./features/workspace/WorkspaceTabBar";
 import SessionWorkspace from "./features/workspace/SessionWorkspace";
-import ManagementOverlay from "./features/workspace/ManagementOverlay";
 import TransferCenter from "./features/workspace/TransferCenter";
 import {
   closeTab,
@@ -96,6 +96,58 @@ type ConnectionProgress = {
   variant?: "active" | "success" | "error";
 };
 
+// One console-mode sidebar entry. Memoized: a module switch flips `active` on
+// exactly two items, so per-item memo keeps the rail from rebuilding on every
+// click.
+const SidebarItem = memo(function SidebarItem({
+  id,
+  active,
+  collapsed,
+  pendingCount,
+  onOpen,
+}: {
+  id: ModuleId;
+  active: boolean;
+  collapsed: boolean;
+  pendingCount: number;
+  onOpen: (id: ModuleId) => void;
+}) {
+  const { t } = useI18n();
+  const meta = MODULES.find((module) => module.id === id) ?? MODULES[0];
+  const { label, icon: Icon } = meta;
+  const badge = id === "approvals" && pendingCount > 0;
+  return (
+    <button
+      type="button"
+      title={collapsed ? t(label) : undefined}
+      className={cn(
+        "relative flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] font-medium transition-colors",
+        collapsed && "justify-center px-2",
+        active
+          ? "bg-sidebar-accent text-primary-foreground"
+          : "text-sidebar-foreground/80 hover:bg-white/5 hover:text-sidebar-foreground"
+      )}
+      onClick={() => onOpen(id)}
+    >
+      <Icon size={14} className={active ? "shrink-0" : "shrink-0 opacity-70"} />
+      <span className={cn("truncate", collapsed && "hidden")}>{t(label)}</span>
+      {badge && !collapsed && (
+        <span
+          className={cn(
+            "ml-auto shrink-0 rounded-full px-1.5 font-mono text-[10px] font-bold leading-4",
+            active ? "bg-canvas-0 text-primary" : "border border-line text-muted-foreground"
+          )}
+        >
+          {pendingCount}
+        </span>
+      )}
+      {badge && collapsed && (
+        <span className="absolute right-1.5 top-1.5 size-2 rounded-full bg-risk-medium" />
+      )}
+    </button>
+  );
+});
+
 
 export default function App() {
   const { t } = useI18n();
@@ -107,7 +159,7 @@ export default function App() {
   const [selectedGroup, setSelectedGroup] = useState("default");
   const [editingHost, setEditingHost] = useState<HostProfile | null>(null);
   const [netcattyOpen, setNetcattyOpen] = useState(false);
-  const [activeModule, setActiveModule] = useState<(typeof MODULES)[number]["id"]>("approvals");
+  const [activeModule, setActiveModule] = useState<(typeof MODULES)[number]["id"]>("dashboard");
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [pendingApprovals, setPendingApprovals] = useState<ApprovalRequest[]>([]);
@@ -161,17 +213,18 @@ export default function App() {
   const prevConnectedRef = useRef<Map<string, boolean> | null>(null);
 
   // ── Workspace (connection-first) state ──
-  // The shell has two surfaces: the workspace (host-tree → session tabs with
-  // paired terminal + files) and management module pages. `workspaceMode`
-  // selects which one the stage shows; `activeModule` keeps driving the
-  // management page rendering exactly as before.
-  const [workspaceMode, setWorkspaceMode] = useState(true);
+  // The shell has two surfaces: the console (grouped module nav + module
+  // pages — the human's home: configure, review, monitor) and the workspace
+  // (host tree → session tabs with paired terminal + files — where the agent
+  // operates). `workspaceMode` selects which one the stage shows; it defaults
+  // to the console because the product's identity is agent SSH governance,
+  // not a plain SSH client.
+  const [workspaceMode, setWorkspaceMode] = useState(false);
   const [workspace, setWorkspace] = useState<{ tabs: WorkspaceTab[]; activeTabId: string | null }>(
     () => loadWorkspaceState()
   );
   const [fileDrawerOpen, setFileDrawerOpen] = useState(true);
   const [focusMode, setFocusMode] = useState(false);
-  const [managementOpen, setManagementOpen] = useState(false);
 
   const connectedHostNames = useMemo(
     () => new Set(connectionStatuses.filter((c) => c.connected).map((c) => c.host)),
@@ -197,7 +250,6 @@ export default function App() {
   }, [hosts]);
 
   const openHostSession = useCallback((name: string) => {
-    setManagementOpen(false);
     setWorkspaceMode(true);
     setWorkspace((current) => {
       const next = openHostTab(current.tabs, current.activeTabId, name);
@@ -1216,16 +1268,72 @@ export default function App() {
           </IconButton>
         </div>
 
-        {/* Connection-first rail: the host tree replaces the module list. */}
-        <HostTree
-          hosts={hosts}
-          groups={groups}
-          connectionStatuses={connectionStatuses}
-          openTabs={new Set(workspace.tabs.map((tab) => tab.host))}
-          collapsed={sidebarCollapsed}
-          onOpenHost={openHostSession}
-          onOpenManagement={() => setManagementOpen(true)}
-        />
+        {/* Two sidebar shapes for the two surfaces. Console mode (default):
+            the grouped module nav — the human's jobs are configure, review,
+            monitor, and the feature points must be visible on entry.
+            Workspace mode: the host tree feeds session tabs. */}
+        {workspaceMode ? (
+          <HostTree
+            hosts={hosts}
+            groups={groups}
+            connectionStatuses={connectionStatuses}
+            openTabs={new Set(workspace.tabs.map((tab) => tab.host))}
+            collapsed={sidebarCollapsed}
+            onOpenHost={openHostSession}
+            onOpenConsole={backToWorkspace}
+          />
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={() => setWorkspaceMode(true)}
+              title={t("Workspace")}
+              className={cn(
+                "flex shrink-0 items-center gap-2 rounded-lg border border-edge bg-white/5 text-[13px] font-medium text-sidebar-foreground transition-colors hover:bg-white/10",
+                sidebarCollapsed ? "justify-center p-2" : "px-2.5 py-1.5"
+              )}
+            >
+              <SquareTerminal size={14} className="shrink-0" />
+              {!sidebarCollapsed && (
+                <>
+                  <span>{t("Workspace")}</span>
+                  {workspace.tabs.length > 0 && (
+                    <span className="ml-auto rounded-full border border-line px-1.5 font-mono text-[10px] font-bold leading-4 text-muted-foreground">
+                      {workspace.tabs.length}
+                    </span>
+                  )}
+                </>
+              )}
+            </button>
+            <nav
+              className={cn(
+                "flex min-h-0 flex-1 flex-col overflow-y-auto",
+                sidebarCollapsed ? "gap-0.5" : "gap-1.5"
+              )}
+              aria-label={t("Modules")}
+            >
+              {SIDEBAR_GROUPS.map((group) => (
+                <div key={group.title || "pinned"} className="flex flex-col gap-0.5">
+                  {group.title && !sidebarCollapsed && (
+                    <div className="px-2.5 pb-0.5 pt-1 text-[10px] font-bold uppercase tracking-wide text-sidebar-foreground/40">
+                      {t(group.title)}
+                    </div>
+                  )}
+                  {group.modules.map((id) => (
+                    <SidebarItem
+                      key={id}
+                      id={id}
+                      active={activeModule === id && !workspaceMode}
+                      collapsed={sidebarCollapsed}
+                      pendingCount={pendingApprovals.length}
+                      onOpen={openModule}
+                    />
+                  ))}
+                </div>
+              ))}
+            </nav>
+          </>
+        )}
       </aside>
 
       {workspaceMode ? (
@@ -1265,21 +1373,11 @@ export default function App() {
               </div>
             ))}
             {workspace.tabs.length === 0 && (
-              <div className="absolute inset-0 overflow-y-auto p-6">
-                <div className="grid gap-4">
-                  <div className="rounded-xl border border-dashed border-line bg-muted/20 p-6 text-sm text-muted-foreground">
-                    {t(
-                      "Pick a host on the left to open its terminal and files as one workspace tab."
-                    )}
-                  </div>
-                  <Dashboard
-                    hosts={hosts}
-                    connectionStatuses={connectionStatuses}
-                    pendingApprovalsCount={pendingApprovals.length}
-                    secretsLocked={secretsLocked}
-                    daemonHealth={daemonHealth}
-                    onNavigateModule={navigateModule}
-                  />
+              <div className="absolute inset-0 flex items-center justify-center overflow-y-auto p-6">
+                <div className="max-w-md rounded-xl border border-dashed border-line bg-muted/20 p-6 text-center text-sm text-muted-foreground">
+                  {t(
+                    "Pick a host on the left to open its terminal and files as one workspace tab."
+                  )}
                 </div>
               </div>
             )}
@@ -1456,15 +1554,6 @@ export default function App() {
         </section>
       )}
       </main>
-
-      {/* Management module grid — the governance/configuration surface for the
-          connection-first shell. */}
-      {managementOpen && (
-        <ManagementOverlay
-          onClose={() => setManagementOpen(false)}
-          onNavigate={openModule}
-        />
-      )}
 
       {/* v3 §3.4: terminal drawer — approvals + audit replay viewport */}
       <TerminalDrawer

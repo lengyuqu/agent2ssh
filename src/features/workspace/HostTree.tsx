@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { FolderSearch, Settings2 } from "lucide-react";
+import { FolderSearch, LayoutGrid } from "lucide-react";
 import { useI18n } from "../../i18n";
 import { cn } from "../../lib/utils";
 import type { ConnectionStatus, HostGroup, HostProfile } from "../../types";
@@ -11,7 +11,8 @@ type Props = {
   openTabs: Set<string>;
   collapsed: boolean;
   onOpenHost: (name: string) => void;
-  onOpenManagement: () => void;
+  /** Leave the workspace and return to the console (grouped module nav). */
+  onOpenConsole: () => void;
 };
 
 /**
@@ -27,7 +28,7 @@ export default function HostTree({
   openTabs,
   collapsed,
   onOpenHost,
-  onOpenManagement,
+  onOpenConsole,
 }: Props) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
@@ -138,15 +139,15 @@ export default function HostTree({
 
       <button
         type="button"
-        onClick={onOpenManagement}
-        title={t("Management")}
+        onClick={onOpenConsole}
+        title={t("Back to console")}
         className={cn(
           "flex shrink-0 items-center gap-2 rounded-lg text-[13px] text-sidebar-foreground/70 transition-colors hover:bg-white/5 hover:text-sidebar-foreground",
           collapsed ? "justify-center p-2" : "px-2.5 py-1.5"
         )}
       >
-        <Settings2 size={14} className="shrink-0" />
-        {!collapsed && <span>{t("Management")}</span>}
+        <LayoutGrid size={14} className="shrink-0" />
+        {!collapsed && <span>{t("Back to console")}</span>}
       </button>
     </div>
   );
