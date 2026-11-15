@@ -57,6 +57,19 @@ export function pruneMissingHosts(tabs: WorkspaceTab[], hostNames: Set<string>):
   return tabs.filter((tab) => hostNames.has(tab.host));
 }
 
+/** Reorder tabs by dropping `dragId` onto `overId`'s slot. No-op if either id
+ *  is unknown or they are equal. */
+export function moveTab(tabs: WorkspaceTab[], dragId: string, overId: string): WorkspaceTab[] {
+  if (dragId === overId) return tabs;
+  const from = tabs.findIndex((tab) => tab.id === dragId);
+  const over = tabs.findIndex((tab) => tab.id === overId);
+  if (from === -1 || over === -1) return tabs;
+  const next = [...tabs];
+  const [moved] = next.splice(from, 1);
+  next.splice(over, 0, moved);
+  return next;
+}
+
 export function saveWorkspaceState(tabs: WorkspaceTab[], activeTabId: string | null): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ tabs, activeTabId }));

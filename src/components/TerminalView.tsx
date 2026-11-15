@@ -39,6 +39,10 @@ type Props = {
   onBlockSelected?: (block: CommandBlockMetadata | null) => void;
   /** Live daemon terminal identity used by the authenticated broadcast API. */
   onConnectionChange?: (connection: { terminalId: string; host: string } | null) => void;
+  /** OSC 7 shell integration: the remote shell reported its working directory
+   *  (`file://host/path`). Fires only for shells that emit OSC 7; never fires
+   *  for plain shells, so callers must treat it as best-effort. */
+  onOsc7Cwd?: (cwd: string) => void;
 };
 
 export type CommandBlockCopyResult =
@@ -70,7 +74,7 @@ export type TerminalViewHandle = {
 /** A live interactive terminal to a host, streamed over the daemon's
  *  /terminal WebSocket (raw bytes both ways: ANSI, control chars, TUIs). */
 const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView(
-  { host, terminalTheme, appTheme, onLineTyped, onHistoryRequest, onBlocksChange, onBlockSelected, onConnectionChange },
+  { host, terminalTheme, appTheme, onLineTyped, onHistoryRequest, onBlocksChange, onBlockSelected, onConnectionChange, onOsc7Cwd },
   ref
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -93,6 +97,8 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
   onBlockSelectedRef.current = onBlockSelected;
   const onConnectionChangeRef = useRef(onConnectionChange);
   onConnectionChangeRef.current = onConnectionChange;
+  const onOsc7CwdRef = useRef(onOsc7Cwd);
+  onOsc7CwdRef.current = onOsc7Cwd;
 
   const metadataFor = (id?: string): CommandBlockMetadata[] => {
     const term = termRef.current;
@@ -257,6 +263,18 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
     const writeParsedSub = term.onWriteParsed(() => highlightPaint.schedule());
     const clipboardOscSub = registerClipboardOscHandler(term.parser, {
       writeText: (text) => navigator.clipboard?.writeText(text),
+    });
+    // OSC 7 cwd reporting (shell integration). Returning false lets xterm
+    // treat the sequence as unknown, which is exactly right — it is metadata,
+    // not terminal output.
+    const osc7Sub = term.parser.registerOscHandler(7, (data) => {
+      try {
+        const raw = data.startsWith("file://") ? new URL(data).pathname : data;
+        onOsc7CwdRef.current?.(decodeURIComponent(raw));
+      } catch {
+        onOsc7CwdRef.current?.(data);
+      }
+      return false;
     });
 
     const tracker = createCommandBlockTracker(term, {
@@ -502,6 +520,7 @@ const TerminalView = forwardRef<TerminalViewHandle, Props>(function TerminalView
       writeParsedSub.dispose();
       blockWriteSub.dispose();
       clipboardOscSub.dispose();
+      osc7Sub.dispose();
       blocksChangedSub.dispose();
       blockPaint.dispose();
       blockPaintRef.current = null;

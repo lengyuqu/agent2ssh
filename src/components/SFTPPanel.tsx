@@ -14,12 +14,13 @@ import {
   Square,
   X,
 } from "lucide-react";
-import { memo, lazy, Suspense, useRef, useState  } from "react";
+import { memo, lazy, Suspense, useEffect, useRef, useState  } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import { labelCls } from "../lib/ui-classes";
 import type { HostProfile, SftpDirEntry } from "../types";
+import { publishTransfer } from "../features/workspace/transferBus";
 import HostSelector from "./HostSelector";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
@@ -91,6 +92,12 @@ type PendingTransfer = {
 type Props = {
   hosts: HostProfile[];
   initialHost?: string;
+  /** Workspace embedding: publish live transfer progress under this host
+   *  name to the transfer center. Absent = publish nothing (module page). */
+  transferHost?: string;
+  /** Workspace embedding: navigate the remote pane to this path (nonce makes
+   *  repeated jumps to the same path re-trigger). */
+  remoteJump?: { path: string; nonce: number };
 };
 
 function makeSide(kind: LocationKind, host: string): SideState {
@@ -235,7 +242,7 @@ function applyFilter(entries: FileEntry[], filter: LsFilter): FileEntry[] {
 
 const DRAG_MIME = "application/x-agent2ssh-sftp";
 
-function SFTPPanel({ hosts, initialHost = "" }: Props) {
+function SFTPPanel({ hosts, initialHost = "", transferHost, remoteJump }: Props) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [left, setLeft] = useState<SideState>(() => makeSide("remote", initialHost));
@@ -274,6 +281,21 @@ function SFTPPanel({ hosts, initialHost = "" }: Props) {
   function patchSide(side: Side, patch: Partial<SideState>) {
     setSide(side, (prev) => ({ ...prev, ...patch }));
   }
+
+  // Workspace embedding: mirror the live transfer into the transfer center.
+  useEffect(() => {
+    if (!transferHost) return;
+    publishTransfer(transferHost, transfer);
+  }, [transfer, transferHost]);
+
+  // Workspace embedding: jump the remote pane to the terminal's cwd on demand.
+  const jumpNonce = remoteJump?.nonce ?? 0;
+  useEffect(() => {
+    if (!remoteJump || !remoteJump.path) return;
+    const remoteSide: Side = left.kind === "remote" ? "left" : "right";
+    void loadRemote(remoteSide, initialHost, remoteJump.path);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jumpNonce]);
 
   function reportFailure(detail: string, err: unknown, ctx: Record<string, unknown>) {
     reportError("sftp-panel", detail, err, ctx);

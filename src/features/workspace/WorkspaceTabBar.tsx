@@ -11,14 +11,16 @@ type Props = {
   fileDrawerOpen: boolean;
   onActivate: (id: string) => void;
   onClose: (id: string) => void;
+  onReorder: (dragId: string, overId: string) => void;
   onToggleFocusMode: () => void;
   onToggleFileDrawer: () => void;
 };
 
 /**
- * The workspace tab bar: one tab per host session, a focus-mode toggle
- * (collapse sidebar + file drawer) and a per-tab file-drawer toggle. Mirrors
- * the connection-first model — tabs are sessions, not feature modules.
+ * The workspace tab bar: one tab per host session (draggable to reorder), a
+ * focus-mode toggle (collapse sidebar + file drawer) and a per-tab file-drawer
+ * toggle. Mirrors the connection-first model — tabs are sessions, not feature
+ * modules.
  */
 export default function WorkspaceTabBar({
   tabs,
@@ -28,6 +30,7 @@ export default function WorkspaceTabBar({
   fileDrawerOpen,
   onActivate,
   onClose,
+  onReorder,
   onToggleFocusMode,
   onToggleFileDrawer,
 }: Props) {
@@ -48,6 +51,20 @@ export default function WorkspaceTabBar({
                   ? "bg-white/10 text-foreground"
                   : "text-sidebar-foreground/80 hover:bg-white/5 hover:text-sidebar-foreground"
               )}
+              draggable
+              onDragStart={(event) => {
+                event.dataTransfer.setData("text/workspace-tab", tab.id);
+                event.dataTransfer.effectAllowed = "move";
+              }}
+              onDragOver={(event) => {
+                if (event.dataTransfer.types.includes("text/workspace-tab")) {
+                  event.preventDefault();
+                }
+              }}
+              onDrop={(event) => {
+                const dragId = event.dataTransfer.getData("text/workspace-tab");
+                if (dragId && dragId !== tab.id) onReorder(dragId, tab.id);
+              }}
             >
               <button
                 type="button"

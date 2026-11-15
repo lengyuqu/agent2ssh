@@ -15,9 +15,11 @@ import HostTree from "./features/workspace/HostTree";
 import WorkspaceTabBar from "./features/workspace/WorkspaceTabBar";
 import SessionWorkspace from "./features/workspace/SessionWorkspace";
 import ManagementOverlay from "./features/workspace/ManagementOverlay";
+import TransferCenter from "./features/workspace/TransferCenter";
 import {
   closeTab,
   loadWorkspaceState,
+  moveTab,
   openHostTab,
   pruneMissingHosts,
   saveWorkspaceState,
@@ -1238,6 +1240,12 @@ export default function App() {
               setWorkspace((current) => ({ ...current, activeTabId: id }))
             }
             onClose={closeWorkspaceTab}
+            onReorder={(dragId, overId) =>
+              setWorkspace((current) => ({
+                ...current,
+                tabs: moveTab(current.tabs, dragId, overId),
+              }))
+            }
             onToggleFocusMode={toggleFocusMode}
             onToggleFileDrawer={() => setFileDrawerOpen((open) => !open)}
           />
@@ -1248,7 +1256,12 @@ export default function App() {
                 className="absolute inset-0 flex flex-col"
                 style={{ display: tab.id === workspace.activeTabId ? "flex" : "none" }}
               >
-                <SessionWorkspace tab={tab} hosts={hosts} fileDrawerOpen={fileDrawerOpen} />
+                <SessionWorkspace
+                  tab={tab}
+                  hosts={hosts}
+                  fileDrawerOpen={fileDrawerOpen}
+                  onOpenFileDrawer={() => setFileDrawerOpen(true)}
+                />
               </div>
             ))}
             {workspace.tabs.length === 0 && (
@@ -1271,6 +1284,7 @@ export default function App() {
               </div>
             )}
           </div>
+          <TransferCenter />
         </section>
       ) : (
         <section

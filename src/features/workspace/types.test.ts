@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   closeTab,
+  moveTab,
   openHostTab,
   pruneMissingHosts,
   type WorkspaceTab,
@@ -58,5 +59,16 @@ describe("workspace tab transitions", () => {
   it("prunes tabs whose host disappeared from the configuration", () => {
     const tabs = [tab("a", "ws-a"), tab("gone", "ws-gone"), tab("c", "ws-c")];
     expect(pruneMissingHosts(tabs, new Set(["a", "c"]))).toEqual([tabs[0], tabs[2]]);
+  });
+
+  it("reorders tabs by dropping one onto another's slot", () => {
+    const tabs = [tab("a", "ws-a"), tab("b", "ws-b"), tab("c", "ws-c")];
+    // Drop "a" onto "c": "a" lands where "c" was.
+    expect(moveTab(tabs, "ws-a", "ws-c").map((tab) => tab.host)).toEqual(["b", "c", "a"]);
+    // Drop "c" onto "a": "c" lands first.
+    expect(moveTab(tabs, "ws-c", "ws-a").map((tab) => tab.host)).toEqual(["c", "a", "b"]);
+    // Same id / unknown ids are no-ops (same array reference).
+    expect(moveTab(tabs, "ws-a", "ws-a")).toBe(tabs);
+    expect(moveTab(tabs, "ws-x", "ws-a")).toBe(tabs);
   });
 });
