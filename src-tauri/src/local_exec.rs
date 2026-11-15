@@ -512,7 +512,27 @@ fn git_bash(installed: &[ShellInfo]) -> Option<ShellInfo> {
                 && shell.path.to_ascii_lowercase().contains("git")
         })
         .cloned()
-        .or_else(|| shell_with_stem(installed, &["bash"]))
+        .or_else(|| {
+            // A bare `bash.exe` on PATH is not necessarily a shell the caller
+            // can run commands through: the app-execution-alias stub under
+            // WindowsApps and the legacy `System32\bash.exe` are both WSL
+            // launchers that print the "no distribution installed" banner and
+            // exit instead of executing anything. Only a bash outside those
+            // launchers may serve as a Git Bash substitute.
+            shell_with_stem(installed, &["bash"]).filter(|shell| !is_wsl_bash_launcher(&shell.path))
+        })
+}
+
+/// Whether a `bash.exe` path is one of the WSL launchers that masquerade as
+/// POSIX shells on Windows.
+///
+/// Pure string matching on purpose: the two launcher locations are fixed by
+/// Windows itself (`WindowsApps` holds the Store/alias reparse points, the
+/// legacy launcher sits in `System32`), so no process spawning or filesystem
+/// probing is needed to recognise them.
+fn is_wsl_bash_launcher(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains("\\windowsapps\\") || lower.ends_with("\\system32\\bash.exe")
 }
 
 /// The MSVC architecture name for the host this build runs on.
@@ -722,7 +742,12 @@ pub(crate) fn resolve_environment(request: LocalEnvironmentRequest) -> Result<En
             .ok_or_else(|| anyhow!("cmd.exe not found on PATH")),
         LocalEnvironment::GitBash => git_bash(&installed)
             .map(|shell| EnvironmentPlan::plain(&shell))
-            .ok_or_else(|| anyhow!("Git Bash not found: no bash.exe on PATH")),
+            .ok_or_else(|| {
+                anyhow!(
+                    "Git Bash not found: no usable bash.exe on PATH, in Git's install \
+                         locations or in the Git for Windows registry entry"
+                )
+            }),
         LocalEnvironment::VsDevShell => vs_dev_shell_plan(&installed),
         LocalEnvironment::Wsl => wsl_plan(distro.as_deref(), &installed),
         // Returned before the scan. Kept so the match stays total and a future
@@ -1443,6 +1468,69 @@ mod tests {
         let described = describe_shell(Path::new("pwsh"), &installed);
         assert_eq!(described.name, "PowerShell 7");
         assert_eq!(described.family, ShellFamily::PowerShell);
+    }
+
+    #[test]
+    fn wsl_bash_launchers_are_recognised_by_path_shape() {
+        // The two launcher locations Windows itself fixes: the Store
+        // app-execution-alias reparse point and the legacy System32 launcher.
+        // Both print "no distribution installed" instead of running a command.
+        assert!(is_wsl_bash_launcher(
+            r"C:\Users\So_Hi\AppData\Local\Microsoft\WindowsApps\bash.exe"
+        ));
+        assert!(is_wsl_bash_launcher(r"C:\Windows\System32\bash.exe"));
+        // Real POSIX bashes must not be rejected: Git Bash lives under Program
+        // Files, its portable sibling wherever the user unpacked it, and MSYS
+        // installs under their own roots.
+        assert!(!is_wsl_bash_launcher(r"C:\Program Files\Git\bin\bash.exe"));
+        assert!(!is_wsl_bash_launcher(
+            r"D:\tools\PortableGit\usr\bin\bash.exe"
+        ));
+        assert!(!is_wsl_bash_launcher("/usr/bin/bash"));
+    }
+
+    #[test]
+    fn git_bash_prefers_the_git_flavoured_bash_over_a_path_stub() {
+        let installed = vec![
+            ShellInfo {
+                name: "Bash".into(),
+                path: r"C:\Users\So_Hi\AppData\Local\Microsoft\WindowsApps\bash.exe".into(),
+                family: ShellFamily::Posix,
+            },
+            ShellInfo {
+                name: "Git Bash".into(),
+                path: r"C:\Program Files\Git\bin\bash.exe".into(),
+                family: ShellFamily::Posix,
+            },
+        ];
+        let picked = git_bash(&installed).expect("Git Bash must be picked");
+        assert_eq!(picked.path, r"C:\Program Files\Git\bin\bash.exe");
+    }
+
+    #[test]
+    fn git_bash_fallback_rejects_the_wsl_stub() {
+        // Regression: the only bash.exe on PATH used to win the fallback even
+        // when it was a WSL launcher that cannot execute anything.
+        let installed = vec![ShellInfo {
+            name: "Bash".into(),
+            path: r"C:\Users\So_Hi\AppData\Local\Microsoft\WindowsApps\bash.exe".into(),
+            family: ShellFamily::Posix,
+        }];
+        assert!(
+            git_bash(&installed).is_none(),
+            "a WSL launcher stub must not be served as Git Bash"
+        );
+    }
+
+    #[test]
+    fn git_bash_fallback_accepts_a_real_bash() {
+        let installed = vec![ShellInfo {
+            name: "Bash".into(),
+            path: r"D:\msys64\usr\bin\bash.exe".into(),
+            family: ShellFamily::Posix,
+        }];
+        let picked = git_bash(&installed).expect("a non-launcher bash must be served");
+        assert_eq!(picked.path, r"D:\msys64\usr\bin\bash.exe");
     }
 
     #[test]

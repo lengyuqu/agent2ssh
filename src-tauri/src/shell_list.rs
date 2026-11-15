@@ -77,6 +77,88 @@ fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Git install roots the beyond-PATH prober checks, ordered by likelihood.
+///
+/// Git for Windows can be installed per-user (under `LocalAppData\Programs`)
+/// or into a non-default drive; the per-machine default locations come first.
+#[cfg(windows)]
+fn git_bash_candidate_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(pf) = std::env::var_os("ProgramFiles") {
+        roots.push(PathBuf::from(pf).join("Git"));
+    }
+    if let Some(pf) = std::env::var_os("ProgramFiles(x86)") {
+        roots.push(PathBuf::from(pf).join("Git"));
+    }
+    if let Some(lap) = std::env::var_os("LocalAppData") {
+        roots.push(PathBuf::from(lap).join("Programs").join("Git"));
+    }
+    roots
+}
+
+/// Extract the `InstallPath` value from `reg query` output.
+///
+/// A matching line looks like `    InstallPath    REG_SZ    C:\Program Files\Git`.
+/// The first hit wins; `None` when no line carries a non-empty value.
+#[cfg(windows)]
+fn parse_reg_install_path(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let Some(idx) = line.find("InstallPath") else {
+            continue;
+        };
+        let value = line[idx + "InstallPath".len()..].trim();
+        let value = value.strip_prefix("REG_SZ").map(str::trim).unwrap_or(value);
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+/// Read Git for Windows' registered install root from the registry.
+///
+/// The installer records its (possibly custom) target under
+/// `SOFTWARE\GitForWindows\InstallPath` in HKLM or HKCU; that covers installs a
+/// fixed-path probe cannot see. `reg.exe` is a console program, so it goes
+/// through `win_proc::no_window` like every other spawned console helper.
+#[cfg(windows)]
+fn git_bash_registry_root() -> Option<PathBuf> {
+    use std::process::Command;
+    for hive in ["HKEY_LOCAL_MACHINE", "HKEY_CURRENT_USER"] {
+        let key = format!("{hive}\\SOFTWARE\\GitForWindows");
+        let output = crate::win_proc::no_window(Command::new("reg.exe"))
+            .args(["query", &key, "/v", "InstallPath"])
+            .output();
+        let text = match output {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+            _ => continue,
+        };
+        if let Some(path) = parse_reg_install_path(&text) {
+            return Some(PathBuf::from(path));
+        }
+    }
+    None
+}
+
+/// Locate Git Bash outside PATH: fixed install roots first, then the registry.
+///
+/// Only called when the PATH scan produced no Git-flavoured bash, so a machine
+/// whose PATH already carries Git's `bin` directory pays nothing.
+#[cfg(windows)]
+fn find_git_bash_beyond_path() -> Option<PathBuf> {
+    let mut roots = git_bash_candidate_roots();
+    if let Some(root) = git_bash_registry_root() {
+        roots.push(root);
+    }
+    for root in roots {
+        let bash = root.join("bin").join("bash.exe");
+        if bash.is_file() {
+            return Some(bash);
+        }
+    }
+    None
+}
+
 /// Parse `/etc/shells` to get additional shell paths on Unix.
 #[cfg(unix)]
 fn parse_etc_shells() -> Vec<String> {
@@ -114,6 +196,28 @@ pub fn list_shells() -> Vec<ShellInfo> {
                     name: pretty_name(name, &path),
                     path: path_str,
                     family: *family,
+                });
+            }
+        }
+    }
+
+    // 1.5. On Windows, a Git install is not necessarily on PATH — the
+    // installer often adds only `Git\cmd` — while the one `bash.exe` PATH does
+    // carry may be the WSL launcher stub. Probe Git's own install locations
+    // (fixed roots + the registry's InstallPath) so `local:gitbash` resolves on
+    // machines whose PATH never mentions Git's bin directory.
+    #[cfg(windows)]
+    if !shells
+        .iter()
+        .any(|s| s.path.to_ascii_lowercase().contains("git"))
+    {
+        if let Some(path) = find_git_bash_beyond_path() {
+            let path_str = path.to_string_lossy().into_owned();
+            if seen_paths.insert(path_str.clone()) {
+                shells.push(ShellInfo {
+                    name: "Git Bash".into(),
+                    path: path_str,
+                    family: ShellFamily::Posix,
                 });
             }
         }
@@ -270,5 +374,25 @@ mod tests {
 
         let path = PathBuf::from("/usr/bin/zsh");
         assert_eq!(pretty_name("zsh", &path), "Zsh");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reg_query_install_path_parsing_handles_the_real_shape() {
+        // reg.exe prints the value name, the type and the value on one line,
+        // padded with spaces; paths contain spaces so splitting on whitespace
+        // is not an option.
+        let text = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\GitForWindows\r\n    InstallPath    REG_SZ    C:\\Program Files\\Git\r\n\r\n";
+        assert_eq!(
+            parse_reg_install_path(text).as_deref(),
+            Some(r"C:\Program Files\Git")
+        );
+
+        assert_eq!(parse_reg_install_path("no match here"), None);
+        assert_eq!(
+            parse_reg_install_path("    InstallPath    REG_SZ"),
+            None,
+            "a valueless entry must not resolve"
+        );
     }
 }
