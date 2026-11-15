@@ -902,6 +902,10 @@ async fn authorize_command_inner(
         reason,
         change_id,
         side_effect: None,
+        // Daemon requests are agent-sourced: the interactive approval card is
+        // exactly the control that applies here. Only the desktop UI counts
+        // as a human click (`human_approved: true`).
+        human_approved: false,
     };
 
     match authorize_command_with_approval(input, move |prompt| {

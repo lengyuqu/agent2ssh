@@ -1570,6 +1570,7 @@ async fn authorize_local_exec_request(req: &mut ExecRequest) -> Result<RiskLevel
         req.reason.clone(),
         req.change_id.clone(),
         req.side_effect.clone(),
+        false,
         "approval required but no local approval handler is available",
         "; use --force for a high-risk command that no approval policy matches, or pass --daemon with a remote alias so that daemon can approve it — a local daemon is not part of the CLI execution path",
     )
@@ -1598,6 +1599,7 @@ async fn authorize_local_exec_targets(
         force,
         reason,
         change_id,
+        false,
         "approval required but no local approval handler is available",
         "; use --force for a high-risk command that no approval policy matches — exec-multi has no daemon forwarding, so nothing on the CLI can approve a policy match",
     )
@@ -1634,6 +1636,7 @@ async fn authorize_local_playbook_run(
             reason.clone(),
             change_id.clone(),
             None,
+            false,
             "approval required but no local approval handler is available",
             "; use --force for a high-risk step that no approval policy matches — playbooks have no daemon forwarding, so a policy match can only be approved from the desktop app",
         )
@@ -1664,6 +1667,7 @@ async fn authorize_local_operation(
         None,
         None,
         None,
+        false,
         "approval required but no local approval handler is available",
         "; sftp has neither --force nor daemon forwarding, and the desktop app has no approval handler either — only a daemon's /sftp/* routes can approve this",
     )

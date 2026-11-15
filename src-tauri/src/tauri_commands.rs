@@ -443,6 +443,7 @@ async fn authorize_desktop_exec_request(request: &mut ExecRequest) -> Result<Ris
         request.reason.clone(),
         request.change_id.clone(),
         request.side_effect.clone(),
+        true,
         "approval required but no desktop approval handler is available",
         "; run through the daemon approval flow",
     )
@@ -481,6 +482,7 @@ async fn authorize_desktop_exec_targets(
         force,
         reason,
         change_id,
+        true,
         "approval required but no desktop approval handler is available",
         "; run through the daemon approval flow",
     )
@@ -516,6 +518,7 @@ async fn authorize_desktop_playbook_run(
             None,
             None,
             None,
+            true,
             "approval required but no desktop approval handler is available",
             "; run through the daemon approval flow",
         )
@@ -546,6 +549,7 @@ async fn authorize_desktop_operation(
         None,
         None,
         None,
+        true,
         "approval required but no desktop approval handler is available",
         "; run through the daemon approval flow",
     )

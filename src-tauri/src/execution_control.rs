@@ -26,6 +26,13 @@ pub struct CommandAuthorizationInput<'a> {
     pub reason: Option<String>,
     pub change_id: Option<String>,
     pub side_effect: Option<String>,
+    /// True when the request comes from the desktop UI, where a human is the
+    /// one clicking. The click IS the approval: approval policies and the
+    /// high-risk prompt target agent surfaces (MCP / CLI / daemon) — asking
+    /// the human to approve their own action is friction with no security
+    /// value. Risk classification, blocked rules, rate limits and the audit
+    /// trail all still apply.
+    pub human_approved: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,6 +351,7 @@ pub async fn authorize_command_without_approval_handler(
     reason: Option<String>,
     change_id: Option<String>,
     side_effect: Option<String>,
+    human_approved: bool,
     rejection_message: &str,
     rejection_hint: &str,
 ) -> Result<CommandAuthorization, CommandAuthorizationError> {
@@ -360,6 +368,7 @@ pub async fn authorize_command_without_approval_handler(
             reason,
             change_id,
             side_effect,
+            human_approved,
         },
         |prompt| async move {
             append_rejected_exec_audit(
@@ -406,6 +415,7 @@ pub async fn authorize_targets_without_approval_handler(
     force: bool,
     reason: Option<String>,
     change_id: Option<String>,
+    human_approved: bool,
     rejection_message: &str,
     rejection_hint: &str,
 ) -> Result<Vec<String>, CommandAuthorizationError> {
@@ -423,6 +433,7 @@ pub async fn authorize_targets_without_approval_handler(
             reason.clone(),
             change_id.clone(),
             None,
+            human_approved,
             rejection_message,
             rejection_hint,
         )
@@ -484,11 +495,12 @@ where
 
     let approval_policy = check_approval_required(input.host, input.tags, input.command, risk)
         .map_err(|e| CommandAuthorizationError::Internal(e.to_string()))?;
-    let needs_approval = approval_policy.is_some() || (risk == RiskLevel::High && !input.force);
+    let needs_approval = !input.human_approved
+        && (approval_policy.is_some() || (risk == RiskLevel::High && !input.force));
     if !needs_approval {
         return Ok(CommandAuthorization {
             risk,
-            approved: false,
+            approved: input.human_approved,
             command: None,
         });
     }
@@ -603,6 +615,7 @@ mod tests {
             reason: None,
             change_id: None,
             side_effect: None,
+            human_approved: false,
         }
     }
 
@@ -846,6 +859,7 @@ mod tests {
             reason: None,
             change_id: None,
             side_effect: None,
+            human_approved: false,
         };
         let result = authorize_command_with_approval(input, |_| async {
             panic!("approval should not be requested when scope denies")
@@ -871,6 +885,7 @@ mod tests {
             reason: None,
             change_id: None,
             side_effect: None,
+            human_approved: false,
         };
 
         let result = authorize_command_with_approval(input, |_| async {
@@ -897,6 +912,7 @@ mod tests {
             reason: None,
             change_id: None,
             side_effect: None,
+            human_approved: false,
         };
 
         let result = authorize_command_with_approval(input, |_| async {

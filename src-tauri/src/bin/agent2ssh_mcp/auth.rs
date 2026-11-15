@@ -22,6 +22,7 @@ pub(super) async fn authorize_local_mcp_exec_request(
         request.reason.clone(),
         request.change_id.clone(),
         request.side_effect.clone(),
+        false,
         "approval required but no local MCP approval handler is available",
         "; run through the daemon approval flow",
     )
@@ -50,6 +51,7 @@ pub(super) async fn authorize_local_mcp_exec_targets(
         force,
         reason,
         change_id,
+        false,
         "approval required but no local MCP approval handler is available",
         "; run through the daemon approval flow",
     )
@@ -87,6 +89,7 @@ pub(super) async fn authorize_local_mcp_playbook_run(
             reason.clone(),
             change_id.clone(),
             None,
+            false,
             "approval required but no local MCP approval handler is available",
             "; run through the daemon approval flow",
         )
@@ -117,6 +120,7 @@ pub(super) async fn authorize_local_mcp_operation(
         None,
         None,
         None,
+        false,
         "approval required but no local MCP approval handler is available",
         "; run through the daemon approval flow",
     )
