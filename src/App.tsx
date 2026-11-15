@@ -292,6 +292,13 @@ export default function App() {
     setWorkspaceMode(true);
   }, []);
 
+  // Leave the workspace and land on the console home (dashboard) — the
+  // "Back to console" entry in the workspace sidebar.
+  const openConsole = useCallback(() => {
+    setActiveModule("dashboard");
+    setWorkspaceMode(false);
+  }, []);
+
   // v3 §1.3: jump to the approval workbench and focus the first pending card
   // (shared by ⌘⇧A and the ⌘K pending-approvals group).
   const openApprovalsWorkbench = useCallback(() => {
@@ -1281,7 +1288,7 @@ export default function App() {
             openTabs={new Set(workspace.tabs.map((tab) => tab.host))}
             collapsed={sidebarCollapsed}
             onOpenHost={openHostSession}
-            onOpenConsole={backToWorkspace}
+            onOpenConsole={openConsole}
           />
         ) : (
           <>
