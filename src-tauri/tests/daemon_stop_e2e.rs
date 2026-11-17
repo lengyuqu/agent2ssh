@@ -567,8 +567,12 @@ fn stop_exits_when_exec_websocket_peer_stops_reading() {
     stream.read_exact(&mut payload).unwrap();
     let event: serde_json::Value = serde_json::from_slice(&payload).expect("stream event JSON");
     assert_eq!(event["type"], "stdout", "SSH stream did not start: {event}");
-    // The peer stops reading while the remote command floods output.
-    std::thread::sleep(Duration::from_secs(2));
+    // The peer stops reading while the remote command floods output. Five
+    // seconds, not two: the assertion below is that the *send* side reached its
+    // drain deadline, which only happens once 4 KiB of socket buffer plus the
+    // daemon's own queue are full — and on a loaded container two seconds was
+    // enough to start the stream but not to fill it.
+    std::thread::sleep(Duration::from_secs(5));
     let started = Instant::now();
     request_drain_for_test(daemon.child.id()).expect("stop with backpressured WebSocket");
     assert!(started.elapsed() < Duration::from_secs(7));
