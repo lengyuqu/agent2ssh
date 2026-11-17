@@ -898,25 +898,31 @@ fn stop_refuses_a_daemon_named_process_without_authenticated_health() {
     std::env::set_var(CONFIG_DIR_ENV, dir.path());
     std::env::set_var(ADDR_ENV, silent.local_addr().unwrap().to_string());
     std::fs::write(dir.path().join("daemon.pid"), pid.to_string()).unwrap();
-    let result = stop_daemon_process(pid);
+    // Before the stop is the only way to tell "the process was already gone"
+    // from "the stop ended it" when the assertion below fails.
+    let alive_before = process_is_alive(pid);
+    let started = Instant::now();
+    let refused = stop_daemon_process(pid).expect_err("an unauthenticated daemon is not stopped");
+    let elapsed = started.elapsed();
     let still_running = child.try_wait().unwrap().is_none();
     let pid_retained = dir.path().join("daemon.pid").exists();
     let _ = child.kill();
     let _ = child.wait();
     common::restore_default_config_env();
     std::env::remove_var(ADDR_ENV);
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains(if cfg!(target_os = "macos") {
+    assert!(
+        refused.to_string().contains(if cfg!(target_os = "macos") {
             "not bound"
         } else {
             "could not be authenticated"
-        }));
+        }),
+        "{refused}"
+    );
     assert!(
         still_running && pid_retained,
         "a refused stop must leave the process and its record alone: \
-         still_running={still_running} pid_retained={pid_retained}"
+         alive_before={alive_before} still_running={still_running} \
+         pid_retained={pid_retained} elapsed={elapsed:?}"
     );
 }
 
