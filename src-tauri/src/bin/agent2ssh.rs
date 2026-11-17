@@ -88,10 +88,19 @@ enum Commands {
         #[command(subcommand)]
         command: KnownHostsCommands,
     },
+    /// Add, list, edit and remove SSH host profiles
     Host {
         #[command(subcommand)]
         command: HostCommands,
     },
+    /// Run one non-interactive command on an SSH host
+    ///
+    /// Exit status: without --json it is the remote command's own exit status,
+    /// so 1 may mean either; with --json it is 0 whenever the command ran (read
+    /// `exit_code` in the output). Agent2SSH's own failures — unknown host,
+    /// blocked command, connection or timeout — exit 1, and under --json also
+    /// print {"ok": false, "error": {"code", "message"}} on stdout. Usage errors
+    /// exit 2.
     Exec {
         #[arg(add = ArgValueCandidates::new(host_candidates))]
         host: String,
@@ -101,12 +110,22 @@ enum Commands {
         /// Required for high-risk commands
         #[arg(long)]
         force: bool,
-        /// Kill the command after N seconds (default 60)
+        /// Stop waiting after N seconds (default 60). The remote process is not
+        /// killed; wrap the command in `timeout <secs>` when it must stop
         #[arg(long)]
         timeout_secs: Option<u64>,
         /// Pipe this string into the remote command's stdin
         #[arg(long)]
         stdin: Option<String>,
+        /// Pipe this file into the remote command's stdin; `-` reads this
+        /// process's own stdin. Text only (UTF-8). Unlike --stdin it has no
+        /// command-line length limit and keeps trailing newlines
+        #[arg(long, conflicts_with = "stdin", value_name = "PATH")]
+        stdin_file: Option<String>,
+        /// Keep at most this many bytes of each of stdout and stderr (default
+        /// 4 MiB); a longer stream keeps its head and tail
+        #[arg(long)]
+        max_output_bytes: Option<usize>,
         /// Show execution plan without running the command
         #[arg(long)]
         plan: bool,
@@ -156,14 +175,17 @@ enum Commands {
         #[arg(long)]
         change_id: Option<String>,
     },
+    /// List, stat, upload, download and delete files over SFTP
     Sftp {
         #[command(subcommand)]
         command: SftpCommands,
     },
+    /// Open, write to, read from and close persistent PTY sessions
     Session {
         #[command(subcommand)]
         command: SessionCommands,
     },
+    /// Start, list and stop local and remote port forwards
     Forward {
         #[command(subcommand)]
         command: ForwardCommands,
@@ -182,6 +204,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Show recent execution audit entries, with filters
     Audit {
         #[arg(long, default_value_t = 20)]
         limit: usize,
@@ -1889,7 +1912,88 @@ fn print_completion_registration(shell: CompletionShell) -> Result<()> {
         .context("failed to generate shell completion registration")
 }
 
-fn main() -> Result<()> {
+/// Process entry. A failure prints `Error: …` on stderr and exits 1, exactly
+/// as returning an `Err` from `main` always did; under `--json` it also prints
+/// a machine-readable failure on stdout (see [`failure_json`]). Before this,
+/// a script that asked for JSON got an empty stdout and had to parse the
+/// sentence on stderr to learn what went wrong.
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error:?}");
+            if json_requested(std::env::args_os().skip(1)) {
+                println!("{}", failure_json(&error));
+            }
+            std::process::ExitCode::from(1)
+        }
+    }
+}
+
+/// Whether the command line asks for JSON output: `--json` anywhere before a
+/// literal `--`. Every subcommand that has a `--json` flag has its own, so this
+/// reads the arguments rather than the parsed command — the failure may be one
+/// that clap never saw.
+fn json_requested(args: impl Iterator<Item = std::ffi::OsString>) -> bool {
+    for arg in args {
+        if arg == "--" {
+            return false;
+        }
+        if arg == "--json" {
+            return true;
+        }
+    }
+    false
+}
+
+/// The failure object printed on stdout under `--json`.
+///
+/// `{"ok": false, "error": {"code", "message"}}`. The code is the same one the
+/// MCP server reports (`host_not_found`, `command_blocked`, `force_required`,
+/// `timeout`, ...), from `agent2ssh::error_codes::code_for_message`; the message
+/// is the whole cause chain. Successful output is not wrapped, so existing
+/// consumers keep working: a result is a failure when `ok` is `false`.
+fn failure_json(error: &anyhow::Error) -> String {
+    let message = format!("{error:#}");
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ok": false,
+        "error": {
+            "code": agent2ssh::error_codes::code_for_message(&message),
+            "message": message,
+        }
+    }))
+    .unwrap_or_else(|_| r#"{"ok":false}"#.to_string())
+}
+
+/// The text `--stdin-file` names: a file, or `-` for this process's own stdin.
+///
+/// UTF-8 text only — the request carries stdin as a string — and a terminal is
+/// refused rather than waited on, since a human at a prompt who typed
+/// `--stdin-file -` by mistake would otherwise sit there with no idea why.
+fn read_stdin_source(path: &str) -> Result<String> {
+    use std::io::{IsTerminal, Read};
+    let bytes = if path == "-" {
+        let mut stdin = std::io::stdin();
+        if stdin.is_terminal() {
+            anyhow::bail!(
+                "--stdin-file - reads this process's stdin, which is a terminal; \
+                 pipe or redirect input into agent2ssh, or name a file"
+            );
+        }
+        let mut buf = Vec::new();
+        stdin
+            .read_to_end(&mut buf)
+            .context("failed to read stdin")?;
+        buf
+    } else {
+        std::fs::read(path).with_context(|| format!("failed to read --stdin-file {path}"))?
+    };
+    String::from_utf8(bytes).map_err(|_| {
+        anyhow::anyhow!("--stdin-file {path} is not UTF-8 text; binary input is not supported")
+    })
+}
+
+fn run() -> Result<()> {
     // Everything below runs on a larger stack than the process's main thread
     // gets. Building the clap command tree is itself deep enough to overflow
     // the 1 MiB default Windows main-thread stack in an unoptimized build, and
@@ -2230,6 +2334,8 @@ async fn async_main() -> Result<()> {
             force,
             timeout_secs,
             stdin,
+            stdin_file,
+            max_output_bytes,
             plan,
             reason,
             change_id,
@@ -2245,13 +2351,19 @@ async fn async_main() -> Result<()> {
                 return Ok(());
             }
 
+            // Read before anything connects: a missing file or a terminal on
+            // stdin is the caller's mistake, and should not cost a handshake.
+            let stdin = match stdin_file {
+                Some(path) => Some(read_stdin_source(&path)?),
+                None => stdin,
+            };
             let mut req = ExecRequest {
                 host,
                 command,
                 force,
                 timeout_secs,
                 stdin,
-                max_output_bytes: None,
+                max_output_bytes,
                 reason,
                 change_id,
                 side_effect: None,
@@ -6278,4 +6390,74 @@ fn run_interactive_terminal(host_name: &str, cols: Option<u32>, rows: Option<u32
     drop(raw);
     drop(stdin_thread); // detach: the blocking read exits with the process
     Ok(())
+}
+
+#[cfg(test)]
+mod machine_contract_tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> impl Iterator<Item = std::ffi::OsString> {
+        list.iter()
+            .map(std::ffi::OsString::from)
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn json_is_requested_by_the_flag_anywhere_before_a_double_dash() {
+        assert!(json_requested(args(&["exec", "web1", "uptime", "--json"])));
+        assert!(json_requested(args(&["--json", "host", "list"])));
+        assert!(!json_requested(args(&["exec", "web1", "uptime"])));
+        // After `--` an argument is data, not a flag: this is the command to run.
+        assert!(!json_requested(args(&["exec", "web1", "--", "--json"])));
+        // A flag that merely contains the word is not the flag.
+        assert!(!json_requested(args(&["exec", "web1", "--json-lines"])));
+        assert!(!json_requested(args(&["exec", "web1", "echo --json"])));
+    }
+
+    #[test]
+    fn a_failure_is_an_object_with_the_code_the_mcp_server_would_use() {
+        let error = anyhow::anyhow!("unknown host profile: nope");
+        let parsed: serde_json::Value = serde_json::from_str(&failure_json(&error)).unwrap();
+        assert_eq!(parsed["ok"], false);
+        assert_eq!(parsed["error"]["code"], "host_not_found");
+        assert_eq!(parsed["error"]["message"], "unknown host profile: nope");
+    }
+
+    #[test]
+    fn a_failure_message_carries_the_whole_cause_chain() {
+        let error =
+            anyhow::anyhow!("connection refused").context("failed to connect to 10.0.0.1:22");
+        let parsed: serde_json::Value = serde_json::from_str(&failure_json(&error)).unwrap();
+        assert_eq!(
+            parsed["error"]["message"],
+            "failed to connect to 10.0.0.1:22: connection refused"
+        );
+        assert_eq!(parsed["error"]["code"], "ssh_connect_failed");
+    }
+
+    #[test]
+    fn a_missing_stdin_file_is_named_and_a_non_utf8_one_is_refused() {
+        let error = read_stdin_source("/definitely/not/here").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("--stdin-file /definitely/not/here"),
+            "{error:#}"
+        );
+
+        let dir = std::env::temp_dir().join(format!("a2s-stdin-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join("binary.bin");
+        std::fs::write(&binary, [0xff, 0xfe, 0x00]).unwrap();
+        let error = read_stdin_source(binary.to_str().unwrap()).unwrap_err();
+        assert!(error.to_string().contains("not UTF-8 text"), "{error}");
+
+        // Trailing newlines survive, which `--stdin "$(cat file)"` cannot do.
+        let text = dir.join("text.txt");
+        std::fs::write(&text, "line one\nline two\n\n").unwrap();
+        assert_eq!(
+            read_stdin_source(text.to_str().unwrap()).unwrap(),
+            "line one\nline two\n\n"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

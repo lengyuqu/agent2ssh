@@ -1032,3 +1032,139 @@ async fn keys_help_algorithm_and_generate_contract() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// ── Machine-readable failures and exec input ───────────────────────────────
+
+/// A script that asks for JSON must be able to read a failure as JSON. It used
+/// to get an empty stdout and a sentence on stderr. Exit status and stderr are
+/// unchanged, so nothing that read those breaks.
+#[tokio::test]
+async fn exec_json_failure_is_an_object_on_stdout() {
+    let dir = unique_temp_dir("json-failure");
+    let (stdout, stderr, code) =
+        run_cli_in_dir(&dir, &["exec", "no-such-host", "uptime", "--json"]).await;
+
+    assert_eq!(code, Some(1));
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("stdout is not JSON ({error}): {stdout:?}"));
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["error"]["code"], "host_not_found");
+    assert!(
+        parsed["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown host profile: no-such-host"),
+        "{parsed}"
+    );
+    // The human-readable line is still there, in the same form.
+    assert!(
+        stderr.starts_with("Error: unknown host profile: no-such-host"),
+        "{stderr:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn exec_failure_without_json_stays_a_plain_stderr_line() {
+    let dir = unique_temp_dir("plain-failure");
+    let (stdout, stderr, code) = run_cli_in_dir(&dir, &["exec", "no-such-host", "uptime"]).await;
+
+    assert_eq!(code, Some(1));
+    assert!(stdout.is_empty(), "stdout was {stdout:?}");
+    assert!(
+        stderr.starts_with("Error: unknown host profile: no-such-host"),
+        "{stderr:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// `risk` classifies; a blocked verdict is its answer, not its failure. (A
+/// blocked `exec` is a failure and reports `command_blocked` — that needs a real
+/// host and is pinned in `cli_exec_ssh.rs`.)
+#[tokio::test]
+async fn risk_reports_a_blocked_verdict_as_a_normal_result() {
+    let dir = unique_temp_dir("blocked");
+    let (stdout, _, code) = run_cli_in_dir(&dir, &["risk", "mkfs /dev/sda", "--json"]).await;
+    assert_eq!(code, Some(0), "risk reports a verdict, it does not fail");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(parsed["risk_level"], "blocked");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn a_failure_after_the_double_dash_is_not_mistaken_for_a_json_request() {
+    let dir = unique_temp_dir("dashdash");
+    // `--json` after `--` is the command to run, not the flag.
+    let (stdout, stderr, code) =
+        run_cli_in_dir(&dir, &["exec", "no-such-host", "--", "--json"]).await;
+    assert_eq!(code, Some(1));
+    assert!(stdout.is_empty(), "stdout was {stdout:?}");
+    assert!(stderr.contains("unknown host profile"), "{stderr:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn exec_stdin_file_conflicts_with_stdin_and_a_missing_file_fails_before_connecting() {
+    let dir = unique_temp_dir("stdin-file");
+
+    // Both at once is a usage error (exit 2), not a silent choice.
+    let (_, stderr, code) = run_cli_in_dir(
+        &dir,
+        &["exec", "h", "cat", "--stdin", "x", "--stdin-file", "y"],
+    )
+    .await;
+    assert_eq!(code, Some(2), "stderr: {stderr}");
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+
+    // A missing file fails — as JSON, with its path — before any host is looked
+    // up: the host here does not exist, and that is not the error reported.
+    let missing = dir.join("nope.txt");
+    let (stdout, _, code) = run_cli_in_dir(
+        &dir,
+        &[
+            "exec",
+            "no-such-host",
+            "cat",
+            "--stdin-file",
+            missing.to_str().unwrap(),
+            "--json",
+        ],
+    )
+    .await;
+    assert_eq!(code, Some(1));
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let message = parsed["error"]["message"].as_str().unwrap();
+    assert!(message.contains("failed to read --stdin-file"), "{message}");
+    assert!(
+        !message.contains("unknown host"),
+        "the host was looked up first: {message}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn exec_help_documents_the_exit_status_and_the_new_flags() {
+    let (stdout, _, code) = run_cli(&["exec", "--help"]).await;
+    assert_eq!(code, Some(0));
+    for needle in [
+        "--stdin-file",
+        "--max-output-bytes",
+        "Exit status",
+        "exit 1, and under --json also",
+    ] {
+        assert!(
+            stdout.contains(needle),
+            "exec --help lacks {needle:?}:\n{stdout}"
+        );
+    }
+    // The subcommands that used to have no description in the root help.
+    let (root, _, _) = run_cli(&["--help"]).await;
+    for line in [
+        "Add, list, edit and remove SSH host profiles",
+        "Run one non-interactive command on an SSH host",
+        "List, stat, upload, download and delete files over SFTP",
+        "Show recent execution audit entries",
+    ] {
+        assert!(root.contains(line), "root --help lacks {line:?}:\n{root}");
+    }
+}

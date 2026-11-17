@@ -171,6 +171,8 @@ agent2ssh exec <host> "<command>" [--json] [--force] [--timeout-secs N]
 | `--force` | 关 | 跳过**高风险**命令的确认；命中 `approval_policies` 时无效（本地 CLI 没有审批者，照样失败关闭） |
 | `--timeout-secs` | 60 | 超时秒数 |
 | `--stdin` | 无 | 将字符串传递到远程命令的 stdin |
+| `--stdin-file` | 无 | 将文件内容传给远程命令的 stdin；`-` 表示读本进程自己的 stdin（可接管道）。仅 UTF-8 文本。没有命令行长度上限，且保留末尾换行（`--stdin "$(cat f)"` 做不到）。与 `--stdin` 互斥 |
+| `--max-output-bytes` | 4 MiB | stdout、stderr 各自最多保留的字节数；更长时保留头尾 |
 | `--plan` | 关 | 显示执行计划而不实际运行命令 |
 | `--reason` | 无 | 操作原因/备注（写入审计日志） |
 | `--change-id` | 无 | 变更/工单 ID（写入审计日志） |
@@ -190,9 +192,24 @@ agent2ssh exec myserver "long-running-task" --timeout-secs 300
 # 传递 stdin
 agent2ssh exec myserver "cat > /tmp/data.txt" --stdin "hello world"
 
+# 从管道或文件传 stdin（大文件、保留换行）
+cat big.sql | agent2ssh exec myserver "psql mydb" --stdin-file -
+agent2ssh exec myserver "cat > /tmp/data.txt" --stdin-file ./data.txt
+
 # 高风险命令用 --force 跳过风险确认（命中审批策略时 --force 无效）
 agent2ssh exec myserver "sudo systemctl restart nginx" --force
 ```
+
+**退出码与机器可读输出。** 脚本和 agent 靠这张表判断发生了什么：
+
+| 情况 | 退出码 | stdout |
+|------|--------|--------|
+| 命令执行了，不带 `--json` | **远端命令自己的退出码** | 远端 stdout |
+| 命令执行了，带 `--json` | 0 | 结果 JSON，远端退出码在 `exit_code` 字段 |
+| Agent2SSH 自己失败（未知主机、被拦截、需审批、连接失败、超时） | 1 | 空；带 `--json` 时为 `{"ok": false, "error": {"code", "message"}}` |
+| 用法错误（缺参数、`--stdin` 与 `--stdin-file` 同用） | 2 | 空 |
+
+不带 `--json` 时退出码是镜像远端的，所以 1、2 既可能是远端命令的退出码，也可能是 Agent2SSH 自己的失败——**需要区分就加 `--json`**：失败时 stdout 一定是带 `"ok": false` 的对象，成功结果里没有 `ok` 字段。`error.code` 与 MCP 服务器用的是同一套（`host_not_found`、`command_blocked`、`approval_required`、`force_required`、`timeout`、`ssh_connect_failed`、`ssh_auth_failed`……），未识别的失败为 `tool_error`。stderr 仍保留原来的 `Error: …` 一行。注意：少数路径（例如远端 daemon 返回非 2xx）在打印后直接退出，不输出 JSON 失败对象。
 
 CLI 侧没有审批者，所以命中 `approval_policies` 时一律失败关闭，`--force` 也绕不过去（`--force` 只覆盖「高风险未获批」这一种拒绝）。**本仓只有 daemon 带审批处理器**（`authorize_command_inner` → `authorize_command_with_approval`，`bin/agent2ssh-daemon.rs:689-713`），所以能不能拿到审批，取决于这条命令有没有通往 daemon 的路：
 

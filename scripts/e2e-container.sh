@@ -323,6 +323,61 @@ else
   bad "exec runtime suite (drain + timeout + timeout audit + health)"
 fi
 
+# src-tauri/tests/exec_retained.rs: an exec on a host kept open with `ssh_connect`
+# opens a channel on that connection instead of dialling a new one. It counts
+# connections through a proxy in front of this sshd, so "no new connection" is a
+# number, and it severs and silences connections to prove a dead retained one
+# falls back instead of failing the exec. It also pins what must not happen — a
+# timeout aborting a connection other commands are using.
+note "Retained-connection exec suite (reuse, concurrency, timeout isolation, dead-peer fallback)"
+if ( cd "$REPO_ROOT/src-tauri" && \
+     AGENT2SSH_TEST_REQUIRE_SSH=1 \
+     AGENT2SSH_TEST_SSH_PORT="$SSH_PORT" \
+     AGENT2SSH_TEST_SSH_HOST=127.0.0.1 \
+     AGENT2SSH_TEST_SSH_USER=tester \
+     AGENT2SSH_TEST_SSH_KEY="$KEY_PATH" \
+     cargo test --no-default-features --test exec_retained -- --test-threads=1 ); then
+  ok "retained-connection exec suite"
+else
+  bad "retained-connection exec suite"
+fi
+
+# src-tauri/tests/mcp_exec_via_daemon.rs drives the real MCP server against the
+# real daemon and this sshd: an approval policy raises a card a person answers,
+# a rejection and a paused gate come back as coded errors, ssh_connect and
+# ssh_exec meet in the daemon (reuse, counted through a proxy), and a daemon that
+# drops the request after receiving it is never answered by running the command
+# a second time in the MCP process.
+note "MCP exec through the daemon (approval cards, gate, retained connections, no double run)"
+if ( cd "$REPO_ROOT/src-tauri" && \
+     AGENT2SSH_TEST_REQUIRE_SSH=1 \
+     AGENT2SSH_TEST_SSH_PORT="$SSH_PORT" \
+     AGENT2SSH_TEST_SSH_HOST=127.0.0.1 \
+     AGENT2SSH_TEST_SSH_USER=tester \
+     AGENT2SSH_TEST_SSH_KEY="$KEY_PATH" \
+     cargo test --no-default-features --features daemon --test mcp_exec_via_daemon -- --test-threads=1 ); then
+  ok "MCP exec through the daemon"
+else
+  bad "MCP exec through the daemon"
+fi
+
+# src-tauri/tests/cli_exec_ssh.rs pins `agent2ssh exec` as a script or a harness
+# drives it: the remote command's exit status, `--json` exiting 0 with the status
+# in the result, Agent2SSH's own failures exiting 1 with `{"ok": false, ...}` on
+# stdout under --json, and --stdin-file / --max-output-bytes.
+note "CLI exec contract (exit status, --json failures, --stdin-file, --max-output-bytes)"
+if ( cd "$REPO_ROOT/src-tauri" && \
+     AGENT2SSH_TEST_REQUIRE_SSH=1 \
+     AGENT2SSH_TEST_SSH_PORT="$SSH_PORT" \
+     AGENT2SSH_TEST_SSH_HOST=127.0.0.1 \
+     AGENT2SSH_TEST_SSH_USER=tester \
+     AGENT2SSH_TEST_SSH_KEY="$KEY_PATH" \
+     cargo test --no-default-features --test cli_exec_ssh ); then
+  ok "CLI exec contract"
+else
+  bad "CLI exec contract"
+fi
+
 # The peer deliberately stops reading while a real SSH command streams output.
 # This regression uses Unix SO_RCVBUF; Windows coverage remains separate.
 case "$(uname -s)" in
