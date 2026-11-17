@@ -16,7 +16,9 @@ Agent2SSH 以 `agent2ssh-mcp` 二进制形式暴露 MCP stdio 服务器，将 SS
 
 无需额外服务器——MCP server 与 AI 客户端运行在同一台机器上。
 
-除 MCP 工具外，仓库还内置一份标准 **Agent Skill**（`skills/agent2ssh/SKILL.md`，带 `name`/`description`/`version` frontmatter），为 agent 提供 CLI/MCP 的使用惯例（风险分级、审批流、`--force` 语义、常见工作流）。它随二进制一起编译内嵌，可通过以下任一方式安装：
+除 MCP 工具外，仓库还内置一份标准 **Agent Skill**，为 agent 提供 CLI/MCP 的使用惯例（风险分级、审批流、`--force` 语义、常见工作流）。它由入口文件 `skills/agent2ssh/SKILL.md`（带 `name`/`description`/`version` frontmatter，约 7.5 KB，只放"始终适用的规则"、按任务索引的"读哪个文件"表、风险分级和速查表）加 `skills/agent2ssh/references/*.md`（每个领域的细节：命令执行、主机与凭据、文件/会话/转发、本机执行与常驻会话、审计与规则配置、工作流）组成。技能触发时只加载入口文件，agent 按任务只读需要的那一个 reference，所以只用入口文件时的上下文成本约为拆分前（单文件约 20 KB）的三分之一，再读一个 reference 约一半。全部文件随二进制一起编译内嵌（`integrate::EMBEDDED_SKILL_FILES`），整体安装、更新、卸载，可通过以下任一方式安装：
+
+> 安装与卸载的规则：`install` 写入全部文件（含 `references/`）；`status` 在版本不同**或缺少任一内嵌文件**时报告可更新（不比较内容，所以手改过且版本未变的技能不会被反复提示覆盖）；`uninstall` 只删除本版本安装的那些文件，`references/` 与技能目录在被清空后才删除，用户放进去的文件一概保留。改动技能的任何一个文件都要同时提升 `SKILL.md` frontmatter 的 `version:`。
 
 ```bash
 # CLI：安装 / 查看状态 / 卸载（默认目录 ~/.claude/skills/agent2ssh，可用 --dir 覆盖）

@@ -12,9 +12,51 @@ use chrono::Utc;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-/// The Agent Skill shipped with this build, embedded so every binary can
-/// install it without a source checkout.
+/// The Agent Skill's entry file, shipped with this build and embedded so every
+/// binary can install it without a source checkout.
 pub const EMBEDDED_SKILL_MD: &str = include_str!("../../skills/agent2ssh/SKILL.md");
+
+/// Every file of the bundled skill, as a path relative to the skill directory.
+///
+/// `SKILL.md` is what an agent loads when the skill triggers, so it holds only
+/// what always applies; the detail for each area is a file under `references/`
+/// that the agent reads when the task needs it. All of them have to be installed
+/// together — `SKILL.md` points at the others — which is why install, update and
+/// uninstall go through this table rather than a single file.
+///
+/// Add a file here when it is added under `skills/agent2ssh/`, and link it from
+/// `SKILL.md`: `every_skill_file_is_linked_and_every_link_resolves` fails in
+/// both directions.
+pub const EMBEDDED_SKILL_FILES: &[(&str, &str)] = &[
+    ("SKILL.md", EMBEDDED_SKILL_MD),
+    (
+        "references/exec.md",
+        include_str!("../../skills/agent2ssh/references/exec.md"),
+    ),
+    (
+        "references/hosts-and-credentials.md",
+        include_str!("../../skills/agent2ssh/references/hosts-and-credentials.md"),
+    ),
+    (
+        "references/files-sessions-forwards.md",
+        include_str!("../../skills/agent2ssh/references/files-sessions-forwards.md"),
+    ),
+    (
+        "references/local-and-resident.md",
+        include_str!("../../skills/agent2ssh/references/local-and-resident.md"),
+    ),
+    (
+        "references/config-and-audit.md",
+        include_str!("../../skills/agent2ssh/references/config-and-audit.md"),
+    ),
+    (
+        "references/workflows.md",
+        include_str!("../../skills/agent2ssh/references/workflows.md"),
+    ),
+];
+
+/// Directory under the skill directory that holds the reference files.
+const SKILL_REFERENCES_DIR: &str = "references";
 
 const SKILL_DIR_NAME: &str = "agent2ssh";
 
@@ -672,8 +714,17 @@ pub fn agent_skill_status_at(dir: &Path) -> AgentSkillStatus {
         .and_then(|content| parse_skill_version(&content));
     let installed = path.exists();
     let available_version = embedded_skill_version();
-    let update_available =
-        installed && available_version.is_some() && installed_version != available_version;
+    // An update is due when the version differs, or when a file this build ships
+    // is gone — an install from before the skill had reference files, or one
+    // someone deleted from, points at files that are not there. Content is not
+    // compared: a skill edited by hand with the version left alone is the
+    // owner's, and would otherwise ask to be overwritten forever.
+    let incomplete = EMBEDDED_SKILL_FILES
+        .iter()
+        .any(|(relative, _)| !dir.join(relative).exists());
+    let update_available = installed
+        && available_version.is_some()
+        && (installed_version != available_version || incomplete);
     AgentSkillStatus {
         dir: dir.display().to_string(),
         path: path.display().to_string(),
@@ -688,13 +739,20 @@ pub fn agent_skill_status() -> Result<AgentSkillStatus> {
     Ok(agent_skill_status_at(&default_skill_dir()?))
 }
 
-/// Install (or update — same operation) the embedded skill into `dir`.
+/// Install (or update — same operation) the embedded skill into `dir`: every
+/// file of [`EMBEDDED_SKILL_FILES`], `references/` included.
 pub fn install_agent_skill_at(dir: &Path) -> Result<AgentSkillStatus> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("failed to create skill directory {}", dir.display()))?;
-    let path = dir.join("SKILL.md");
-    std::fs::write(&path, EMBEDDED_SKILL_MD)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    for (relative, content) in EMBEDDED_SKILL_FILES {
+        let path = dir.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        std::fs::write(&path, content)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    }
     Ok(agent_skill_status_at(dir))
 }
 
@@ -702,17 +760,31 @@ pub fn install_agent_skill() -> Result<AgentSkillStatus> {
     install_agent_skill_at(&default_skill_dir()?)
 }
 
-/// Remove the installed skill. Only deletes `SKILL.md` plus the containing
-/// directory when the directory is named after the skill and is empty
-/// afterwards — never removes anything else.
+/// Remove the installed skill: the files of [`EMBEDDED_SKILL_FILES`] that are
+/// there, then `references/` and the skill directory when each is left empty
+/// (the skill directory only when it is named after the skill). Never removes a
+/// file this build did not install — anything else in the directory, including a
+/// file someone added to `references/`, stays.
+///
+/// Returns whether any file was removed. An install from before the skill had
+/// reference files holds only `SKILL.md`, and is removed the same way.
 pub fn uninstall_agent_skill_at(dir: &Path) -> Result<bool> {
-    let path = dir.join("SKILL.md");
-    if !path.exists() {
+    let mut removed = false;
+    for (relative, _) in EMBEDDED_SKILL_FILES {
+        let path = dir.join(relative);
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+            removed = true;
+        }
+    }
+    if !removed {
         return Ok(false);
     }
-    std::fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
+    // Each fails (and is ignored) when something else is still inside.
+    let _ = std::fs::remove_dir(dir.join(SKILL_REFERENCES_DIR));
     if dir.file_name().and_then(|n| n.to_str()) == Some(SKILL_DIR_NAME) {
-        let _ = std::fs::remove_dir(dir); // fails (and is ignored) when non-empty
+        let _ = std::fs::remove_dir(dir);
     }
     Ok(true)
 }
@@ -784,6 +856,135 @@ mod tests {
         assert!(!dir.join("SKILL.md").exists());
         assert!(!dir.exists(), "empty skill dir should be removed");
         assert!(!uninstall_agent_skill_at(&dir).unwrap());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `SKILL.md` points at its reference files by relative path, so an install
+    /// that is missing one — or ships one nothing points at — is broken.
+    #[test]
+    fn every_skill_file_is_linked_and_every_link_resolves() {
+        let linked: std::collections::BTreeSet<String> = EMBEDDED_SKILL_MD
+            .split(|c: char| !(c.is_ascii_alphanumeric() || "/-_.".contains(c)))
+            .filter(|word| word.starts_with("references/") && word.ends_with(".md"))
+            .map(str::to_string)
+            .collect();
+        let shipped: std::collections::BTreeSet<String> = EMBEDDED_SKILL_FILES
+            .iter()
+            .map(|(relative, _)| relative.to_string())
+            .filter(|relative| relative != "SKILL.md")
+            .collect();
+        assert!(!linked.is_empty(), "SKILL.md links no reference file");
+        assert_eq!(
+            linked, shipped,
+            "SKILL.md links and the embedded files must be the same set"
+        );
+        for (relative, content) in EMBEDDED_SKILL_FILES {
+            assert!(!content.trim().is_empty(), "{relative} is empty");
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for (relative, _) in EMBEDDED_SKILL_FILES {
+            assert!(seen.insert(*relative), "{relative} is embedded twice");
+        }
+    }
+
+    /// The point of the split: what loads when the skill triggers stays small.
+    /// A page of detail that belongs under `references/` creeping back into
+    /// `SKILL.md` would quietly undo it.
+    #[test]
+    fn the_entry_file_stays_small() {
+        assert!(
+            EMBEDDED_SKILL_MD.len() <= 9_000,
+            "SKILL.md is {} bytes; move detail into references/",
+            EMBEDDED_SKILL_MD.len()
+        );
+    }
+
+    #[test]
+    fn install_writes_every_file_and_a_missing_one_asks_for_an_update() {
+        let base = temp_dir("skill-files");
+        let dir = base.join(SKILL_DIR_NAME);
+
+        let status = install_agent_skill_at(&dir).unwrap();
+        for (relative, content) in EMBEDDED_SKILL_FILES {
+            assert_eq!(
+                std::fs::read_to_string(dir.join(relative)).unwrap(),
+                *content,
+                "{relative}"
+            );
+        }
+        assert!(status.installed && !status.update_available);
+
+        // The same version with a reference file gone is not a complete install.
+        std::fs::remove_file(dir.join("references/exec.md")).unwrap();
+        assert!(agent_skill_status_at(&dir).update_available);
+        // Installing again repairs it.
+        assert!(!install_agent_skill_at(&dir).unwrap().update_available);
+
+        // An install from before the skill had reference files: SKILL.md only,
+        // at an older version. It is an update, and the update fills the rest.
+        let legacy = base.join("legacy").join(SKILL_DIR_NAME);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(
+            legacy.join("SKILL.md"),
+            "---\nname: agent2ssh\nversion: 0.0.1\n---\nold",
+        )
+        .unwrap();
+        assert!(agent_skill_status_at(&legacy).update_available);
+        install_agent_skill_at(&legacy).unwrap();
+        assert!(legacy.join("references/workflows.md").exists());
+        assert!(!agent_skill_status_at(&legacy).update_available);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A skill someone edited by hand, version left alone, is theirs: it must
+    /// not report an update just because its text differs.
+    #[test]
+    fn a_hand_edited_skill_at_the_current_version_is_not_flagged() {
+        let base = temp_dir("skill-edited");
+        let dir = base.join(SKILL_DIR_NAME);
+        install_agent_skill_at(&dir).unwrap();
+        let edited = format!("{EMBEDDED_SKILL_MD}\nMy own note.\n");
+        std::fs::write(dir.join("SKILL.md"), edited).unwrap();
+        assert!(!agent_skill_status_at(&dir).update_available);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn uninstall_removes_every_installed_file_and_the_directories_it_emptied() {
+        let base = temp_dir("skill-uninstall-all");
+        let dir = base.join(SKILL_DIR_NAME);
+        install_agent_skill_at(&dir).unwrap();
+
+        assert!(uninstall_agent_skill_at(&dir).unwrap());
+        assert!(!dir.exists(), "the skill directory should be gone");
+        assert!(
+            !uninstall_agent_skill_at(&dir).unwrap(),
+            "nothing left to remove"
+        );
+
+        // A legacy single-file install is removed the same way.
+        let legacy = base.join("legacy").join(SKILL_DIR_NAME);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("SKILL.md"), "old").unwrap();
+        assert!(uninstall_agent_skill_at(&legacy).unwrap());
+        assert!(!legacy.exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn uninstall_keeps_files_it_did_not_install_even_inside_references() {
+        let base = temp_dir("skill-keep-refs");
+        let dir = base.join(SKILL_DIR_NAME);
+        install_agent_skill_at(&dir).unwrap();
+        std::fs::write(dir.join("references/my-notes.md"), "keep me").unwrap();
+
+        assert!(uninstall_agent_skill_at(&dir).unwrap());
+        assert!(dir.join("references/my-notes.md").exists());
+        assert!(!dir.join("SKILL.md").exists());
+        assert!(!dir.join("references/exec.md").exists());
 
         let _ = std::fs::remove_dir_all(&base);
     }
