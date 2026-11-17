@@ -48,6 +48,10 @@ use std::io::{self, BufRead, Write};
 
 #[path = "agent2ssh_mcp/auth.rs"]
 mod agent2ssh_mcp_auth;
+#[path = "agent2ssh_mcp/catalog.rs"]
+mod agent2ssh_mcp_catalog;
+#[path = "agent2ssh_mcp/output.rs"]
+mod agent2ssh_mcp_output;
 #[path = "agent2ssh_mcp/tools.rs"]
 mod agent2ssh_mcp_tools;
 
@@ -60,28 +64,113 @@ use agent2ssh_mcp_tools::{McpTool, ToolCall};
 const MCP_SERVER_NAME: &str = "agent2ssh-mcp";
 const MCP_SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// JSON-RPC code for a tool that ran and failed. Anything carrying it is
+/// answered as a tool result with `isError`, never as a JSON-RPC error.
+const TOOL_FAILURE: i32 = -32000;
+
 struct McpError {
     code: i32,
     message: String,
+    /// A stable code for the failure, when the site that raised it knows one.
+    /// `agent2ssh_mcp_output::classify` fills in the rest from the message.
+    kind: Option<&'static str>,
+    /// What the caller should do next, when that is known at the raising site.
+    hint: Option<String>,
+    /// Extra structured fields for the result — a timeout's partial output.
+    details: Option<serde_json::Map<String, Value>>,
 }
 
 impl McpError {
-    fn method_not_found(method: &str) -> Self {
+    fn with_code(code: i32, message: impl ToString) -> Self {
         Self {
-            code: -32601,
-            message: format!("Method not found: {method}"),
+            code,
+            message: message.to_string(),
+            kind: None,
+            hint: None,
+            details: None,
         }
+    }
+    fn method_not_found(method: &str) -> Self {
+        Self::with_code(-32601, format!("Method not found: {method}"))
+    }
+    /// A malformed request: the client, not the model, has to fix this one.
+    fn invalid_params(msg: impl ToString) -> Self {
+        Self::with_code(-32602, msg)
+    }
+    fn unknown_tool(name: &str) -> Self {
+        Self::with_code(-32602, format!("Unknown tool: {name}"))
     }
     fn internal(msg: impl ToString) -> Self {
-        Self {
-            code: -32000,
-            message: msg.to_string(),
-        }
+        Self::with_code(TOOL_FAILURE, msg)
     }
+    /// The model passed arguments the tool cannot use. A tool failure, not a
+    /// protocol error, so the model sees the message and can correct the call.
+    fn invalid_args(msg: impl ToString) -> Self {
+        Self::internal(msg).with_kind("invalid_arguments")
+    }
+    fn with_kind(mut self, kind: &'static str) -> Self {
+        self.kind = Some(kind);
+        self
+    }
+    fn with_hint(mut self, hint: impl ToString) -> Self {
+        self.hint = Some(hint.to_string());
+        self
+    }
+    fn with_details(mut self, details: serde_json::Map<String, Value>) -> Self {
+        self.details = Some(details);
+        self
+    }
+    /// True for a failure of the tool itself, as opposed to a request the
+    /// server could not dispatch.
+    fn is_tool_failure(&self) -> bool {
+        self.code == TOOL_FAILURE
+    }
+}
+
+const TIMEOUT_HINT_REMOTE: &str = "The remote process was not stopped and may still be running. \
+     Retry with a larger timeout_secs, or start long work in the background \
+     (nohup ... > /tmp/job.log 2>&1 &) and poll its log. Prefix a command with \
+     `timeout <secs>` when it must not outlive the call.";
+const TIMEOUT_HINT_LOCAL: &str = "The process was killed at the deadline. Retry with a larger \
+     timeout_secs if the command simply needs longer.";
+
+/// The partial output of a timed-out command as result fields.
+fn timeout_details(
+    timeout_secs: Option<u64>,
+    stdout: &str,
+    stderr: &str,
+    process_stopped: bool,
+) -> serde_json::Map<String, Value> {
+    let mut details = serde_json::Map::new();
+    details.insert("timed_out".to_string(), json!(true));
+    if let Some(timeout_secs) = timeout_secs {
+        details.insert("timeout_secs".to_string(), json!(timeout_secs));
+    }
+    details.insert("process_stopped".to_string(), json!(process_stopped));
+    details.insert("stdout".to_string(), json!(stdout));
+    details.insert("stderr".to_string(), json!(stderr));
+    details
 }
 
 impl From<anyhow::Error> for McpError {
     fn from(err: anyhow::Error) -> Self {
+        // A timeout carries what the command printed before its deadline; keep
+        // it instead of flattening the error to its sentence.
+        if let Some(timed_out) = err.downcast_ref::<agent2ssh::ExecTimedOut>() {
+            return Self::internal(&err)
+                .with_kind(agent2ssh::error_codes::ErrorCode::ExecTimeout.as_str())
+                .with_hint(if timed_out.process_stopped {
+                    TIMEOUT_HINT_LOCAL
+                } else {
+                    TIMEOUT_HINT_REMOTE
+                })
+                .with_details(timeout_details(
+                    Some(timed_out.timeout_secs),
+                    &timed_out.stdout,
+                    &timed_out.stderr,
+                    timed_out.process_stopped,
+                ));
+        }
         Self::internal(err)
     }
 }
@@ -253,7 +342,29 @@ fn response_error(context: &str, status: reqwest::StatusCode, body: &str) -> Mcp
                 preview
             }
         });
-    McpError::internal(format!("{context} returned HTTP {status}: {detail}"))
+    let error = McpError::internal(format!("{context} returned HTTP {status}: {detail}"));
+    // The daemon's exec routes answer a timeout with the output captured before
+    // the deadline (`ErrorBody` in the daemon); carry it through.
+    let Some(body) = serde_json::from_str::<Value>(body)
+        .ok()
+        .filter(|value| value["timed_out"].as_bool() == Some(true))
+    else {
+        return error;
+    };
+    let process_stopped = body["process_stopped"].as_bool().unwrap_or(false);
+    error
+        .with_kind(agent2ssh::error_codes::ErrorCode::ExecTimeout.as_str())
+        .with_hint(if process_stopped {
+            TIMEOUT_HINT_LOCAL
+        } else {
+            TIMEOUT_HINT_REMOTE
+        })
+        .with_details(timeout_details(
+            None,
+            body["partial_stdout"].as_str().unwrap_or_default(),
+            body["partial_stderr"].as_str().unwrap_or_default(),
+            process_stopped,
+        ))
 }
 
 async fn response_text(
@@ -300,6 +411,75 @@ fn can_fallback_session_error(body: &str) -> bool {
     body.contains("unknown session")
 }
 
+/// Send one request to the local daemon, if there is a daemon to receive it.
+///
+/// This is how an exec reaches the one place that can raise an approval card,
+/// apply the execution gate and the rate limits, and see the connections the
+/// daemon keeps open. Without it the in-process path below authorizes with no
+/// approval handler, so any command an approval policy covers is a hard failure
+/// that no person is ever asked about.
+///
+/// [`DaemonAttempt::Fallback`] means the daemon could not be reached *at all* —
+/// no token, or the connection was refused — so nothing was sent and the caller
+/// may do the work itself. It is deliberately not the answer to every failed
+/// send: a connection that drops after the request went out may already have
+/// started the command, and doing it again in this process would run it twice.
+/// That case is an error that says so.
+///
+/// No overall HTTP deadline: the daemon owns the command's timeout and the
+/// approval wait, and an approval may take longer than the command itself.
+async fn daemon_request<T: DeserializeOwned>(
+    method: reqwest::Method,
+    segments: &[&str],
+    body: Option<&Value>,
+    context: &str,
+) -> std::result::Result<DaemonAttempt<T>, McpError> {
+    let Some((client, base_url, token)) = local_daemon_client_with_timeout(None)? else {
+        return Ok(DaemonAttempt::Fallback);
+    };
+    // Path segments are percent-encoded one by one: a host alias is user input.
+    let mut url = reqwest::Url::parse(&base_url)
+        .map_err(|e| McpError::internal(format!("invalid local daemon url: {e}")))?;
+    url.path_segments_mut()
+        .map_err(|_| McpError::internal("local daemon url cannot carry a path"))?
+        .extend(segments);
+    let mut request = client.request(method, url).bearer_auth(token);
+    if let Some(body) = body {
+        request = request.json(body);
+    }
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(error) if error.is_connect() => return Ok(DaemonAttempt::Fallback),
+        Err(error) => return Err(McpError::internal(format!(
+            "local daemon {context} failed: {error}"
+        ))
+        .with_kind("daemon_error")
+        .with_hint(
+            "The request may have reached the daemon and the command may already have run. \
+                 Check ssh_audit before retrying.",
+        )),
+    };
+    Ok(DaemonAttempt::Handled(
+        response_json(response, &format!("local daemon {context}")).await?,
+    ))
+}
+
+/// Run one SSH exec for this machine: on the local daemon when it is running,
+/// else in this process.
+async fn exec_here(mut request: ExecRequest) -> std::result::Result<Value, McpError> {
+    let body = serde_json::to_value(&request)?;
+    if let DaemonAttempt::Handled(result) =
+        daemon_request::<Value>(reqwest::Method::POST, &["exec"], Some(&body), "/exec").await?
+    {
+        return Ok(result);
+    }
+    let risk = authorize_local_mcp_exec_request(&mut request).await?;
+    let result = exec_ssh_core(request)
+        .await
+        .map_err(|e| exec_failure(e, risk))?;
+    Ok(serde_json::to_value(result)?)
+}
+
 /// Forward one local-execution request to the local daemon and return its JSON
 /// response. These surfaces have no process-local fallback: the daemon is what
 /// runs the gate chain through to an approval prompt, so when it is not
@@ -317,7 +497,11 @@ async fn daemon_only_request(
     let Some((client, base_url, token)) = local_daemon_client_with_timeout(None)? else {
         return Err(McpError::internal(format!(
             "{context} requires the agent2ssh daemon (agent2ssh-daemon), which is not running"
-        )));
+        ))
+        .with_kind("daemon_unavailable")
+        .with_hint(
+            "Start it with `agent2ssh daemon start` (or open the desktop app), then retry.",
+        ));
     };
     let request = if body.is_null() {
         client.delete(format!("{base_url}{path}"))
@@ -639,71 +823,211 @@ async fn main() -> Result<()> {
     }
 
     if let Err(e) = agent2ssh::verify_mcp_binding_from_env() {
+        // Exiting here used to leave the client with "server failed to start"
+        // and the reason on a stderr nobody reads. Serve the handshake instead
+        // and refuse every tool call with the reason: nothing runs unbound, and
+        // the model can tell the user what to fix.
         let message = format!("MCP binding authentication failed: {e}");
         let _ = append_diagnostic_log("error", "mcp", &message, None);
         eprintln!("{message}");
-        std::process::exit(1);
+        let _ = BINDING_FAILURE.set(message);
     }
 
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
-
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let request: Value = serde_json::from_str(&line)?;
-
-        // JSON-RPC notifications have no "id" — never send a response.
-        let id = match request.get("id").cloned() {
-            Some(id) => id,
-            None => continue,
-        };
-
-        let response = match handle_request(&request).await {
-            Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-            Err(err) => {
-                // Persist the failure so MCP tool errors are observable in app.log
-                // rather than only surfacing as a JSON-RPC error to the caller.
-                let method = request.get("method").and_then(Value::as_str).unwrap_or("");
-                let tool = request
-                    .get("params")
-                    .and_then(|params| params.get("name"))
-                    .and_then(Value::as_str);
-                let _ = append_diagnostic_log(
-                    "error",
-                    "mcp",
-                    &err.message,
-                    Some(json!({ "method": method, "tool": tool, "code": err.code })),
-                );
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "error": { "code": err.code, "message": err.message }
-                })
-            }
-        };
-
-        writeln!(stdout, "{}", serde_json::to_string(&response)?)?;
-        stdout.flush()?;
-    }
-
+    serve_stdio().await;
     Ok(())
+}
+
+/// Why this process may not run tools, when the MCP binding did not verify.
+static BINDING_FAILURE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn binding_failure() -> Option<McpError> {
+    BINDING_FAILURE.get().map(|message| {
+        McpError::internal(message)
+            .with_kind("binding_invalid")
+            .with_hint(
+                "No tool can run until the binding is repaired. Ask the user to re-register \
+                 this client — `agent2ssh integrate list` shows client ids, \
+                 `agent2ssh integrate add <client>` rewrites the entry — and then restart the \
+                 MCP server.",
+            )
+    })
+}
+
+/// Persist a failure so it is observable in app.log, not only by the caller.
+fn log_failure(request: &Value, error: &McpError) {
+    let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+    let tool = request
+        .get("params")
+        .and_then(|params| params.get("name"))
+        .and_then(Value::as_str);
+    let _ = append_diagnostic_log(
+        "error",
+        "mcp",
+        &error.message,
+        Some(json!({ "method": method, "tool": tool, "code": error.code })),
+    );
+}
+
+/// Write one JSON-RPC message as a line. The stdout lock is held for the whole
+/// line, so concurrent tool calls cannot interleave their responses.
+fn write_message(message: &Value) -> bool {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{message}").is_ok() && stdout.flush().is_ok()
+}
+
+async fn respond(request: Value, id: Value) {
+    let response = match handle_request(&request).await {
+        Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+        Err(error) => {
+            log_failure(&request, &error);
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": error.code, "message": error.message }
+            })
+        }
+    };
+    write_message(&response);
+}
+
+/// The stdio loop.
+///
+/// Requests used to be handled one at a time, so a single slow command held up
+/// every other call — including `ping` — until it returned. Now a `tools/call`
+/// runs as its own task: calls a harness issues in parallel run in parallel,
+/// and `notifications/cancelled` can release one that is no longer wanted.
+/// Everything else is answered inline, in arrival order, because those answers
+/// are immediate and a client may rely on `initialize` coming back first.
+async fn serve_stdio() {
+    // Reading stdin blocks, so it gets a thread; the channel closing is EOF.
+    let (lines_tx, mut lines) = tokio::sync::mpsc::unbounded_channel::<String>();
+    std::thread::spawn(move || {
+        for line in io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            if lines_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut calls = tokio::task::JoinSet::new();
+    // Request id (as JSON text) → the handle that cancels it, and task → the
+    // id to answer for if the task dies without answering.
+    let mut cancel_by_request: HashMap<String, tokio::task::AbortHandle> = HashMap::new();
+    let mut request_by_task: HashMap<tokio::task::Id, Value> = HashMap::new();
+    let mut stdin_open = true;
+
+    while stdin_open || !calls.is_empty() {
+        tokio::select! {
+            line = lines.recv(), if stdin_open => {
+                let Some(line) = line else {
+                    // EOF: stop reading, but let calls already running answer.
+                    stdin_open = false;
+                    continue;
+                };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let request: Value = match serde_json::from_str(&line) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        // One unparseable line must not take the server down
+                        // with every session and forward it holds.
+                        write_message(&json!({
+                            "jsonrpc": "2.0",
+                            "id": null,
+                            "error": { "code": -32700, "message": format!("Parse error: {error}") }
+                        }));
+                        continue;
+                    }
+                };
+                let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+                let Some(id) = request.get("id").cloned() else {
+                    // A notification never gets a response. The one acted on
+                    // is a cancellation: drop the call so its answer is not
+                    // sent. Work already handed to a blocking thread (an SSH
+                    // exec) still runs to its own deadline and is audited.
+                    if method == "notifications/cancelled" {
+                        let cancelled = request
+                            .get("params")
+                            .and_then(|params| params.get("requestId"))
+                            .map(Value::to_string);
+                        if let Some(handle) =
+                            cancelled.and_then(|key| cancel_by_request.remove(&key))
+                        {
+                            handle.abort();
+                        }
+                    }
+                    continue;
+                };
+                if method == "tools/call" {
+                    let handle = calls.spawn(respond(request, id.clone()));
+                    cancel_by_request.insert(id.to_string(), handle.clone());
+                    request_by_task.insert(handle.id(), id);
+                } else {
+                    respond(request, id).await;
+                }
+            }
+            Some(finished) = calls.join_next_with_id(), if !calls.is_empty() => {
+                let (task, panicked) = match finished {
+                    Ok((task, ())) => (task, false),
+                    Err(error) => (error.id(), error.is_panic()),
+                };
+                let Some(id) = request_by_task.remove(&task) else { continue };
+                cancel_by_request.remove(&id.to_string());
+                if panicked {
+                    // The panic hook has recorded it; the caller still needs
+                    // an answer or it waits forever.
+                    write_message(&json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": -32603, "message": "internal error: the tool call panicked" }
+                    }));
+                }
+            }
+        }
+    }
+}
+
+/// MCP revisions this server speaks, newest first.
+///
+/// What this server sends that is newer than the oldest of them is additive and
+/// ignored by a client that does not know it: `structuredContent` and
+/// `isError` on results, `annotations` on tools, `instructions` on `initialize`.
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// The revision to answer `initialize` with: the client's own when this server
+/// speaks it, else the newest it does. The client then decides whether it can
+/// work with that — the protocol's negotiation, rather than answering every
+/// client with one fixed revision whatever it asked for.
+fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
+    requested
+        .and_then(|requested| {
+            SUPPORTED_PROTOCOL_VERSIONS
+                .iter()
+                .find(|supported| **supported == requested)
+        })
+        .copied()
+        .unwrap_or(SUPPORTED_PROTOCOL_VERSIONS[0])
 }
 
 async fn handle_request(request: &Value) -> std::result::Result<Value, McpError> {
     let method = request
         .get("method")
         .and_then(Value::as_str)
-        .ok_or_else(|| McpError::internal("missing method"))?;
+        .ok_or_else(|| McpError::with_code(-32600, "missing method"))?;
 
     match method {
         "initialize" => Ok(json!({
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": negotiate_protocol_version(
+                request
+                    .get("params")
+                    .and_then(|params| params.get("protocolVersion"))
+                    .and_then(Value::as_str),
+            ),
             "capabilities": { "tools": {}, "resources": {} },
-            "serverInfo": { "name": MCP_SERVER_NAME, "version": MCP_SERVER_VERSION }
+            "serverInfo": { "name": MCP_SERVER_NAME, "version": MCP_SERVER_VERSION },
+            "instructions": agent2ssh_mcp_tools::server_instructions()
         })),
         "ping" => Ok(json!({})),
         "resources/list" => Ok(json!({ "resources": [] })),
@@ -712,25 +1036,54 @@ async fn handle_request(request: &Value) -> std::result::Result<Value, McpError>
         "tools/call" => {
             let params = request
                 .get("params")
-                .ok_or_else(|| McpError::internal("missing params"))?;
+                .ok_or_else(|| McpError::invalid_params("missing params"))?;
             let name = params
                 .get("name")
                 .and_then(Value::as_str)
-                .ok_or_else(|| McpError::internal("missing tool name"))?;
+                .ok_or_else(|| McpError::invalid_params("missing tool name"))?;
             let args = params
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            let call = agent2ssh_mcp_tools::resolve_tool_call(name, args)?;
-            call_tool(call).await
+            let inline_cap = agent2ssh_mcp_output::inline_output_cap(&args);
+            let outcome = match binding_failure() {
+                // An unbound server still answers the handshake, so the client
+                // connects and the model is told what to fix; it runs nothing.
+                Some(failure) => Err(failure),
+                None => match agent2ssh_mcp_tools::resolve_tool_call(name, args) {
+                    Ok(call) => call_tool(call).await,
+                    Err(error) => Err(error),
+                },
+            };
+            match outcome {
+                Ok(result) => Ok(result),
+                // A tool that failed is a *result* the model reads and can act
+                // on. Only a request the server could not dispatch at all — an
+                // unknown tool — stays a JSON-RPC error.
+                Err(error) if error.is_tool_failure() => {
+                    log_failure(request, &error);
+                    Ok(agent2ssh_mcp_output::tool_failure(&error, inline_cap))
+                }
+                Err(error) => Err(error),
+            }
         }
         other => Err(McpError::method_not_found(other)),
     }
 }
 
+/// An exec failure with the risk verdict appended, keeping whatever structure
+/// the error carried (a timeout's partial output).
+fn exec_failure(error: anyhow::Error, risk: RiskLevel) -> McpError {
+    let mut failure = McpError::from(error);
+    failure.message = format!("{} (risk_level={risk})", failure.message);
+    failure
+}
+
 async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
     let args = call.args;
-    let payload = match call.tool {
+    let tool = call.tool;
+    let inline_cap = agent2ssh_mcp_output::inline_output_cap(&args);
+    let payload = match tool {
         McpTool::SshImportConfig => {
             let path = args["path"].as_str();
             serde_json::to_value(import_ssh_config_core(path).map_err(McpError::from)?)?
@@ -756,14 +1109,14 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshRemoveHost => {
             let host_name = args["name"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("name required"))?;
+                .ok_or_else(|| McpError::invalid_args("name required"))?;
             remove_host_core(host_name).map_err(McpError::from)?;
             json!({ "removed": host_name })
         }
         McpTool::SshPing => {
             let hosts: Vec<String> = args["hosts"]
                 .as_array()
-                .ok_or_else(|| McpError::internal("hosts array required"))?
+                .ok_or_else(|| McpError::invalid_args("hosts array required"))?
                 .iter()
                 .filter_map(|v| v.as_str().map(str::to_string))
                 .collect();
@@ -773,11 +1126,11 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshExec => {
             let host = args["host"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("host required"))?
+                .ok_or_else(|| McpError::invalid_args("host required"))?
                 .to_string();
             let command = args["command"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("command required"))?
+                .ok_or_else(|| McpError::invalid_args("command required"))?
                 .to_string();
             let force = args["force"].as_bool().unwrap_or(false);
             let timeout_secs = args["timeout_secs"].as_u64();
@@ -787,8 +1140,10 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
             let change_id = args["change_id"].as_str().map(str::to_string);
             let side_effect = args["side_effect"].as_str().map(str::to_string);
 
-            let max_output_bytes = args["max_output_bytes"].as_u64().map(|v| v as usize);
-            let mut request = ExecRequest {
+            // `max_output_bytes` bounds what the result carries inline; core
+            // keeps its own larger capture so the spilled file has the rest.
+            let max_output_bytes = agent2ssh_mcp_output::capture_cap(inline_cap);
+            let request = ExecRequest {
                 host,
                 command,
                 force,
@@ -842,30 +1197,22 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
                         response_json(resp, &context).await?;
                     serde_json::to_value(result)?
                 } else {
-                    let risk = authorize_local_mcp_exec_request(&mut request).await?;
-                    let result = exec_ssh_core(request)
-                        .await
-                        .map_err(|e| McpError::internal(format!("{e} (risk_level={risk})")))?;
-                    serde_json::to_value(result)?
+                    exec_here(request).await?
                 }
             } else {
-                let risk = authorize_local_mcp_exec_request(&mut request).await?;
-                let result = exec_ssh_core(request)
-                    .await
-                    .map_err(|e| McpError::internal(format!("{e} (risk_level={risk})")))?;
-                serde_json::to_value(result)?
+                exec_here(request).await?
             }
         }
         McpTool::SshExecMulti => {
             let hosts: Vec<String> = args["hosts"]
                 .as_array()
-                .ok_or_else(|| McpError::internal("hosts array required"))?
+                .ok_or_else(|| McpError::invalid_args("hosts array required"))?
                 .iter()
                 .filter_map(|v| v.as_str().map(str::to_string))
                 .collect();
             let command = args["command"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("command required"))?
+                .ok_or_else(|| McpError::invalid_args("command required"))?
                 .to_string();
             let force = args["force"].as_bool().unwrap_or(false);
             let timeout_secs = args["timeout_secs"].as_u64();
@@ -899,45 +1246,70 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
                 });
 
             let source = mcp_source();
-            let approved_hosts = authorize_local_mcp_exec_targets(
-                &hosts,
-                &tags,
-                &command,
-                force,
-                reason.clone(),
-                change_id.clone(),
-                &source,
+            // The daemon, when it is running, authorizes every host — approval
+            // cards included — and runs the batch; see `daemon_request`.
+            let body = json!({
+                "hosts": hosts,
+                "command": command,
+                "force": force,
+                "timeout_secs": timeout_secs,
+                "tags": tags,
+                "strategy": strategy,
+                "reason": reason,
+                "change_id": change_id,
+                "source": source,
+            });
+            match daemon_request::<Value>(
+                reqwest::Method::POST,
+                &["exec-multi"],
+                Some(&body),
+                "/exec-multi",
             )
-            .await?;
+            .await?
+            {
+                DaemonAttempt::Handled(result) => result,
+                DaemonAttempt::Fallback => {
+                    let approved_hosts = authorize_local_mcp_exec_targets(
+                        &hosts,
+                        &tags,
+                        &command,
+                        force,
+                        reason.clone(),
+                        change_id.clone(),
+                        &source,
+                    )
+                    .await?;
 
-            let batch_result = exec_multi_with_strategy(ExecMultiBatchRequest {
-                request: ExecMultiRequest {
-                    hosts,
-                    command,
-                    force,
-                    approved_hosts,
-                    timeout_secs,
-                    tags,
-                    reason,
-                    change_id,
-                    source: Some(source),
-                },
-                strategy,
-            })
-            .await
-            .map_err(McpError::from)?;
-            serde_json::to_value(batch_result)?
+                    let batch_result = exec_multi_with_strategy(ExecMultiBatchRequest {
+                        request: ExecMultiRequest {
+                            hosts,
+                            command,
+                            force,
+                            approved_hosts,
+                            timeout_secs,
+                            tags,
+                            reason,
+                            change_id,
+                            source: Some(source),
+                        },
+                        strategy,
+                    })
+                    .await
+                    .map_err(McpError::from)?;
+                    serde_json::to_value(batch_result)?
+                }
+            }
         }
         McpTool::SshExecCompare => {
             let hosts: Vec<String> = args["hosts"]
                 .as_array()
-                .ok_or_else(|| McpError::internal("hosts array required"))?
+                .ok_or_else(|| McpError::invalid_args("hosts array required"))?
                 .iter()
                 .filter_map(|v| v.as_str().map(str::to_string))
                 .collect();
             let command = args["command"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("command required"))?
+                .ok_or_else(|| McpError::invalid_args("command required"))?
                 .to_string();
             let force = args["force"].as_bool().unwrap_or(false);
             let timeout_secs = args["timeout_secs"].as_u64();
@@ -972,10 +1344,10 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshSftpLs => {
             let host = args["host"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("host required"))?;
+                .ok_or_else(|| McpError::invalid_args("host required"))?;
             let path = args["path"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("path required"))?;
+                .ok_or_else(|| McpError::invalid_args("path required"))?;
             let timeout_secs = args["timeout_secs"].as_u64();
             let source = mcp_source();
             let command = format!("sftp ls {}", path);
@@ -989,10 +1361,10 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshSftpStat => {
             let host = args["host"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("host required"))?;
+                .ok_or_else(|| McpError::invalid_args("host required"))?;
             let path = args["path"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("path required"))?;
+                .ok_or_else(|| McpError::invalid_args("path required"))?;
             let timeout_secs = args["timeout_secs"].as_u64();
             let source = mcp_source();
             let command = format!("sftp stat {}", path);
@@ -1006,10 +1378,10 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshSftpMkdir => {
             let host = args["host"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("host required"))?;
+                .ok_or_else(|| McpError::invalid_args("host required"))?;
             let path = args["path"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("path required"))?;
+                .ok_or_else(|| McpError::invalid_args("path required"))?;
             let timeout_secs = args["timeout_secs"].as_u64();
             let source = mcp_source();
             let command = format!("sftp mkdir {}", path);
@@ -1023,13 +1395,13 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshSftpRename => {
             let host = args["host"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("host required"))?;
+                .ok_or_else(|| McpError::invalid_args("host required"))?;
             let old_path = args["old_path"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("old_path required"))?;
+                .ok_or_else(|| McpError::invalid_args("old_path required"))?;
             let new_path = args["new_path"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("new_path required"))?;
+                .ok_or_else(|| McpError::invalid_args("new_path required"))?;
             let timeout_secs = args["timeout_secs"].as_u64();
             let source = mcp_source();
             let command = format!("sftp rename {old_path} -> {new_path}");
@@ -1043,10 +1415,10 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshSftpRm => {
             let host = args["host"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("host required"))?;
+                .ok_or_else(|| McpError::invalid_args("host required"))?;
             let path = args["path"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("path required"))?;
+                .ok_or_else(|| McpError::invalid_args("path required"))?;
             let timeout_secs = args["timeout_secs"].as_u64();
             let source = mcp_source();
             let command = format!("sftp rm {path}");
@@ -1060,10 +1432,10 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshSftpRmdir => {
             let host = args["host"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("host required"))?;
+                .ok_or_else(|| McpError::invalid_args("host required"))?;
             let path = args["path"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("path required"))?;
+                .ok_or_else(|| McpError::invalid_args("path required"))?;
             let timeout_secs = args["timeout_secs"].as_u64();
             let source = mcp_source();
             let command = format!("sftp rmdir {path}");
@@ -1077,10 +1449,10 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshSftpRmRf => {
             let host = args["host"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("host required"))?;
+                .ok_or_else(|| McpError::invalid_args("host required"))?;
             let path = args["path"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("path required"))?;
+                .ok_or_else(|| McpError::invalid_args("path required"))?;
             let timeout_secs = args["timeout_secs"].as_u64();
             let source = mcp_source();
             let command = format!("sftp rm-rf {path}");
@@ -1116,7 +1488,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshAuditExport => {
             let format = args["format"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("format required: 'jsonl' or 'csv'"))?;
+                .ok_or_else(|| McpError::invalid_args("format required: 'jsonl' or 'csv'"))?;
             let risk_level = args["risk_level"].as_str().and_then(|s| {
                 serde_json::from_value::<RiskLevel>(serde_json::Value::String(s.to_string())).ok()
             });
@@ -1181,7 +1553,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshSessionOpen => {
             let host = args["host"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("host required"))?;
+                .ok_or_else(|| McpError::invalid_args("host required"))?;
             match try_daemon_session_open(host).await? {
                 DaemonAttempt::Handled(value) => value,
                 DaemonAttempt::Fallback => {
@@ -1195,10 +1567,10 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshSessionWrite => {
             let session_id = args["session_id"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("session_id required"))?;
+                .ok_or_else(|| McpError::invalid_args("session_id required"))?;
             let input = args["input"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("input required"))?;
+                .ok_or_else(|| McpError::invalid_args("input required"))?;
             match try_daemon_session_write(session_id, input).await? {
                 DaemonAttempt::Handled(value) => value,
                 DaemonAttempt::Fallback => {
@@ -1223,7 +1595,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshSessionRead => {
             let session_id = args["session_id"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("session_id required"))?;
+                .ok_or_else(|| McpError::invalid_args("session_id required"))?;
             let timeout_ms = args["timeout_ms"].as_u64().unwrap_or(2000);
             match try_daemon_session_read(session_id, timeout_ms).await? {
                 DaemonAttempt::Handled(value) => value,
@@ -1241,7 +1613,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshSessionClose => {
             let session_id = args["session_id"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("session_id required"))?;
+                .ok_or_else(|| McpError::invalid_args("session_id required"))?;
             match try_daemon_session_close(session_id).await? {
                 DaemonAttempt::Handled(value) => value,
                 DaemonAttempt::Fallback => {
@@ -1269,21 +1641,21 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshForwardAdd => {
             let host = args["host"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("host required"))?;
+                .ok_or_else(|| McpError::invalid_args("host required"))?;
             let direction = match args["direction"].as_str().unwrap_or("local") {
                 "remote" => ForwardDirection::Remote,
                 _ => ForwardDirection::Local,
             };
             let bind_port = args["bind_port"]
                 .as_u64()
-                .ok_or_else(|| McpError::internal("bind_port required"))?
+                .ok_or_else(|| McpError::invalid_args("bind_port required"))?
                 as u16;
             let target_host = args["target_host"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("target_host required"))?;
+                .ok_or_else(|| McpError::invalid_args("target_host required"))?;
             let target_port = args["target_port"]
                 .as_u64()
-                .ok_or_else(|| McpError::internal("target_port required"))?
+                .ok_or_else(|| McpError::invalid_args("target_port required"))?
                 as u16;
             let source = mcp_source();
             let command = format!(
@@ -1334,7 +1706,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshForwardRemove => {
             let id: uuid::Uuid = args["forward_id"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("forward_id required"))?
+                .ok_or_else(|| McpError::invalid_args("forward_id required"))?
                 .parse()
                 .map_err(|e| McpError::internal(format!("invalid forward_id: {e}")))?;
             match try_daemon_forward_remove(id).await? {
@@ -1348,7 +1720,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshRiskCheck => {
             let command = args["command"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("command required"))?;
+                .ok_or_else(|| McpError::invalid_args("command required"))?;
             let user_risk = classify_with_user_rules(command).await;
             let final_risk = if let Some(host) = args["host"].as_str() {
                 let target = command_authorization_target(host);
@@ -1373,10 +1745,10 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshApprovalRespond => {
             let id = args["id"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("id required"))?;
+                .ok_or_else(|| McpError::invalid_args("id required"))?;
             let approved = args["approved"]
                 .as_bool()
-                .ok_or_else(|| McpError::internal("approved boolean required"))?;
+                .ok_or_else(|| McpError::invalid_args("approved boolean required"))?;
             let uuid: uuid::Uuid = id
                 .parse()
                 .map_err(|e| McpError::internal(format!("invalid id: {e}")))?;
@@ -1403,10 +1775,10 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshPlaybookRun => {
             let playbook = args["playbook"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("playbook required"))?;
+                .ok_or_else(|| McpError::invalid_args("playbook required"))?;
             let host = args["host"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("host required"))?;
+                .ok_or_else(|| McpError::invalid_args("host required"))?;
             let force = args["force"].as_bool().unwrap_or(false);
             let params_map: Option<HashMap<String, String>> =
                 args["params"].as_object().map(|obj| {
@@ -1446,7 +1818,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshPlaybookDryRun => {
             let playbook = args["playbook"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("playbook required"))?;
+                .ok_or_else(|| McpError::invalid_args("playbook required"))?;
             let params_map: HashMap<String, String> = args["params"]
                 .as_object()
                 .map(|obj| {
@@ -1462,46 +1834,88 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshSnippetSave => {
             let name = args["name"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("name required"))?;
+                .ok_or_else(|| McpError::invalid_args("name required"))?;
             let command = args["command"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("command required"))?;
+                .ok_or_else(|| McpError::invalid_args("command required"))?;
             let description = args["description"].as_str();
             serde_json::to_value(add_snippet(name, command, description).map_err(McpError::from)?)?
         }
         McpTool::SshSnippetDelete => {
             let name = args["name"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("name required"))?;
+                .ok_or_else(|| McpError::invalid_args("name required"))?;
             let removed = remove_snippet(name).map_err(McpError::from)?;
             json!({ "removed": removed, "name": name })
         }
         McpTool::SshConnectionStatus => {
-            let statuses = list_active_connections().await;
-            serde_json::to_value(statuses)?
+            // The daemon's connections are the ones an exec will use, so they are
+            // the ones worth reporting when it is running.
+            match daemon_request::<Value>(
+                reqwest::Method::GET,
+                &["connections"],
+                None,
+                "/connections",
+            )
+            .await?
+            {
+                DaemonAttempt::Handled(statuses) => statuses,
+                DaemonAttempt::Fallback => serde_json::to_value(list_active_connections().await)?,
+            }
         }
         McpTool::SshConnect => {
             let host = args["host"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("host required"))?;
-            let source = mcp_source();
-            authorize_local_mcp_operation(host, "connect", false, &source).await?;
-            connect_host(host).await.map_err(McpError::from)?;
-            json!({ "ok": true, "host": host })
+                .ok_or_else(|| McpError::invalid_args("host required"))?;
+            // Through the daemon when it is running: that is where `ssh_exec`
+            // goes, and a retained connection is only reused by the process that
+            // holds it.
+            match daemon_request::<Value>(
+                reqwest::Method::POST,
+                &["connections", host, "connect"],
+                None,
+                "connect",
+            )
+            .await?
+            {
+                DaemonAttempt::Handled(_) => {
+                    json!({ "ok": true, "host": host, "backend": "daemon" })
+                }
+                DaemonAttempt::Fallback => {
+                    let source = mcp_source();
+                    authorize_local_mcp_operation(host, "connect", false, &source).await?;
+                    connect_host(host).await.map_err(McpError::from)?;
+                    json!({ "ok": true, "host": host, "backend": "process" })
+                }
+            }
         }
         McpTool::SshDisconnect => {
             let host = args["host"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("host required"))?;
-            let source = mcp_source();
-            authorize_local_mcp_operation(host, "disconnect", false, &source).await?;
-            disconnect_host(host).await.map_err(McpError::from)?;
-            json!({ "ok": true, "host": host })
+                .ok_or_else(|| McpError::invalid_args("host required"))?;
+            match daemon_request::<Value>(
+                reqwest::Method::POST,
+                &["connections", host, "disconnect"],
+                None,
+                "disconnect",
+            )
+            .await?
+            {
+                DaemonAttempt::Handled(_) => {
+                    json!({ "ok": true, "host": host, "backend": "daemon" })
+                }
+                DaemonAttempt::Fallback => {
+                    let source = mcp_source();
+                    authorize_local_mcp_operation(host, "disconnect", false, &source).await?;
+                    disconnect_host(host).await.map_err(McpError::from)?;
+                    json!({ "ok": true, "host": host, "backend": "process" })
+                }
+            }
         }
         McpTool::SshWebhookConfig => {
             let action = args["action"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("action required: 'get' or 'set'"))?;
+                .ok_or_else(|| McpError::invalid_args("action required: 'get' or 'set'"))?;
             match action {
                 "get" => {
                     let config = load_webhook_config().unwrap_or_default();
@@ -1541,7 +1955,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshConfigImport => {
             let config_value = args
                 .get("config")
-                .ok_or_else(|| McpError::internal("config object required"))?;
+                .ok_or_else(|| McpError::invalid_args("config object required"))?;
             let export: TeamConfigExport = serde_json::from_value(config_value.clone())
                 .map_err(|e| McpError::internal(format!("invalid config object: {e}")))?;
             let result = import_team_config(&export).map_err(McpError::from)?;
@@ -1550,7 +1964,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshConfigImportPreview => {
             let config_value = args
                 .get("config")
-                .ok_or_else(|| McpError::internal("config object required"))?;
+                .ok_or_else(|| McpError::invalid_args("config object required"))?;
             let export: TeamConfigExport = serde_json::from_value(config_value.clone())
                 .map_err(|e| McpError::internal(format!("invalid config object: {e}")))?;
             let preview = preview_team_config_import(&export).map_err(McpError::from)?;
@@ -1655,7 +2069,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshPreviewExec => {
             let command = args["command"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("command required"))?;
+                .ok_or_else(|| McpError::invalid_args("command required"))?;
             let timeout_secs = args["timeout_secs"].as_u64();
 
             // Check if multi-host or single-host
@@ -1679,7 +2093,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
             } else {
                 let host = args["host"]
                     .as_str()
-                    .ok_or_else(|| McpError::internal("host or hosts required"))?;
+                    .ok_or_else(|| McpError::invalid_args("host or hosts required"))?;
                 let plan = preview_exec(host, command, timeout_secs)
                     .await
                     .map_err(McpError::from)?;
@@ -1693,10 +2107,10 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshApprovalCheck => {
             let host = args["host"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("host required"))?;
+                .ok_or_else(|| McpError::invalid_args("host required"))?;
             let command = args["command"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("command required"))?;
+                .ok_or_else(|| McpError::invalid_args("command required"))?;
 
             let target = command_authorization_target(host);
 
@@ -1756,7 +2170,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshDaemonDiagnose => {
             let alias = args["alias"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("alias required"))?;
+                .ok_or_else(|| McpError::invalid_args("alias required"))?;
             let diagnostic = diagnose_daemon(alias)
                 .await
                 .map_err(|e| McpError::internal(format!("diagnose_daemon failed: {e}")))?;
@@ -1765,7 +2179,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshDaemonVersionCheck => {
             let alias = args["alias"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("alias required"))?;
+                .ok_or_else(|| McpError::invalid_args("alias required"))?;
             let compat = check_daemon_version(alias)
                 .await
                 .map_err(|e| McpError::internal(format!("version check failed: {e}")))?;
@@ -1827,10 +2241,10 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshRedactRuleAdd => {
             let pattern = args["pattern"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("pattern required"))?;
+                .ok_or_else(|| McpError::invalid_args("pattern required"))?;
             let replacement = args["replacement"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("replacement required"))?;
+                .ok_or_else(|| McpError::invalid_args("replacement required"))?;
             serde_json::to_value(
                 insert_redact_rule(pattern, replacement).map_err(McpError::internal)?,
             )?
@@ -1838,10 +2252,10 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshRedactRuleUpdate => {
             let pattern = args["pattern"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("pattern required"))?;
+                .ok_or_else(|| McpError::invalid_args("pattern required"))?;
             let replacement = args["replacement"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("replacement required"))?;
+                .ok_or_else(|| McpError::invalid_args("replacement required"))?;
             let renamed = args["new_pattern"].as_str().unwrap_or(pattern);
             serde_json::to_value(
                 update_redact_rule(pattern, renamed, replacement).map_err(McpError::internal)?,
@@ -1850,7 +2264,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshRedactRuleRemove => {
             let pattern = args["pattern"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("pattern required"))?;
+                .ok_or_else(|| McpError::invalid_args("pattern required"))?;
             require_force(
                 &args,
                 "that class of secret stops being redacted in every audit record, webhook \
@@ -1866,13 +2280,13 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshHighlightRuleAdd => {
             let keyword = args["keyword"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("keyword required"))?;
+                .ok_or_else(|| McpError::invalid_args("keyword required"))?;
             let name = args["name"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("name required"))?;
+                .ok_or_else(|| McpError::invalid_args("name required"))?;
             let color = args["color"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("color required"))?;
+                .ok_or_else(|| McpError::invalid_args("color required"))?;
             // A literal rule is escaped here rather than by handing `insert_rule`
             // an `is_regex: false` rule: that field is a migration input, and
             // `normalize_rule` consumes it by escaping the keyword and writing
@@ -1890,7 +2304,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshHighlightRuleUpdate => {
             let keyword = args["keyword"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("keyword required"))?;
+                .ok_or_else(|| McpError::invalid_args("keyword required"))?;
             // Every field left out keeps its current value, so the rule has to be
             // read before it can be rewritten.
             let existing = list_highlight_rules()
@@ -1931,7 +2345,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::SshHighlightRuleRemove => {
             let keyword = args["keyword"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("keyword required"))?;
+                .ok_or_else(|| McpError::invalid_args("keyword required"))?;
             require_force(&args, "the terminal stops painting matches for it")?;
             serde_json::to_value(delete_highlight_rule(keyword).map_err(McpError::internal)?)?
         }
@@ -1973,11 +2387,11 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::LocalExec => {
             let host = args["host"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("host required"))?
+                .ok_or_else(|| McpError::invalid_args("host required"))?
                 .to_string();
             let command = args["command"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("command required"))?
+                .ok_or_else(|| McpError::invalid_args("command required"))?
                 .to_string();
             let body = json!({
                 "host": host,
@@ -1994,7 +2408,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::ResidentSessionOpen => {
             let host = args["host"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("host required"))?
+                .ok_or_else(|| McpError::invalid_args("host required"))?
                 .to_string();
             let body = json!({
                 "host": host,
@@ -2008,11 +2422,11 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::ResidentSessionExec => {
             let session_id = args["session_id"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("session_id required"))?
+                .ok_or_else(|| McpError::invalid_args("session_id required"))?
                 .to_string();
             let command = args["command"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("command required"))?
+                .ok_or_else(|| McpError::invalid_args("command required"))?
                 .to_string();
             let body = json!({
                 "command": command,
@@ -2033,7 +2447,7 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         McpTool::ResidentSessionClose => {
             let session_id = args["session_id"]
                 .as_str()
-                .ok_or_else(|| McpError::internal("session_id required"))?
+                .ok_or_else(|| McpError::invalid_args("session_id required"))?
                 .to_string();
             daemon_only_request(
                 &format!("/resident-sessions/{session_id}"),
@@ -2054,8 +2468,35 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
         }
     };
 
-    Ok(json!({
-        "content": [{ "type": "text", "text": serde_json::to_string_pretty(&payload)? }],
-        "structuredContent": payload
-    }))
+    // The tools whose payload is one command's result answer with the output as
+    // text; the rest answer with compact JSON. Either way every stdout/stderr in
+    // the payload is bounded before it leaves.
+    let exec_like = matches!(
+        tool,
+        McpTool::SshExec | McpTool::LocalExec | McpTool::ResidentSessionExec
+    );
+    Ok(agent2ssh_mcp_output::tool_success(
+        exec_like, payload, inline_cap,
+    )?)
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+
+    #[test]
+    fn a_revision_the_server_speaks_is_echoed() {
+        for version in SUPPORTED_PROTOCOL_VERSIONS {
+            assert_eq!(negotiate_protocol_version(Some(version)), *version);
+        }
+    }
+
+    #[test]
+    fn an_unknown_or_missing_revision_gets_the_newest_the_server_speaks() {
+        let newest = SUPPORTED_PROTOCOL_VERSIONS[0];
+        assert_eq!(negotiate_protocol_version(None), newest);
+        assert_eq!(negotiate_protocol_version(Some("2099-01-01")), newest);
+        assert_eq!(negotiate_protocol_version(Some("")), newest);
+        assert_eq!(negotiate_protocol_version(Some("not a date")), newest);
+    }
 }

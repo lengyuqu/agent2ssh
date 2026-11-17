@@ -131,7 +131,13 @@ pub(super) async fn authorize_local_mcp_operation(
 
 fn mcp_authorization_error(error: CommandAuthorizationError) -> McpError {
     match error {
-        CommandAuthorizationError::ScopeDenied(message) => McpError::internal(message),
+        CommandAuthorizationError::ScopeDenied(message) => {
+            McpError::internal(message).with_kind("policy_denied")
+        }
+        // `Blocked` covers three different refusals — a blocked command, a
+        // high-risk one without force, and an approval this path cannot raise —
+        // and the remedy differs for each, so the code is read from the message
+        // (`agent2ssh_mcp_output::classify`) rather than fixed here.
         CommandAuthorizationError::Blocked { message, .. } => McpError::internal(message),
         CommandAuthorizationError::ApprovalRejected => {
             McpError::internal("command rejected by approver")

@@ -1,6 +1,24 @@
 # Agent2SSH MCP Tools Reference
 
-Agent2SSH exposes 76 tools via the Model Context Protocol (MCP) stdio server.
+Agent2SSH exposes 76 tools via the Model Context Protocol (MCP) stdio server. By default `tools/list` offers the 26 **core** tools and leaves the rest unlisted — see [Which tools are listed](#which-tools-are-listed).
+
+## Which tools are listed
+
+Every tool in a `tools/list` answer is paid for in the model's context on every turn of every session. All 76 are about 40 KB (~11k tokens); the 26 core tools are about 16 KB (~4.4k). So the server lists the **core** group unless told otherwise, and says so in the `instructions` it returns at `initialize` ("N more tools are not listed …") so the model does not take the short list for everything.
+
+| Group | Tools | What is in it |
+|-------|-------|---------------|
+| `core` (always listed) | 26 | `ssh_list_hosts`, `ssh_add_host`, `ssh_exec`, `ssh_exec_multi`, `ssh_ping`, `ssh_risk_check`, `ssh_audit`, `ssh_sftp_ls`/`stat`/`mkdir`/`rename`/`rm`/`upload`/`download`, `ssh_session_*` (5), `ssh_connect`, `ssh_disconnect`, `ssh_connection_status`, `local_exec`, `resident_session_*` (3) |
+| `ops` | 14 | `ssh_exec_compare`, `ssh_preview_exec`, `ssh_sftp_rmdir`, `ssh_sftp_rm_rf`, `ssh_forward_*`, `ssh_playbook_*`, `ssh_snippet_*`, `containers_start_service` |
+| `admin` | 14 | `ssh_list_daemons`, `ssh_import_config`, `ssh_remove_host`, `ssh_gate_status`, `ssh_approval_*`, `ssh_webhook_config`, `ssh_config_*`, `ssh_sync_*` |
+| `rules` | 13 | `ssh_redact_rule_*`, `ssh_highlight_rule_*`, `ssh_algo_prefs_*` |
+| `diagnostics` | 9 | `ssh_audit_export`, `ssh_doctor`, `ssh_metrics`, `ssh_metrics_trend`, `ssh_health_snapshot`, `ssh_daemon_diagnose`, `ssh_daemon_version_check`, `ssh_daemons_view`, `ssh_events_subscribe` |
+
+Set `AGENT2SSH_MCP_TOOLS` in the MCP server's environment: unset or `core` is the default, `all` lists everything, and a comma-separated list of group names (`rules,diagnostics`) adds those groups to core. An unknown word is ignored and named in the `instructions`.
+
+**This is a listing choice, not an access rule.** Every tool stays callable by name whatever the setting, so a prompt or skill that names `ssh_audit_export` keeps working; only discovery is narrower. Authorization, approval and the gate apply to a hidden tool exactly as to a listed one.
+
+**Annotations.** Each listed tool carries MCP `annotations` where they differ from the protocol's defaults (not read-only, destructive, not idempotent, open-world): `readOnlyHint: true` for tools that change nothing, `destructiveHint: false` for tools that only add, `idempotentHint: true`, `openWorldHint: false` for tools that touch only this machine's own state. A tool that can do anything — `ssh_exec` — carries none. The group and the hints for every tool live in one table, `src-tauri/src/bin/agent2ssh_mcp/catalog.rs`; `the_catalog_covers_every_tool` fails when a tool is missing from it.
 
 ## Daemon address
 
@@ -100,6 +118,55 @@ the `mcp_tools_match_skills_md_documentation` integration test.
 
 The local-execution tools above wait for the daemon's execution, shell-warmup and approval deadlines, rather than imposing a separate 30-second HTTP timeout. Connecting to the daemon is limited to 10 seconds in every case; command `timeout_secs` still applies. The session, forward and gate tools (`ssh_session_*`, `ssh_forward_*`, `ssh_gate_status`) use a second client that also caps the whole request at 30 seconds, so a daemon which accepts the connection and then stalls fails them at that cap rather than at any command deadline.
 
+## Result contract
+
+How every tool answers, and what a client can rely on.
+
+**Success.** `content` holds one text block and `structuredContent` holds the same data as JSON. For the three tools that run one command — `ssh_exec`, `local_exec`, `resident_session_exec` — the text is a header line followed by the output as the command printed it:
+
+```text
+exit_code: 2 | duration_ms: 41 | risk_level: low | host: web1
+
+[stdout]
+...
+[stderr]
+...
+```
+
+A non-zero `exit_code` is a normal result: the tool worked, the command reported failure. Every other tool answers with compact JSON text.
+
+**`structuredContent` is always an object**, as the protocol defines it — a strict client validates it as one and rejects the whole result otherwise. A tool whose natural answer is a list (`ssh_list_hosts`, `ssh_audit`, `ssh_ping`, `ssh_session_list`, `ssh_doctor`, …) or a bare value comes back as `{"result": [...]}`; the `content` text stays the list itself.
+
+**Protocol revision.** `initialize` answers with the revision the client asked for when the server speaks it (`2025-06-18`, `2025-03-26`, `2024-11-05`) and `2025-06-18` otherwise, so the client can decide. What the server sends beyond the oldest — `structuredContent`, `isError`, tool `annotations`, `instructions` — is additive and ignored by a client that does not know it.
+
+**Output size.** Each `stdout` / `stderr` — in a single result, in every per-host result of `ssh_exec_multi`, in every playbook step — is bounded to `max_output_bytes` (default 32768) before it is returned. A longer stream keeps its head and tail around a `[... N bytes omitted; full stdout (M bytes) saved to <path> ...]` marker, and the result gains `<stream>_total_bytes` and `<stream>_file`. The file is on the machine the MCP server runs on, under `~/.agent2ssh/outputs/` (override with `AGENT2SSH_MCP_OUTPUT_DIR`), owner-readable only, and removed after seven days. `AGENT2SSH_MCP_MAX_OUTPUT_BYTES` changes the default bound for a whole client. The capture behind it is still bounded at 4 MiB per stream; `truncated` / `dropped_bytes` report that outer bound, as before.
+
+**Failure.** A tool that fails answers with a result whose `isError` is `true` — not a JSON-RPC error — so the model reads it and can act. The text starts `Error [<code>]: <message>`, then `Hint: <next step>` when there is one. `structuredContent.error` carries `code`, `message` and `hint`.
+
+| Code | Meaning | What to do |
+|------|---------|------------|
+| `invalid_arguments` | A required argument is missing or has the wrong shape | Fix the call |
+| `host_not_found` | No host profile has that alias | The hint lists the configured aliases |
+| `force_required` | High-risk command without `force` | Confirm with the user, then retry with `force: true` |
+| `command_blocked` | Blocked by risk policy | Do not retry |
+| `approval_required` | An approval policy applies and this path cannot prompt | Ask the user |
+| `approval_rejected` / `approval_timed_out` | A person said no, or nobody answered | Ask the user before retrying |
+| `policy_denied` | Outside the caller's scope | Do not retry |
+| `gate_paused` | A person paused execution globally | Do not retry; ask the user to resume it |
+| `rate_limited` | An execution rate or session limit is in force | Wait, or run fewer commands at once |
+| `exec_timeout` | The command outlived `timeout_secs` | See below |
+| `ssh_auth_failed` / `ssh_connect_failed` / `ssh_host_key_mismatch` | The connection could not be made | Check the profile; `ssh_ping` tests reachability |
+| `daemon_unavailable` | A daemon-only tool with no daemon running | `agent2ssh daemon start` |
+| `daemon_error` | The connection to the daemon dropped after the request went out | The command may have run: check `ssh_audit` before retrying |
+| `binding_invalid` | The MCP binding did not verify; no tool runs | `agent2ssh integrate add <client>`, restart the server |
+| `timeout` / `tool_error` | Any other timeout / any other failure | Read the message |
+
+**Timeouts keep the output.** An `exec_timeout` result carries what the command printed before the deadline — `[stdout before the timeout]` / `[stderr before the timeout]` in the text, `stdout` / `stderr` / `timed_out` / `process_stopped` in `structuredContent`. `process_stopped` is `false` for an SSH host: closing the channel does not stop the remote process, so it may still be running. It is `true` for a local target, whose process tree is killed at the deadline.
+
+**Protocol errors.** Only a request the server cannot dispatch is a JSON-RPC error: an unknown method (`-32601`), an unknown tool or missing `params` (`-32602`), a line that is not JSON (`-32700`, after which the server keeps serving).
+
+**Concurrency and cancellation.** `tools/call` requests run concurrently, so a slow command does not hold up other calls; responses arrive as each finishes, matched by `id`. `notifications/cancelled` with a `requestId` drops that call's response. Work already running on an SSH host is not interrupted by a cancellation — it ends at its own `timeout_secs` and is audited as usual.
+
 ## Risk Levels
 
 Commands are classified into four risk levels:
@@ -109,7 +176,7 @@ Commands are classified into four risk levels:
 - **high** — potentially destructive commands (sudo, rm -rf, chmod 777, etc.)
 - **blocked** — unconditionally dangerous commands (mkfs, rm -rf /, shutdown, fork bomb, etc.)
 
-High-risk commands require daemon approval or `force: true` when policy allows. Only `ssh_exec` can reach a daemon (pass `daemon_alias` with a remote alias — `localhost` is the local branch); every other MCP tool has no approval handler, so a policy match fails closed. Blocked commands are always rejected.
+High-risk commands require daemon approval or `force: true` when policy allows. `ssh_exec` and `ssh_exec_multi` hand the work to the **local daemon** whenever one is running, so an approval policy raises a card a person can answer in the desktop app, and the execution gate and rate limits apply; `daemon_alias` names a *remote* daemon instead. Only when the local daemon cannot be reached at all (no token file, or the connection is refused) does the exec run inside the MCP process, which has no approval handler: a policy match then fails closed with `approval_required`. A connection that drops *after* the request reached the daemon is never retried in process — the command may already have run — and answers `daemon_error` with a pointer to `ssh_audit`. `ssh_connect`, `ssh_disconnect` and `ssh_connection_status` follow the same rule, so a connection retained for later `ssh_exec` calls lives in the process those calls run in. Blocked commands are always rejected.
 
 ## Execution Authorization
 
@@ -125,7 +192,7 @@ MCP exec, exec-multi, playbook, SFTP, session open/write, forward add, connect, 
 
 When the daemon is running, high-risk commands can be routed through an approval gate:
 
-1. MCP `ssh_exec` or another daemon-routed operation with high-risk work creates an approval request
+1. MCP `ssh_exec` or another daemon-routed operation with high-risk work creates an approval request. The MCP call stays open while the card is pending and returns when it is approved (the result), rejected (`approval_rejected`) or times out (`approval_timed_out`)
 2. Query pending approvals with `ssh_approval_list`
 3. Approve or reject with `ssh_approval_respond`
 
@@ -171,6 +238,15 @@ Agent2SSH can retain embedded SSH sessions for faster connection checks and prec
 - Use `ssh_connection_status` to see which hosts have active connections
 - Use `ssh_connect` to pre-establish a connection, `ssh_disconnect` to tear one down
 - Jump-host connections use the same embedded direct-tcpip bastion channel as exec, SFTP, terminal, sessions, and forwards
+
+**`ssh_exec` reuses a retained connection.** After `ssh_connect` to a host, every `ssh_exec` to it in the same process opens a channel on that connection instead of a new one — no TCP connect, key exchange or authentication, and for a host behind a jump host none of the chain either. Measured against a local sshd, a call went from about 240 ms to about 30 ms; the saving grows with network latency and with every jump host. The rules:
+
+- **Opt-in.** Only a host that was explicitly retained is ever reused; a host that was never `ssh_connect`ed behaves exactly as before. Retained connections are process-local, so this applies to the process that ran `ssh_connect` (the MCP server, the daemon, the desktop app) — separate CLI invocations never share one.
+- **Concurrent.** Calls on one retained connection run in parallel as separate channels. A call that times out closes only its own channel and never takes the connection down for the others.
+- **Never worse than before.** If the retained connection is unhealthy, reconnecting, made for a host profile that has since changed (address, port, user, key, jump host, proxy), cannot open a channel within 5 seconds, or is already at the server's channel limit (`MaxSessions`, 10 on OpenSSH by default), that call quietly connects for itself. This is decided before the command is sent, so a command is never run twice.
+- **A timed-out command still occupies a server-side session slot** until it exits, because closing a channel does not stop a pty-less remote process (see `timeout_secs`). Many timed-out long-running commands on one retained connection therefore exhaust its slots; later calls fall back to their own connections until the commands end. Wrap long work in `timeout <secs>` on the remote side.
+
+SFTP, PTY sessions, port forwards and the other tools still open connections of their own.
 
 ## Webhook Notifications
 

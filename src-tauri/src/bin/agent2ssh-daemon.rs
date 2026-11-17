@@ -442,9 +442,22 @@ fn load_or_create_daemon_token(config_dir: &std::path::Path) -> anyhow::Result<S
 
 // ── Error type ───────────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 struct ErrorBody {
     error: String,
+    /// Present (and true) only when an exec route answers for a command that
+    /// outlived its deadline. The three fields below travel with it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timed_out: Option<bool>,
+    /// What the command printed before the deadline, bounded like any capture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    partial_stdout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    partial_stderr: Option<String>,
+    /// False for an SSH target: closing the channel does not stop the remote
+    /// process. True for a local target, whose process tree was reaped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    process_stopped: Option<bool>,
 }
 
 fn err(status: StatusCode, msg: impl ToString) -> (StatusCode, Json<ErrorBody>) {
@@ -452,6 +465,25 @@ fn err(status: StatusCode, msg: impl ToString) -> (StatusCode, Json<ErrorBody>) 
         status,
         Json(ErrorBody {
             error: msg.to_string(),
+            ..ErrorBody::default()
+        }),
+    )
+}
+
+/// [`err`] for the exec routes: a timeout keeps the output captured before the
+/// deadline, so a client is not left with the bare sentence "timed out".
+fn exec_err(status: StatusCode, error: anyhow::Error) -> (StatusCode, Json<ErrorBody>) {
+    let Some(timed_out) = error.downcast_ref::<agent2ssh::ExecTimedOut>() else {
+        return err(status, error);
+    };
+    (
+        status,
+        Json(ErrorBody {
+            error: error.to_string(),
+            timed_out: Some(true),
+            partial_stdout: Some(timed_out.stdout.clone()),
+            partial_stderr: Some(timed_out.stderr.clone()),
+            process_stopped: Some(timed_out.process_stopped),
         }),
     )
 }
@@ -1890,7 +1922,7 @@ async fn exec(
         } else {
             StatusCode::BAD_REQUEST
         };
-        err(status, e)
+        exec_err(status, e)
     })
 }
 
@@ -1982,7 +2014,7 @@ async fn local_exec(
     });
     result
         .map(Json)
-        .map_err(|e| err(StatusCode::BAD_REQUEST, e))
+        .map_err(|e| exec_err(StatusCode::BAD_REQUEST, e))
 }
 
 async fn exec_multi(

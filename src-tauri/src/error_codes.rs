@@ -189,6 +189,50 @@ impl Serialize for CodedError {
     }
 }
 
+/// A stable machine code for a failure that reached a command-line or MCP
+/// surface as a sentence.
+///
+/// Core still reports most failures as `anyhow` sentences, so the code is read
+/// from the wording — each pattern is the literal text of one error site, and
+/// they are tried in this order. Both machine-facing surfaces (the MCP server's
+/// `Error [code]` results and the CLI's `--json` failure object) go through
+/// here so a harness sees the same code whichever it drives. Names that
+/// [`ErrorCode`] has use its spelling; the rest are specific to the call shape.
+///
+/// `"tool_error"` is the answer for a failure that matches nothing: the failure
+/// is still reported, just without a more specific code.
+pub fn code_for_message(message: &str) -> &'static str {
+    let message = message.to_ascii_lowercase();
+    let has = |needle: &str| message.contains(needle);
+    if has("unknown host profile") {
+        ErrorCode::HostNotFound.as_str()
+    } else if has("requires force=true") {
+        "force_required"
+    } else if has("approval required") {
+        "approval_required"
+    } else if has("rejected by approver") {
+        ErrorCode::ApprovalRejected.as_str()
+    } else if has("approval request timed out") {
+        "approval_timed_out"
+    } else if has("execution gate paused") {
+        "gate_paused"
+    } else if has("execution limit exceeded") {
+        ErrorCode::RateLimited.as_str()
+    } else if has("blocked") {
+        ErrorCode::CommandBlocked.as_str()
+    } else if has("authentication failed") {
+        ErrorCode::SshAuthFailed.as_str()
+    } else if has("host key") {
+        ErrorCode::SshHostKeyMismatch.as_str()
+    } else if has("failed to connect") {
+        ErrorCode::SshConnectFailed.as_str()
+    } else if has("timed out") {
+        "timeout"
+    } else {
+        "tool_error"
+    }
+}
+
 /// Convenience functions for common error categories.
 impl CodedError {
     pub fn ssh_connect_failed(host: &str, err: &str) -> Self {
@@ -271,6 +315,42 @@ pub fn error_chain_anyhow(err: &anyhow::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_for_message_reads_the_wording_core_uses() {
+        for (message, code) in [
+            ("unknown host profile: nope", "host_not_found"),
+            (
+                "command requires force=true (risk=high): 'rm -rf x'",
+                "force_required",
+            ),
+            (
+                "approval required but no local MCP approval handler is available",
+                "approval_required",
+            ),
+            ("command rejected by approver", "approval_rejected"),
+            ("approval request timed out", "approval_timed_out"),
+            ("execution gate paused", "gate_paused"),
+            (
+                "execution limit exceeded: host current=5 limit=5",
+                "rate_limited",
+            ),
+            (
+                "command blocked by risk policy: 'mkfs /dev/sda'",
+                "command_blocked",
+            ),
+            ("SSH authentication failed for 'web1'", "ssh_auth_failed"),
+            ("host key for web1 changed", "ssh_host_key_mismatch"),
+            (
+                "failed to connect to 10.0.0.1:22: refused",
+                "ssh_connect_failed",
+            ),
+            ("SSH command timed out after 5s: 'make'", "timeout"),
+            ("something else entirely", "tool_error"),
+        ] {
+            assert_eq!(code_for_message(message), code, "{message}");
+        }
+    }
 
     // ── Wire format ────────────────────────────────────────────────────
 

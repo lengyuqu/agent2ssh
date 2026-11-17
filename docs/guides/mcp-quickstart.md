@@ -44,7 +44,7 @@ MCP 服务器以 `agent2ssh-mcp` 二进制运行，通过标准输入/输出与 
 
 `AGENT2SSH_SOURCE` 会写入 audit 和 Live Activity 的来源字段。不同客户端应使用不同值，例如 `workbuddy`、`qoder_work`、`trae`、`codex` 或 `claude_desktop`。
 
-配置完成后，Agent 将自动发现并调用所有 76 个 SSH 工具。
+配置完成后，Agent 将自动发现并调用 SSH 工具。为了不让工具定义占满上下文，`tools/list` 默认只列出 26 个 **core** 工具（约 4.4k token，全部 76 个约 11k）：主机列表、`ssh_exec` / `ssh_exec_multi`、SFTP、会话、连接保留、`local_exec` 和常驻会话。其余工具分组（`ops` 转发/playbook/片段、`admin` 主机与审批管理、`rules` 脱敏/高亮/算法规则、`diagnostics` 诊断与指标）在 MCP 服务器的环境变量里设置 `AGENT2SSH_MCP_TOOLS=all`（或 `rules,diagnostics` 这样的分组列表）后才会列出。未列出的工具仍可按名字调用，只是不再被自动发现；`initialize` 返回的 `instructions` 会告诉模型还有多少工具未列出。分组表见 [MCP Tools Reference](../skills.md)。
 
 ---
 
@@ -120,7 +120,7 @@ MCP 服务器以 `agent2ssh-mcp` 二进制运行，通过标准输入/输出与 
     "force": false,
     "timeout_secs": 60,
     "stdin": null,
-    "max_output_bytes": 4194304
+    "max_output_bytes": 32768
   }
 }
 ```
@@ -132,10 +132,25 @@ MCP 服务器以 `agent2ssh-mcp` 二进制运行，通过标准输入/输出与 
 | `host` | 是 | 主机别名 |
 | `command` | 是 | 远程命令 |
 | `force` | 否 | 跳过**高风险**命令的确认；命中 `approval_policies` 时无效（策略命中要审批，`force` 不免除） |
-| `timeout_secs` | 否 | 超时秒数，默认 60 |
+| `timeout_secs` | 否 | 等待秒数，默认 60。超时后返回错误结果并附带已捕获的输出；**远端进程不会被终止**，必须停止时请在命令前加 `timeout <秒>` |
 | `stdin` | 否 | 传递到远程命令 stdin 的字符串 |
-| `max_output_bytes` | 否 | 输出截断阈值，默认 4 MiB |
+| `max_output_bytes` | 否 | 结果内联携带的 stdout / stderr 各自上限，默认 32768（32 KiB）。超出时保留头尾，完整输出写入本机文件，路径在结果里 |
 | `daemon_alias` | 否 | 路由到远程守护进程（见下方说明） |
+
+返回结果是一行头信息加原样输出，而不是把输出塞进 JSON 字符串：
+
+```text
+exit_code: 0 | duration_ms: 212 | risk_level: low | host: web1
+
+[stdout]
+ 10:02:11 up 41 days,  3:17,  1 user,  load average: 0.08, 0.03, 0.01
+```
+
+命令会优先交给本机 daemon 执行（daemon 在运行时）：命中审批策略的命令会弹出审批卡片，调用保持打开直到被批准、拒绝或超时；同时执行闸门和限流也会生效。daemon 完全连不上（没有 token 文件或连接被拒绝）时才在 MCP 进程内执行，此时命中审批策略会以 `approval_required` 失败。请求已到达 daemon 后连接中断不会在本进程重试（命令可能已执行），而是返回 `daemon_error`，请先查 `ssh_audit`。
+
+退出码非 0 仍是正常结果。`structuredContent` 恒为对象：返回列表的工具（`ssh_list_hosts`、`ssh_audit`、`ssh_ping` 等）会包成 `{"result": [...]}`，`content` 文本里仍是列表本身。`structuredContent` 保留同样的字段（`exit_code`、`stdout`、`stderr`、`truncated` 等）供程序读取。输出被截断时会多出 `stdout_total_bytes` 和 `stdout_file`（stderr 同理），完整文件位于 `~/.agent2ssh/outputs/`，保留 7 天；可用环境变量 `AGENT2SSH_MCP_OUTPUT_DIR` 改目录、`AGENT2SSH_MCP_MAX_OUTPUT_BYTES` 改默认上限。
+
+工具失败时返回 `isError: true` 的结果（不是 JSON-RPC error），文本形如 `Error [host_not_found]: ...` 加一行 `Hint: ...`，完整代码表见 `docs/skills.md` 的 "Result contract"。
 
 向 stdin 传递数据：
 
@@ -467,6 +482,8 @@ MCP 的 exec、SFTP、session、terminal 相关 daemon 路径、jump-host、端�
   "arguments": { "host": "web1" }
 }
 ```
+
+连接建立后，同一进程里对该主机的 `ssh_exec` 会直接在这条连接上开 channel，省去 TCP 连接、密钥交换和认证（本机实测每次约 240 ms → 30 ms，跳板机或高延迟网络下差距更大）。只有显式 `ssh_connect` 过的主机才会复用；连接不健康、主机配置已变、5 秒内开不出 channel 或达到服务器的 channel 上限时，该次调用会自动改用自己的新连接，不会失败。同一连接上的多个调用并行执行，其中一个超时只关闭它自己的 channel。多次调用前先 `ssh_connect` 一次即可。
 
 **ssh_disconnect** -- 关闭内置 SSH 连接
 

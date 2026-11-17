@@ -14,6 +14,11 @@ fn cli_bin() -> std::path::PathBuf {
     env!("CARGO_BIN_EXE_agent2ssh").into()
 }
 
+/// How many tools a default `tools/list` offers: the `core` group.
+const DEFAULT_LISTED_TOOLS: usize = 26;
+/// How many the registry holds, and `AGENT2SSH_MCP_TOOLS=all` lists.
+const ALL_TOOLS: usize = 76;
+
 fn mcp_bin() -> std::path::PathBuf {
     env!("CARGO_BIN_EXE_agent2ssh-mcp").into()
 }
@@ -344,6 +349,8 @@ async fn mcp_stdio_end_to_end_initialize_tools_and_risk() {
         .env(CONFIG_DIR_ENV, &config_dir)
         .env("AGENT2SSH_SOURCE", source)
         .env("AGENT2SSH_BINDING_KEY", binding_key)
+        // The listing depends on this; a developer's shell must not change it.
+        .env_remove("AGENT2SSH_MCP_TOOLS")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -429,10 +436,11 @@ async fn mcp_stdio_end_to_end_initialize_tools_and_risk() {
     .unwrap();
     let tool_count = tools["result"]["tools"].as_array().unwrap().len();
     // A second, independent place the tool count is pinned: `daemon_integration`
-    // counts the registry text and `docs/skills.md`, this one counts what a real
-    // `tools/list` returns over stdio. Both have to move together — the daemon
-    // suite passing is not evidence that this one will.
-    assert_eq!(tool_count, 76);
+    // counts the registry text and `docs/skills.md` (76, everything), this one
+    // counts what a real `tools/list` returns over stdio *by default* — the core
+    // group (see `agent2ssh_mcp/catalog.rs`). Both have to move together: the
+    // daemon suite passing is not evidence that this one will.
+    assert_eq!(tool_count, DEFAULT_LISTED_TOOLS);
 
     let risk: serde_json::Value = serde_json::from_str(
         &lines
@@ -535,7 +543,11 @@ token = "tok"
             .expect("missing MCP response"),
     )
     .unwrap();
-    let message = response["error"]["message"]
+    // A tool that failed answers with a result the model reads, not with a
+    // JSON-RPC error.
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(response["result"]["isError"], true, "{response}");
+    let message = response["result"]["structuredContent"]["error"]["message"]
         .as_str()
         .expect("missing error message");
     assert!(
@@ -1309,4 +1321,397 @@ fn unique_temp_config_dir(name: &str) -> std::path::PathBuf {
         .expect("system time before unix epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("agent2ssh-{name}-{}-{nanos}", std::process::id()))
+}
+
+/// Run one MCP server over stdio: write every request, close stdin, and return
+/// the responses in the order they were written, with the exit status.
+async fn mcp_exchange(
+    config_dir: &std::path::Path,
+    binding: Option<(&str, &str)>,
+    requests: &[&str],
+) -> (Vec<serde_json::Value>, std::process::ExitStatus) {
+    mcp_exchange_with_env(config_dir, binding, &[], requests).await
+}
+
+/// [`mcp_exchange`] with extra environment for the server process.
+async fn mcp_exchange_with_env(
+    config_dir: &std::path::Path,
+    binding: Option<(&str, &str)>,
+    env: &[(&str, &str)],
+    requests: &[&str],
+) -> (Vec<serde_json::Value>, std::process::ExitStatus) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::process::Command;
+
+    std::fs::create_dir_all(config_dir).expect("create MCP test config dir");
+    let mut command = Command::new(mcp_bin());
+    command
+        .env(CONFIG_DIR_ENV, config_dir)
+        .env_remove("AGENT2SSH_SOURCE")
+        .env_remove("AGENT2SSH_BINDING_KEY")
+        .env_remove("AGENT2SSH_MCP_TOOLS")
+        .envs(env.iter().copied())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if let Some((source, key)) = binding {
+        write_mcp_test_binding(config_dir, source, key);
+        command
+            .env("AGENT2SSH_SOURCE", source)
+            .env("AGENT2SSH_BINDING_KEY", key);
+    }
+    let mut child = command.spawn().expect("failed to start MCP binary");
+
+    let mut stdin = child.stdin.take().expect("missing MCP stdin");
+    for request in requests {
+        stdin.write_all(request.as_bytes()).await.unwrap();
+        stdin.write_all(b"\n").await.unwrap();
+    }
+    drop(stdin);
+
+    let mut lines = BufReader::new(child.stdout.take().expect("missing MCP stdout")).lines();
+    let mut responses = Vec::new();
+    while let Some(line) = lines.next_line().await.unwrap() {
+        responses.push(serde_json::from_str(&line).expect("MCP wrote a non-JSON line"));
+    }
+    let status = child.wait().await.expect("failed waiting for MCP process");
+    (responses, status)
+}
+
+fn response_with_id(responses: &[serde_json::Value], id: u64) -> &serde_json::Value {
+    responses
+        .iter()
+        .find(|response| response["id"] == id)
+        .unwrap_or_else(|| panic!("no response for id {id} in {responses:?}"))
+}
+
+/// A failed tool has to reach the model as something it can act on: a result
+/// flagged `isError`, with a stable code and — where there is one — the next
+/// step. Only a request the server cannot dispatch stays a JSON-RPC error.
+#[tokio::test]
+async fn mcp_tool_failures_are_results_with_a_code_and_a_hint() {
+    let config_dir =
+        std::env::temp_dir().join(format!("agent2ssh-mcp-failures-{}", uuid::Uuid::new_v4()));
+    let (responses, status) = mcp_exchange(
+        &config_dir,
+        Some(("cli_smoke", "test-binding-key")),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ssh_exec","arguments":{"host":"nope","command":"uptime"}}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ssh_exec","arguments":{"host":"nope"}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"no_such_tool","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"ssh_list_hosts","arguments":{}}}"#,
+        ],
+    )
+    .await;
+    assert!(status.success());
+
+    let unknown_host = response_with_id(&responses, 1);
+    assert!(unknown_host.get("error").is_none(), "{unknown_host}");
+    assert_eq!(unknown_host["result"]["isError"], true, "{unknown_host}");
+    assert_eq!(
+        unknown_host["result"]["structuredContent"]["error"]["code"], "host_not_found",
+        "{unknown_host}"
+    );
+    let text = unknown_host["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(
+        text.starts_with("Error [host_not_found]: unknown host profile: nope"),
+        "{text:?}"
+    );
+    // The hint is what turns the failure into a next step.
+    assert!(
+        text.contains("\nHint: No SSH hosts are configured"),
+        "{text:?}"
+    );
+
+    let missing_argument = response_with_id(&responses, 2);
+    assert_eq!(missing_argument["result"]["isError"], true);
+    assert_eq!(
+        missing_argument["result"]["structuredContent"]["error"]["code"],
+        "invalid_arguments"
+    );
+    assert_eq!(
+        missing_argument["result"]["structuredContent"]["error"]["message"],
+        "command required"
+    );
+
+    // Nothing to hand the model here: the request named a tool that does not
+    // exist, which is the client's error.
+    let unknown_tool = response_with_id(&responses, 3);
+    assert_eq!(unknown_tool["error"]["code"], -32602, "{unknown_tool}");
+    assert!(unknown_tool.get("result").is_none());
+
+    // A success is not flagged, and a non-exec tool answers with compact JSON.
+    let hosts = response_with_id(&responses, 4);
+    assert!(hosts["result"].get("isError").is_none(), "{hosts}");
+    assert_eq!(hosts["result"]["content"][0]["text"], "[]");
+
+    let _ = std::fs::remove_dir_all(config_dir);
+}
+
+/// One unparseable line used to end the process — and with it every session and
+/// forward the server held. It is answered as a parse error and serving goes on.
+#[tokio::test]
+async fn mcp_survives_a_line_that_is_not_json() {
+    let config_dir =
+        std::env::temp_dir().join(format!("agent2ssh-mcp-badline-{}", uuid::Uuid::new_v4()));
+    let (responses, status) = mcp_exchange(
+        &config_dir,
+        Some(("cli_smoke", "test-binding-key")),
+        &[
+            "this is not json",
+            r#"{"jsonrpc":"2.0","id":7,"method":"ping","params":{}}"#,
+        ],
+    )
+    .await;
+
+    assert!(status.success(), "the server must exit cleanly at EOF");
+    assert_eq!(responses.len(), 2, "{responses:?}");
+    assert_eq!(responses[0]["error"]["code"], -32700, "{responses:?}");
+    assert!(responses[0]["id"].is_null());
+    assert_eq!(responses[1]["id"], 7);
+    assert!(responses[1]["result"].is_object());
+
+    let _ = std::fs::remove_dir_all(config_dir);
+}
+
+/// A server whose binding does not verify used to exit before the handshake, so
+/// the client saw "failed to start" and the reason went to a stderr nobody
+/// reads. It now connects, lists its tools, and refuses every call with the
+/// reason — still running nothing.
+#[tokio::test]
+async fn mcp_without_a_binding_connects_but_runs_no_tool() {
+    let config_dir =
+        std::env::temp_dir().join(format!("agent2ssh-mcp-unbound-{}", uuid::Uuid::new_v4()));
+    let (responses, status) = mcp_exchange(
+        &config_dir,
+        None,
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ssh_risk_check","arguments":{"command":"ls"}}}"#,
+        ],
+    )
+    .await;
+
+    assert!(status.success());
+    assert_eq!(
+        response_with_id(&responses, 1)["result"]["serverInfo"]["name"],
+        "agent2ssh-mcp"
+    );
+    assert_eq!(
+        response_with_id(&responses, 2)["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .len(),
+        DEFAULT_LISTED_TOOLS
+    );
+
+    let refused = response_with_id(&responses, 3);
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    assert_eq!(
+        refused["result"]["structuredContent"]["error"]["code"], "binding_invalid",
+        "{refused}"
+    );
+    // The tool must not have run: a risk verdict in the result would mean the
+    // gate was only cosmetic.
+    assert!(
+        refused["result"]["structuredContent"]
+            .get("risk_level")
+            .is_none(),
+        "{refused}"
+    );
+    let text = refused["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("agent2ssh integrate add"), "{text:?}");
+
+    let _ = std::fs::remove_dir_all(config_dir);
+}
+
+/// `tools/list` is the one place the registry is paid for in the model's
+/// context, so by default it offers the core group — and says so, so the model
+/// is not left thinking that is everything. Every tool stays callable by name.
+#[tokio::test]
+async fn mcp_lists_core_tools_by_default_and_hidden_ones_still_run() {
+    let config_dir =
+        std::env::temp_dir().join(format!("agent2ssh-mcp-listing-{}", uuid::Uuid::new_v4()));
+    let (responses, status) = mcp_exchange(
+        &config_dir,
+        Some(("cli_smoke", "test-binding-key")),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+            // `ssh_doctor` is a diagnostics tool: not listed, but it must run.
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ssh_doctor","arguments":{}}}"#,
+        ],
+    )
+    .await;
+    assert!(status.success());
+
+    let instructions = response_with_id(&responses, 1)["result"]["instructions"]
+        .as_str()
+        .expect("initialize carries instructions");
+    assert!(
+        instructions.contains("more tools are not listed"),
+        "{instructions}"
+    );
+    assert!(
+        instructions.contains("AGENT2SSH_MCP_TOOLS=all"),
+        "{instructions}"
+    );
+
+    let tools = response_with_id(&responses, 2)["result"]["tools"]
+        .as_array()
+        .unwrap();
+    assert_eq!(tools.len(), DEFAULT_LISTED_TOOLS);
+    let tool = |name: &str| tools.iter().find(|tool| tool["name"] == name);
+    assert!(
+        tool("ssh_doctor").is_none(),
+        "a diagnostics tool is listed by default"
+    );
+    // A read-only tool says so; ssh_exec, which can do anything, says nothing.
+    assert_eq!(
+        tool("ssh_list_hosts").unwrap()["annotations"]["readOnlyHint"],
+        true
+    );
+    assert!(tool("ssh_exec").unwrap().get("annotations").is_none());
+
+    let doctor = response_with_id(&responses, 3);
+    assert!(doctor.get("error").is_none(), "{doctor}");
+    assert!(doctor["result"].get("isError").is_none(), "{doctor}");
+
+    let _ = std::fs::remove_dir_all(config_dir);
+}
+
+#[tokio::test]
+async fn mcp_tools_setting_lists_more_groups_or_all() {
+    let config_dir =
+        std::env::temp_dir().join(format!("agent2ssh-mcp-profile-{}", uuid::Uuid::new_v4()));
+    let request = [r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#];
+    let listed =
+        |responses: &[serde_json::Value]| responses[0]["result"]["tools"].as_array().unwrap().len();
+
+    let (all, _) = mcp_exchange_with_env(
+        &config_dir,
+        Some(("cli_smoke", "test-binding-key")),
+        &[("AGENT2SSH_MCP_TOOLS", "all")],
+        &request,
+    )
+    .await;
+    assert_eq!(listed(&all), ALL_TOOLS);
+
+    let (rules, _) = mcp_exchange_with_env(
+        &config_dir,
+        Some(("cli_smoke", "test-binding-key")),
+        &[("AGENT2SSH_MCP_TOOLS", "rules")],
+        &request,
+    )
+    .await;
+    // core plus the 13 redaction / highlight / algorithm tools.
+    assert_eq!(listed(&rules), DEFAULT_LISTED_TOOLS + 13);
+
+    let _ = std::fs::remove_dir_all(config_dir);
+}
+
+/// The protocol defines `structuredContent` as an object, and a strict client
+/// validates it as one — an array makes it reject the whole result. These are
+/// the tools whose natural answer is a list; each must still come back as an
+/// object (the list wrapped under `result`) with the list itself in the text.
+#[tokio::test]
+async fn mcp_structured_content_is_an_object_even_for_list_tools() {
+    let config_dir =
+        std::env::temp_dir().join(format!("agent2ssh-mcp-structured-{}", uuid::Uuid::new_v4()));
+    let list_tools = [
+        ("ssh_list_hosts", "{}"),
+        ("ssh_list_daemons", "{}"),
+        ("ssh_audit", "{}"),
+        ("ssh_session_list", "{}"),
+        ("ssh_forward_list", "{}"),
+        ("ssh_approval_list", "{}"),
+        ("ssh_playbook_list", "{}"),
+        ("ssh_snippet_list", "{}"),
+        ("ssh_connection_status", "{}"),
+        ("ssh_doctor", "{}"),
+        ("ssh_redact_rule_list", "{}"),
+        ("ssh_highlight_rule_list", "{}"),
+        ("ssh_approval_policies_list", "{}"),
+        ("ssh_ping", r#"{"hosts":[]}"#),
+    ];
+    let requests: Vec<String> = list_tools
+        .iter()
+        .enumerate()
+        .map(|(index, (tool, arguments))| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":{},"method":"tools/call","params":{{"name":"{tool}","arguments":{arguments}}}}}"#,
+                index + 1
+            )
+        })
+        .collect();
+    let requests: Vec<&str> = requests.iter().map(String::as_str).collect();
+    let (responses, status) = mcp_exchange_with_env(
+        &config_dir,
+        Some(("cli_smoke", "test-binding-key")),
+        &[("AGENT2SSH_MCP_TOOLS", "all")],
+        &requests,
+    )
+    .await;
+    assert!(status.success());
+
+    for (index, (tool, _)) in list_tools.iter().enumerate() {
+        let response = response_with_id(&responses, index as u64 + 1);
+        let result = &response["result"];
+        assert!(
+            result["structuredContent"].is_object(),
+            "{tool}: structuredContent is not an object: {response}"
+        );
+        // The text the model reads is the list itself, not the wrapper.
+        let text: serde_json::Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap())
+                .unwrap_or_else(|error| panic!("{tool}: text is not JSON ({error}): {response}"));
+        assert!(
+            text.is_array(),
+            "{tool}: expected a list in the text: {text}"
+        );
+        assert_eq!(result["structuredContent"]["result"], text, "{tool}");
+    }
+
+    let _ = std::fs::remove_dir_all(config_dir);
+}
+
+/// `initialize` answers with the revision the client asked for when the server
+/// speaks it, and the newest it speaks otherwise — it used to answer every
+/// client with one fixed revision.
+#[tokio::test]
+async fn mcp_initialize_negotiates_the_protocol_revision() {
+    let config_dir =
+        std::env::temp_dir().join(format!("agent2ssh-mcp-version-{}", uuid::Uuid::new_v4()));
+    let (responses, status) = mcp_exchange(
+        &config_dir,
+        Some(("cli_smoke", "test-binding-key")),
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":"2099-01-01"}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"initialize","params":{}}"#,
+        ],
+    )
+    .await;
+    assert!(status.success());
+
+    let version = |id| {
+        response_with_id(&responses, id)["result"]["protocolVersion"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(version(1), "2024-11-05");
+    assert_eq!(version(2), "2025-03-26");
+    assert_eq!(
+        version(3),
+        "2025-06-18",
+        "an unknown revision gets the newest"
+    );
+    assert_eq!(version(4), "2025-06-18", "no revision gets the newest");
+
+    let _ = std::fs::remove_dir_all(config_dir);
 }

@@ -22,6 +22,11 @@ use std::sync::OnceLock;
 /// about how many connections were made.
 pub mod ssh_proxy;
 
+/// A real daemon process and an MCP server bound to it. Gated because the
+/// daemon binary only exists under the `daemon` feature.
+#[cfg(feature = "daemon")]
+pub mod daemon;
+
 /// The isolated directory chosen at process start (or the caller's own, if
 /// `AGENT2SSH_CONFIG_DIR` was already set to something other than the real dir).
 static DEFAULT_CONFIG_DIR: OnceLock<std::ffi::OsString> = OnceLock::new();

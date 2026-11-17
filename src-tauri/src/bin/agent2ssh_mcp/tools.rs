@@ -88,8 +88,21 @@ pub(super) struct ToolCall {
     pub(super) args: Value,
 }
 
+/// What `tools/list` offers: the registry narrowed to the configured profile
+/// (see `catalog`), each tool with its annotations. Every tool in the registry
+/// remains callable by name whether or not it is listed.
 pub(super) fn tools_list() -> Vec<Value> {
-    tool_definitions()
+    super::agent2ssh_mcp_catalog::listed_tools(
+        tool_definitions(),
+        &super::agent2ssh_mcp_catalog::Profile::from_env(),
+    )
+}
+
+/// What the server tells the model about itself at `initialize`.
+pub(super) fn server_instructions() -> String {
+    let profile = super::agent2ssh_mcp_catalog::Profile::from_env();
+    let hidden = tool_definitions().len() - tools_list().len();
+    super::agent2ssh_mcp_catalog::instructions(&profile, hidden)
 }
 
 pub(super) fn resolve_tool_call(name: &str, args: Value) -> Result<ToolCall, McpError> {
@@ -97,9 +110,9 @@ pub(super) fn resolve_tool_call(name: &str, args: Value) -> Result<ToolCall, Mcp
     let definition = definitions
         .iter()
         .find(|definition| definition.get("name").and_then(Value::as_str) == Some(name))
-        .ok_or_else(|| McpError::method_not_found(name))?;
+        .ok_or_else(|| McpError::unknown_tool(name))?;
     validate_required_args(definition, &args)?;
-    let tool = tool_kind(name).ok_or_else(|| McpError::method_not_found(name))?;
+    let tool = tool_kind(name).ok_or_else(|| McpError::unknown_tool(name))?;
     Ok(ToolCall { tool, args })
 }
 
@@ -198,16 +211,16 @@ fn validate_required_args(definition: &Value, args: &Value) -> Result<(), McpErr
     }
     let object = args
         .as_object()
-        .ok_or_else(|| McpError::internal("arguments must be an object"))?;
+        .ok_or_else(|| McpError::invalid_args("arguments must be an object"))?;
     for field in required.iter().filter_map(Value::as_str) {
         if object.get(field).is_none_or(Value::is_null) {
-            return Err(McpError::internal(format!("{field} required")));
+            return Err(McpError::invalid_args(format!("{field} required")));
         }
     }
     Ok(())
 }
 
-fn tool_definitions() -> Vec<Value> {
+pub(super) fn tool_definitions() -> Vec<Value> {
     json!([
                 {
                     "name": "ssh_list_hosts",
@@ -263,17 +276,17 @@ fn tool_definitions() -> Vec<Value> {
                 },
                 {
                     "name": "ssh_exec",
-                    "description": "Run a non-interactive command over SSH. Returns stdout, stderr, exit code, timing, and risk_level. High-risk commands require force=true; blocked commands always fail. Optionally forward to a remote daemon via daemon_alias.",
+                    "description": "Run a non-interactive command over SSH. The result is a header line (exit_code, duration_ms, risk_level, host) followed by stdout and stderr as printed; a non-zero exit code is a normal result, not an error. Output beyond max_output_bytes per stream is cut to its head and tail and the full text is saved to a local file named in the result. High-risk commands require force=true; blocked commands always fail. A failure is returned as an error result with a code in brackets (host_not_found, force_required, exec_timeout, ...) and a hint. Runs through the local Agent2SSH daemon when it is running: a command an approval policy covers then waits for a person to approve it in the desktop app, and fails with approval_rejected or approval_timed_out if they do not. Optionally forward to a remote daemon via daemon_alias.",
                     "inputSchema": {
                         "type": "object",
                         "required": ["host", "command"],
                         "properties": {
-                            "host":         { "type": "string" },
-                            "command":      { "type": "string" },
+                            "host":         { "type": "string", "description": "Host profile alias, as listed by ssh_list_hosts." },
+                            "command":      { "type": "string", "description": "The command line, run by the remote user's shell." },
                             "force":        { "type": "boolean", "description": "Set true to run high-risk commands." },
-                            "timeout_secs":     { "type": "integer", "description": "Kill the command after N seconds (default 60)." },
+                            "timeout_secs":     { "type": "integer", "description": "Stop waiting after N seconds (default 60). The error result carries the output printed so far. The remote process is NOT killed and may keep running; prefix the command with `timeout <secs>` when it must stop." },
                             "stdin":            { "type": "string", "description": "Pipe this string into the remote command's stdin." },
-                            "max_output_bytes": { "type": "integer", "description": "Truncate stdout to this many bytes (default 4 MiB)." },
+                            "max_output_bytes": { "type": "integer", "description": "How many bytes of stdout and of stderr the result carries inline (default 32768 each). Larger output keeps its head and tail; the full text is saved to a file named in the result." },
                             "daemon_alias":     { "type": "string", "description": "Forward this exec to a remote daemon by alias (omit or 'localhost' for local)." },
                             "reason":           { "type": "string", "description": "Optional reason/note for this operation (audit trail)." },
                             "change_id":        { "type": "string", "description": "Optional change/ticket ID for this operation (audit trail)." },
@@ -680,7 +693,7 @@ fn tool_definitions() -> Vec<Value> {
                 },
                 {
                     "name": "ssh_connect",
-                    "description": "Manually establish and retain an embedded SSH connection to a specific host.",
+                    "description": "Establish and retain an embedded SSH connection to a host. While it is retained, ssh_exec calls to that host reuse it — a channel instead of a new connection, so repeated commands are several times faster — and fall back to their own connection if it is unhealthy. Call this once before a series of commands on one host.",
                     "inputSchema": {
                         "type": "object",
                         "required": ["host"],
@@ -691,7 +704,7 @@ fn tool_definitions() -> Vec<Value> {
                 },
                 {
                     "name": "ssh_disconnect",
-                    "description": "Manually close a retained embedded SSH connection to a specific host.",
+                    "description": "Close a retained embedded SSH connection. Later ssh_exec calls to that host connect for themselves again.",
                     "inputSchema": {
                         "type": "object",
                         "required": ["host"],
@@ -1008,7 +1021,8 @@ fn tool_definitions() -> Vec<Value> {
                         "properties": {
                             "host":   { "type": "string", "description": "'local', 'local:<environment>' or 'local:<runtime>:<container-id>'." },
                             "command": { "type": "string", "description": "The command line to run." },
-                            "timeout_secs": { "type": "integer", "description": "Per-command timeout (default 60)." },
+                            "timeout_secs": { "type": "integer", "description": "Per-command timeout (default 60). At the deadline the process tree is killed and the error result carries the output printed so far." },
+                            "max_output_bytes": { "type": "integer", "description": "How many bytes of stdout and of stderr the result carries inline (default 32768 each). Larger output keeps its head and tail; the full text is saved to a file named in the result." },
                             "force": { "type": "boolean", "description": "Skip the approval prompt for a high-risk command." },
                             "reason": { "type": "string", "description": "Why this command runs; recorded in the audit entry." },
                             "change_id": { "type": "string", "description": "Change/ticket id for the audit entry." },
@@ -1039,7 +1053,8 @@ fn tool_definitions() -> Vec<Value> {
                         "properties": {
                             "session_id": { "type": "string", "description": "The id returned by resident_session_open." },
                             "command": { "type": "string", "description": "The command line to run inside the session's shell." },
-                            "timeout_secs": { "type": "integer", "description": "Per-command timeout (default 60)." },
+                            "timeout_secs": { "type": "integer", "description": "Per-command timeout (default 60). A command that outlives it kills the session." },
+                            "max_output_bytes": { "type": "integer", "description": "How many bytes of stdout and of stderr the result carries inline (default 32768 each). Larger output keeps its head and tail; the full text is saved to a file named in the result." },
                             "force": { "type": "boolean", "description": "Skip the approval prompt for a high-risk command." },
                             "reason": { "type": "string", "description": "Why this command runs; recorded in the audit entry." },
                             "change_id": { "type": "string", "description": "Change/ticket id for the audit entry." },

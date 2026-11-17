@@ -814,6 +814,18 @@ components:
       type: object
       properties:
         error: { type: string }
+        timed_out:
+          type: boolean
+          description: "Present and true only when `/exec` or `/local-exec` answers for a command that outlived `timeout_secs`. The three fields below accompany it."
+        partial_stdout:
+          type: string
+          description: "What the command wrote to stdout before the deadline, bounded by `max_output_bytes` like any other capture."
+        partial_stderr:
+          type: string
+          description: "What the command wrote to stderr before the deadline."
+        process_stopped:
+          type: boolean
+          description: "False for an SSH host — closing the channel does not stop the remote process, so it may still be running. True for a local target, whose process tree is reaped before the error is returned."
 
     ApprovalPolicy:
       type: object

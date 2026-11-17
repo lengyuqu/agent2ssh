@@ -17,182 +17,13 @@
 //! environment to the child rather than mutating its own, so these run in
 //! parallel safely.
 
-use std::net::TcpListener;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use agent2ssh::store::CONFIG_DIR_ENV;
 use agent2ssh::LOCAL_TARGET_ID;
 
-/// How long the daemon is given to answer `/health` before the test gives up.
-/// Generous because a cold start runs the secret migration and reads the config.
-const STARTUP_BUDGET: Duration = Duration::from_secs(30);
-
-/// A daemon process under test, torn down with its directory on drop.
-struct TestDaemon {
-    child: Child,
-    dir: PathBuf,
-    addr: String,
-    token: String,
-}
-
-impl TestDaemon {
-    fn start(label: &str) -> Self {
-        Self::start_seeded(label, None)
-    }
-
-    /// Start a daemon whose config dir already holds an `environments.toml`.
-    /// Seeded before the process exists because the daemon reads that file once,
-    /// at start — which is exactly what the tests below depend on.
-    fn start_with_environments(label: &str, environments: &str) -> Self {
-        Self::start_seeded(label, Some(environments))
-    }
-
-    fn start_seeded(label: &str, environments: Option<&str>) -> Self {
-        let _ = label;
-        #[cfg(target_os = "macos")]
-        let root = PathBuf::from("/tmp");
-        #[cfg(not(target_os = "macos"))]
-        let root = std::env::temp_dir();
-        let dir = tempfile::Builder::new()
-            .prefix("a2sl-")
-            .tempdir_in(root)
-            .expect("create the throwaway config dir")
-            .keep();
-
-        // Written before the daemon starts: `load_or_create_daemon_token` keeps
-        // an existing non-empty token, so the test knows it up front instead of
-        // racing the daemon to the file.
-        let token = format!("local-exec-e2e-token-{}", std::process::id());
-        std::fs::write(dir.join("daemon.token"), &token).expect("seed daemon.token");
-        if let Some(environments) = environments {
-            std::fs::write(
-                dir.join(agent2ssh::local_environments::ENVIRONMENTS_FILE),
-                environments,
-            )
-            .expect("seed environments.toml");
-        }
-
-        let addr = free_loopback_addr();
-        let child = Self::spawn(&dir, &addr);
-        let mut daemon = Self {
-            child,
-            dir,
-            addr,
-            token,
-        };
-        for attempt in 0..5 {
-            match daemon.wait_until_serving() {
-                Ok(()) => return daemon,
-                Err((true, _)) if attempt < 4 => {
-                    daemon.addr = free_loopback_addr();
-                    daemon.child = Self::spawn(&daemon.dir, &daemon.addr);
-                }
-                Err((_, detail)) => panic!("{detail}"),
-            }
-        }
-        unreachable!()
-    }
-
-    fn spawn(dir: &std::path::Path, addr: &str) -> Child {
-        let stderr =
-            std::fs::File::create(dir.join("daemon.stderr")).expect("create daemon stderr");
-        Command::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"))
-            .env(CONFIG_DIR_ENV, dir)
-            .env("AGENT2SSH_DAEMON_ADDR", addr)
-            .env("AGENT2SSH_LOG", "warn")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(stderr))
-            .spawn()
-            .expect("spawn agent2ssh-daemon")
-    }
-
-    fn url(&self, path: &str) -> String {
-        format!("http://{}{}", self.addr, path)
-    }
-
-    fn client(&self) -> reqwest::blocking::Client {
-        reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()
-            .expect("build the http client")
-    }
-
-    /// Block until `/health` answers, which is the daemon's public liveness
-    /// route — no token needed, so this cannot accidentally pass on a 401.
-    fn wait_until_serving(&mut self) -> Result<(), (bool, String)> {
-        let probe = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_millis(500))
-            .build()
-            .expect("build the probe client");
-        let deadline = Instant::now() + STARTUP_BUDGET;
-        while Instant::now() < deadline {
-            if let Ok(response) = probe.get(self.url("/health")).send() {
-                if response.status().is_success() {
-                    if let Ok(body) = response.json::<serde_json::Value>() {
-                        if body["pid"].as_u64() == Some(u64::from(self.child.id())) {
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-            if let Some(status) = self.child.try_wait().expect("check daemon process") {
-                let stderr =
-                    std::fs::read_to_string(self.dir.join("daemon.stderr")).unwrap_or_default();
-                let collision = ["os error 48", "os error 98", "os error 10048"]
-                    .iter()
-                    .any(|code| stderr.contains(code))
-                    && !stderr.contains("private daemon socket");
-                return Err((
-                    collision,
-                    format!("daemon exited before health check: {status}; stderr: {stderr}"),
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        Err((
-            false,
-            format!("the daemon did not answer /health within {STARTUP_BUDGET:?}"),
-        ))
-    }
-
-    fn post_local_exec(&self, body: serde_json::Value) -> reqwest::blocking::Response {
-        self.client()
-            .post(self.url("/local-exec"))
-            .bearer_auth(&self.token)
-            .json(&body)
-            .send()
-            .expect("POST /local-exec")
-    }
-}
-
-impl Drop for TestDaemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
-
-/// A port nothing is listening on.
-///
-/// Bound and released immediately, which is inherently racy — but the
-/// alternative is a fixed port that collides with a developer's own running
-/// daemon, and the window here is a few microseconds wide.
-fn free_loopback_addr() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
-    let addr = listener.local_addr().expect("read the bound port");
-    drop(listener);
-    addr.to_string()
-}
-
-fn body_text(response: reqwest::blocking::Response) -> String {
-    let status = response.status();
-    let text = response.text().unwrap_or_default();
-    format!("status={status} body={text}")
-}
+mod common;
+use common::daemon::{body_text, result_text, McpSession, TestDaemon};
 
 #[test]
 fn local_exec_route_runs_a_command_on_the_daemon_host() {
@@ -513,4 +344,194 @@ fn local_exec_route_can_establish_a_visual_studio_shell() {
         "stdout was {:?}",
         body["stdout"]
     );
+}
+
+// ── What a harness sees ─────────────────────────────────────────────────────
+//
+// The tests below drive the MCP server against the real daemon, because the
+// contract they pin lives between the two: the daemon's error body has to carry
+// a timeout's partial output for the MCP result to show it, and only a command
+// that really runs can prove calls are concurrent or that a large output is
+// bounded and saved.
+
+/// A command that prints its marker, then stays busy past any timeout here.
+#[cfg(unix)]
+const PRINT_THEN_HANG: &str = "echo before-the-deadline; sleep 30";
+#[cfg(windows)]
+const PRINT_THEN_HANG: &str = "echo before-the-deadline& ping -n 30 127.0.0.1 >nul";
+
+/// A command that takes a few seconds, then prints.
+#[cfg(unix)]
+const SLOW_COMMAND: &str = "sleep 3; echo slow-done";
+#[cfg(windows)]
+const SLOW_COMMAND: &str = "ping -n 4 127.0.0.1 >nul & echo slow-done";
+
+/// A command that prints the numbers 1..=20000, one per line (~109 KiB).
+#[cfg(unix)]
+const LARGE_OUTPUT: &str = "seq 1 20000";
+#[cfg(windows)]
+const LARGE_OUTPUT: &str = "for /L %i in (1,1,20000) do @echo %i";
+
+#[test]
+fn local_exec_route_keeps_partial_output_on_timeout() {
+    let daemon = TestDaemon::start("timeout-partial");
+
+    let response = daemon.post_local_exec(serde_json::json!({
+        "host": LOCAL_TARGET_ID,
+        "command": PRINT_THEN_HANG,
+        "force": true,
+        "timeout_secs": 2,
+    }));
+    let status = response.status();
+    let body: serde_json::Value = response
+        .json()
+        .unwrap_or_else(|error| panic!("expected an error body, got {error} ({status})"));
+
+    assert_eq!(status, 400, "body: {body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("timed out after 2s"),
+        "body: {body}"
+    );
+    assert_eq!(body["timed_out"], true, "body: {body}");
+    assert_eq!(body["process_stopped"], true, "body: {body}");
+    assert!(
+        body["partial_stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("before-the-deadline"),
+        "body: {body}"
+    );
+}
+
+#[test]
+fn mcp_exec_answers_with_text_and_a_timeout_keeps_its_output() {
+    let daemon = TestDaemon::start("mcp-text");
+    let mut mcp = McpSession::start(&daemon);
+
+    mcp.call(
+        1,
+        "local_exec",
+        serde_json::json!({ "host": LOCAL_TARGET_ID, "command": "echo mcp-text-marker", "force": true }),
+    );
+    let response = mcp.next_response();
+    let text = result_text(&response);
+    assert!(text.starts_with("exit_code: 0 | "), "text was {text:?}");
+    assert!(
+        text.contains("\n[stdout]\nmcp-text-marker"),
+        "the output must be readable text, not a JSON string: {text:?}"
+    );
+    assert!(response["result"].get("isError").is_none(), "{response}");
+    assert_eq!(response["result"]["structuredContent"]["exit_code"], 0);
+
+    mcp.call(
+        2,
+        "local_exec",
+        serde_json::json!({
+            "host": LOCAL_TARGET_ID, "command": PRINT_THEN_HANG, "force": true, "timeout_secs": 2
+        }),
+    );
+    let response = mcp.next_response();
+    // A failed tool is a result the model reads, not a JSON-RPC error.
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(response["result"]["isError"], true, "{response}");
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["error"]["code"], "exec_timeout", "{response}");
+    assert_eq!(structured["timed_out"], true, "{response}");
+    assert_eq!(structured["process_stopped"], true, "{response}");
+    let text = result_text(&response);
+    assert!(text.starts_with("Error [exec_timeout]: "), "{text:?}");
+    assert!(text.contains("\nHint: "), "{text:?}");
+    assert!(
+        text.contains("[stdout before the timeout]\nbefore-the-deadline"),
+        "the timeout must keep what the command printed: {text:?}"
+    );
+}
+
+#[test]
+fn mcp_bounds_a_large_output_and_saves_the_rest() {
+    let daemon = TestDaemon::start("mcp-large");
+    let mut mcp = McpSession::start(&daemon);
+
+    mcp.call(
+        1,
+        "local_exec",
+        serde_json::json!({
+            "host": LOCAL_TARGET_ID, "command": LARGE_OUTPUT, "force": true, "timeout_secs": 120
+        }),
+    );
+    let response = mcp.next_response();
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["exit_code"], 0, "{response}");
+
+    let inline = structured["stdout"].as_str().expect("inline stdout");
+    let total = structured["stdout_total_bytes"]
+        .as_u64()
+        .expect("a clipped stream reports its full size") as usize;
+    assert!(total > 100_000, "the command printed only {total} bytes");
+    assert!(
+        inline.len() < 34 * 1024,
+        "the inline stdout was {} bytes, over the 32 KiB default",
+        inline.len()
+    );
+    // Head and tail both survive, around a marker naming what was left out.
+    assert!(inline.trim_start().starts_with('1'), "{:?}", &inline[..40]);
+    assert!(inline.trim_end().ends_with("20000"));
+    assert!(
+        inline.contains(" bytes omitted; full stdout ("),
+        "{inline:?}"
+    );
+
+    // The full capture is on disk where the agent's file tools can reach it.
+    let file = PathBuf::from(structured["stdout_file"].as_str().expect("a spill file"));
+    assert!(
+        file.starts_with(daemon.dir.join("outputs")),
+        "spilled to {file:?}"
+    );
+    let saved = std::fs::read_to_string(&file).expect("read the spilled output");
+    assert_eq!(saved.len(), total);
+    assert!(saved.contains("\n10000"), "the middle must be in the file");
+
+    // The text the model reads is the same bounded output.
+    let text = result_text(&response);
+    assert!(text.contains(&file.display().to_string()), "{text:?}");
+    assert!(text.len() < 36 * 1024, "the text was {} bytes", text.len());
+}
+
+#[test]
+fn mcp_runs_tool_calls_concurrently() {
+    let daemon = TestDaemon::start("mcp-concurrent");
+    let mut mcp = McpSession::start(&daemon);
+
+    let started = Instant::now();
+    mcp.call(
+        1,
+        "local_exec",
+        serde_json::json!({ "host": LOCAL_TARGET_ID, "command": SLOW_COMMAND, "force": true }),
+    );
+    mcp.call(
+        2,
+        "local_exec",
+        serde_json::json!({ "host": LOCAL_TARGET_ID, "command": "echo fast-done", "force": true }),
+    );
+
+    // Served one at a time, the quick call would wait out the slow one and
+    // answer second.
+    let first = mcp.next_response();
+    assert_eq!(
+        first["id"], 2,
+        "the quick call was held up by the slow one: {first}"
+    );
+    assert!(result_text(&first).contains("fast-done"));
+    assert!(
+        started.elapsed() < Duration::from_millis(2500),
+        "the quick call took {:?}",
+        started.elapsed()
+    );
+
+    let second = mcp.next_response();
+    assert_eq!(second["id"], 1);
+    assert!(result_text(&second).contains("slow-done"));
 }

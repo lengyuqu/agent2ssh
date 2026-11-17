@@ -71,6 +71,7 @@ fn authenticate_token(
         StatusCode::UNAUTHORIZED,
         Json(ErrorBody {
             error: "unauthorized".into(),
+            ..ErrorBody::default()
         }),
     ))
 }

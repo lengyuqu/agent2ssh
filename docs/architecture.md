@@ -30,7 +30,7 @@ Remote hosts
 | `src-tauri/src/highlight.rs` | Terminal highlight rules in `highlight_rules.json` — persistence only; the ANSI decoration happens in the frontend xterm.js layer, never in the PTY byte stream |
 | `src-tauri/src/session.rs` | Persistent PTY sessions |
 | `src-tauri/src/forward.rs` | SSH port forward tunnel management |
-| `src-tauri/src/connection.rs` | Retained embedded SSH connection management with keepalive/health/auto-reconnect supervisor (K5) and `~/.ssh/config` parser |
+| `src-tauri/src/connection.rs` | Retained embedded SSH connection management with keepalive/health/auto-reconnect supervisor (K5), `lease_session` (lends a healthy retained connection to an exec) and `~/.ssh/config` parser |
 | `src-tauri/src/secrets.rs` | App-managed encrypted credential store (K1): Argon2id master-password KDF + AES-256-GCM in `secrets.enc`; disk holds only a reference marker, no OS keychain |
 | `src-tauri/src/sftp_transfer.rs` | SFTP transfer cancellation registry + cancellable copy + resume-offset logic (K6) |
 | `src-tauri/src/telemetry.rs` | Opt-in, local-only crash/usage telemetry, off by default (K10) |
@@ -55,11 +55,11 @@ Remote hosts
 | `src-tauri/src/types.rs` | Shared types: `HostProfile`, `ExecRequest`, `ExecResult`, `RiskLevel`, etc. |
 | `src-tauri/src/tauri_commands.rs` | Tauri IPC commands wrapping the core |
 | `src-tauri/src/bin/agent2ssh.rs` | CLI binary |
-| `src-tauri/src/bin/agent2ssh-mcp.rs` | MCP stdio server (JSON-RPC 2.0, 76 tools) |
+| `src-tauri/src/bin/agent2ssh-mcp.rs` | MCP stdio server (JSON-RPC 2.0, 76 tools; `tools/list` offers the 26 `core` ones by default — `agent2ssh_mcp/catalog.rs` holds each tool's group and annotations, `AGENT2SSH_MCP_TOOLS` widens the listing) |
 | `src-tauri/src/bin/agent2ssh-daemon.rs` | Local HTTP/WebSocket daemon and browser console server |
 | `src/App.tsx` | Desktop console |
 | `src-tauri/web/console.html` | Daemon-served browser console |
-| `skills/agent2ssh/SKILL.md` | Operational guidance for agents using the CLI or MCP |
+| `skills/agent2ssh/SKILL.md`, `skills/agent2ssh/references/*.md` | Operational guidance for agents using the CLI or MCP: `SKILL.md` is the small entry file (what always applies, a "what to read" table, risk levels, a quick reference); each area's detail is a reference file the agent reads on demand |
 
 ## Surfaces
 
@@ -100,7 +100,7 @@ Connected WebSocket terminals receive an ephemeral `terminal_id`. The desktop ca
 `diagnostics.rs` is the shared structured-log core. `append_diagnostic_log(level, component, message, fields)` writes one redacted JSONL record per line to `~/.agent2ssh/app.log`, rotating inline at 5 MB (3 generations). All four surfaces feed it:
 
 - **Frontend** routes uncaught errors, unhandled promise rejections, and a top-level React `ErrorBoundary` (plus per-panel `catch` blocks via the `reportError` helper in `src/api.ts`) into the backend `write_diagnostic_log` command.
-- **MCP** logs every failed tool dispatch (method + tool name) before returning the JSON-RPC error.
+- **MCP** logs every failed tool dispatch (method + tool name) before answering. A tool that failed answers with a result carrying `isError` and a stable code, not a JSON-RPC error — see "Result contract" in `docs/skills.md`; only a request the server cannot dispatch (unknown method or tool, malformed params) is a JSON-RPC error.
 - **Daemon** composes a `tracing` layer that forwards `WARN`/`ERROR` events whose target starts with `agent2ssh` into `app.log`, so the daemon's structured logs are observable even when its stdout/stderr are not captured. Setting `AGENT2SSH_BRIDGE_DEPS` additionally bridges dependency-layer (`hyper`/`reqwest`/`russh`/…) warnings/errors for debugging transport issues (`1`/`true`/`all` = built-in prefix set, or a comma-separated custom list); those dependency entries are written via `append_diagnostic_log_no_sink` so they never re-enter the error-alert path (the webhook itself uses `reqwest`, which would otherwise loop). Its redirected stdout/stderr still land in `daemon.log`, which `daemon_control.rs` rotates at (re)start time. That file is the raw `tracing` output: `fmt::layer()` carries no redaction filter, so a field value logged at `info` level — the four exec handlers each log `command = %…` — appears verbatim, where the same text crossing the `WARN`/`ERROR` bridge into `app.log` would have gone through `redact_sensitive_text`.
 - **All binaries** install a process-wide panic hook (`install_panic_hook`) that records panics to `app.log` before the default stderr behavior.
 
@@ -147,7 +147,7 @@ For multi-host execution and playbooks, high-risk approvals are applied only to 
 5. Enforce approval policy or high-risk approval/force requirements.
 6. Execute the operation with approved-host or approved-step force only where applicable, then append the final audit entry for exec/mutation paths.
 
-The daemon approval handler creates an approval request and waits for approval, rejection, or timeout. It is the only approval handler in the repo: every daemon route authorizes through `authorize_command_inner`, which passes `request_and_wait_for_approval`, while the CLI, the MCP server and the desktop authorize through `*_without_approval_handler` and fail closed. So the instruction each of them prints names only what that path can actually do: `--force` for the high-risk branch where the subcommand has the flag, a remote `--daemon` alias where one works (`exec` forwards its work, `session` and `forward` always run on a daemon — local by default, remote with the alias, and MCP's `ssh_exec` forwards), and a daemon's own HTTP route where neither does. A local daemon is not part of the CLI `exec` path even when it is running. WebSocket exec streaming uses the same embedded SSH transport as non-streaming exec, so password, key, jump-host, and fingerprint behavior stay aligned.
+The daemon approval handler creates an approval request and waits for approval, rejection, or timeout. It is the only approval handler in the repo: every daemon route authorizes through `authorize_command_inner`, which passes `request_and_wait_for_approval`, while the CLI, the MCP server and the desktop authorize through `*_without_approval_handler` and fail closed. So the instruction each of them prints names only what that path can actually do: `--force` for the high-risk branch where the subcommand has the flag, a remote `--daemon` alias where one works (`exec` forwards its work, `session` and `forward` always run on a daemon — local by default, remote with the alias, and MCP's `ssh_exec` and `ssh_exec_multi` forward to the local daemon when it is reachable, falling back to the in-process fail-closed path only when it is not — never after the request has reached the daemon, since the command may already have run), and a daemon's own HTTP route where neither does. A local daemon is not part of the CLI `exec` path even when it is running. WebSocket exec streaming uses the same embedded SSH transport as non-streaming exec, so password, key, jump-host, and fingerprint behavior stay aligned.
 
 ## SSH Transport Status
 
@@ -165,7 +165,7 @@ Runtime SSH transport and local Ed25519 key generation do not depend on system `
 | WebSocket `/terminal` and REST/MCP/Tauri PTY sessions | Embedded `russh` terminal worker |
 | HTTP CONNECT / SOCKS5 proxy connections | Embedded TCP proxy handshake before SSH session handshake |
 | Jump-host / ProxyJump-style connections | Embedded `direct-tcpip` bastion channel |
-| Connection status/connect/disconnect | Retained embedded `russh` sessions |
+| Connection status/connect/disconnect | Retained embedded `russh` sessions; an SSH exec to a retained host borrows the session and opens a channel on it (`connection::lease_session`, falling back to a connection of its own) |
 | Local and remote port forwards | Embedded `direct-tcpip` forwarding |
 | Local SSH key generation | Embedded Rust key generator + OS CSPRNG |
 | Daemon process status/stop and health check | Rust process APIs + Rust HTTP client |
