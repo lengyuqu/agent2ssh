@@ -891,7 +891,7 @@ fn stop_refuses_a_daemon_named_process_without_authenticated_health() {
     let dir = tempfile::tempdir().unwrap();
     let executable = dir.path().join("agent2ssh-daemon");
     symlink("/bin/sleep", &executable).unwrap();
-    let mut child = Command::new(executable).arg("30").spawn().unwrap();
+    let mut child = Command::new(executable).arg("600").spawn().unwrap();
     let pid = child.id();
     wait_for_stand_in_to_be_named_daemon(pid);
     let silent = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1171,7 +1171,7 @@ fn recognized_process_with_a_different_health_pid_is_unverified() {
     let daemon = RunningDaemon::start("different-health-pid", &[]);
     let executable = daemon.dir.join("agent2ssh-daemon");
     symlink("/bin/sleep", &executable).unwrap();
-    let mut child = Command::new(executable).arg("30").spawn().unwrap();
+    let mut child = Command::new(executable).arg("600").spawn().unwrap();
     let pid = child.id();
     let recognized = process_is_alive(pid);
     let state = daemon_pid_state(pid);
@@ -1804,7 +1804,7 @@ fn stand_in_named_daemon(dir: &std::path::Path) -> Child {
     let _ = std::fs::remove_file(&named);
     std::os::unix::fs::symlink("/bin/sleep", &named).expect("a stand-in process");
     Command::new(&named)
-        .arg("30")
+        .arg("600")
         .spawn()
         .expect("a process to name")
 }
@@ -2270,7 +2270,7 @@ fn a_daemon_refuses_a_shutdown_that_names_another_process() {
     let own_pid = daemon.child.id();
     // A real process, so the assertion is about which PID it is rather than
     // about a number that merely fails to parse.
-    let stranger = Command::new("sleep").arg("30").spawn();
+    let stranger = Command::new("sleep").arg("600").spawn();
     let (stranger_pid, mut stranger_child) = match stranger {
         Ok(child) => (child.id(), Some(child)),
         // No `sleep` on PATH: any PID that is not ours exercises the same branch.
