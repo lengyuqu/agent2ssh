@@ -162,15 +162,19 @@ describe("ContainersPanel", () => {
     renderPanel();
     await waitFor(() => expect(mockApi.discoverContainers).toHaveBeenCalledWith({ all: false }));
 
-    fireEvent.click(screen.getByText("Include stopped"));
+    // The toggle is disabled while the first query is in flight, and React does
+    // not call a disabled button's onClick — so clicking as soon as the call was
+    // *issued* dropped the click on a slow runner and the re-query never
+    // happened. Waiting for the control to be usable is the actual precondition;
+    // a longer timeout alone would only have waited for a click that never came.
+    const toggle = screen.getByRole("button", { name: /Include stopped/ });
+    await waitFor(() =>
+      expect((toggle as HTMLButtonElement).disabled).toBe(false)
+    );
+    fireEvent.click(toggle);
 
-    // Three seconds, not the one-second default: the re-query goes through the
-    // same discovery chain as the first call, and on the Windows runner this
-    // case measured 1.03 s — a hair over the default, which turned a slow
-    // machine into a failing assertion rather than a slower pass.
-    await waitFor(
-      () => expect(mockApi.discoverContainers).toHaveBeenCalledWith({ all: true }),
-      { timeout: 3000 }
+    await waitFor(() =>
+      expect(mockApi.discoverContainers).toHaveBeenCalledWith({ all: true })
     );
   });
 
