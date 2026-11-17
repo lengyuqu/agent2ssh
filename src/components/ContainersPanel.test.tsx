@@ -164,7 +164,14 @@ describe("ContainersPanel", () => {
 
     fireEvent.click(screen.getByText("Include stopped"));
 
-    await waitFor(() => expect(mockApi.discoverContainers).toHaveBeenCalledWith({ all: true }));
+    // Three seconds, not the one-second default: the re-query goes through the
+    // same discovery chain as the first call, and on the Windows runner this
+    // case measured 1.03 s — a hair over the default, which turned a slow
+    // machine into a failing assertion rather than a slower pass.
+    await waitFor(
+      () => expect(mockApi.discoverContainers).toHaveBeenCalledWith({ all: true }),
+      { timeout: 3000 }
+    );
   });
 
   it("explains which runtimes are missing when the host has none", async () => {

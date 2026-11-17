@@ -104,8 +104,9 @@ describe("RedactionSettings", () => {
     // the empty value keeps this deterministic on a slow machine: asserting it
     // right after "the API was called" raced the state update that follows the
     // awaiting handler and failed on the Windows runner.
-    await waitFor(() =>
-      expect((screen.getByPlaceholderText("Pattern") as HTMLInputElement).value).toBe("")
+    await waitFor(
+      () => expect((screen.getByPlaceholderText("Pattern") as HTMLInputElement).value).toBe(""),
+      { timeout: 3000 }
     );
     expect(await screen.findByText("secret-project")).toBeTruthy();
   });
