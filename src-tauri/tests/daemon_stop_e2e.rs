@@ -890,29 +890,21 @@ fn stop_refuses_a_daemon_named_process_without_authenticated_health() {
     use std::os::unix::fs::symlink;
     let dir = tempfile::tempdir().unwrap();
     let executable = dir.path().join("agent2ssh-daemon");
-    symlink("/bin/sleep", &executable).unwrap();
-    let mut child = Command::new(executable).arg("600").spawn().unwrap();
+    // Same reasoning as `stand_in_named_daemon`: `cat` waits on the pipe this
+    // `Child` holds, where a `sleep` ends by itself on the Linux runner before
+    // the stop is even called.
+    symlink("/bin/cat", &executable).unwrap();
+    let mut child = Command::new(executable)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
     let pid = child.id();
     wait_for_stand_in_to_be_named_daemon(pid);
     let silent = TcpListener::bind("127.0.0.1:0").unwrap();
     std::env::set_var(CONFIG_DIR_ENV, dir.path());
     std::env::set_var(ADDR_ENV, silent.local_addr().unwrap().to_string());
     std::fs::write(dir.path().join("daemon.pid"), pid.to_string()).unwrap();
-    // Before the stop is the only way to tell "the process was already gone"
-    // from "the stop ended it" when the assertion below fails.
     let alive_before = process_is_alive(pid);
-    // Probe the stand-in while nothing else touches it. If it reaches `Z` here,
-    // the stop is innocent and something outside this case is ending it; if it
-    // stays `S` for a second and dies during the stop, the stop signalled a
-    // process it had just refused to stop.
-    for probe in 0..10 {
-        std::thread::sleep(Duration::from_millis(100));
-        eprintln!(
-            "stand-in probe {probe}: state={} alive={}",
-            process_state_letter(pid),
-            process_is_alive(pid)
-        );
-    }
     let started = Instant::now();
     let refused = stop_daemon_process(pid).expect_err("an unauthenticated daemon is not stopped");
     let elapsed = started.elapsed();
@@ -1182,9 +1174,13 @@ fn recognized_process_with_a_different_health_pid_is_unverified() {
     use std::os::unix::fs::symlink;
     let daemon = RunningDaemon::start("different-health-pid", &[]);
     let executable = daemon.dir.join("agent2ssh-daemon");
-    symlink("/bin/sleep", &executable).unwrap();
-    let mut child = Command::new(executable).arg("600").spawn().unwrap();
+    symlink("/bin/cat", &executable).unwrap();
+    let mut child = Command::new(executable)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
     let pid = child.id();
+    wait_for_stand_in_to_be_named_daemon(pid);
     let recognized = process_is_alive(pid);
     let state = daemon_pid_state(pid);
     let result = stop_daemon_process(pid);
@@ -1814,9 +1810,16 @@ fn local_health_response_parser_does_not_enforce_content_length() {
 fn stand_in_named_daemon(dir: &std::path::Path) -> Child {
     let named = dir.join("agent2ssh-daemon");
     let _ = std::fs::remove_file(&named);
-    std::os::unix::fs::symlink("/bin/sleep", &named).expect("a stand-in process");
+    // `cat` blocks on its stdin instead of counting down. A `sleep` here ends on
+    // its own: on a Linux runner the process was `Z` within a second of
+    // `execve`, at 30 s and at 600 s alike — and a fixture that exits by itself
+    // cannot witness a stop that refuses to signal it. Holding the write end of
+    // this pipe in the returned `Child` is what keeps the stand-in alive.
+    std::os::unix::fs::symlink("/bin/cat", &named).expect("a stand-in process");
     Command::new(&named)
-        .arg("600")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .expect("a process to name")
 }
