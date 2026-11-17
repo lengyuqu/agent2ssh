@@ -47,9 +47,14 @@ struct TestDaemon {
 
 impl TestDaemon {
     fn start(ssh_port: u16) -> Self {
+        // Short on purpose: the daemon binds a Unix socket under this directory,
+        // and macOS caps that path at 104 bytes (`SUN_LEN`). A readable
+        // `agent2ssh-sftp-approval-e2e-<uuid>` spelled out 108 with the runner's
+        // temp dir in front, so every daemon here died with "path may be too
+        // long" before it could serve `/health`.
         let dir = std::env::temp_dir().join(format!(
-            "agent2ssh-sftp-approval-e2e-{}",
-            uuid::Uuid::new_v4()
+            "a2s-sftp-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
         ));
         std::fs::create_dir_all(&dir).expect("create isolated config directory");
         let port = TcpListener::bind("127.0.0.1:0").expect("reserve daemon port");
@@ -93,6 +98,10 @@ impl TestDaemon {
         .unwrap();
         // No webhook.toml means the daemon's approval notification worker is
         // inert; this test neither sends external messages nor opens windows.
+        // Keep the daemon's own words: `Stdio::null()` here turned a startup
+        // failure into "exited before serving /health" with nothing to read.
+        let stderr =
+            std::fs::File::create(daemon.dir.join("daemon.stderr")).expect("create daemon stderr");
         daemon.child = Some(
             Command::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"))
                 .env(CONFIG_DIR_ENV, &daemon.dir)
@@ -101,7 +110,7 @@ impl TestDaemon {
                 .env("AGENT2SSH_LOG", "warn")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stderr(Stdio::from(stderr))
                 .spawn()
                 .expect("spawn real agent2ssh-daemon"),
         );
@@ -119,7 +128,8 @@ impl TestDaemon {
             }
             assert!(
                 daemon.child.as_mut().unwrap().try_wait().unwrap().is_none(),
-                "daemon exited before serving /health"
+                "daemon exited before serving /health: {}",
+                std::fs::read_to_string(daemon.dir.join("daemon.stderr")).unwrap_or_default()
             );
             thread::sleep(Duration::from_millis(50));
         }
