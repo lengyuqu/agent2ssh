@@ -1208,14 +1208,26 @@ fn recognized_process_with_a_different_health_pid_is_unverified() {
         "test process must match the daemon executable name"
     );
     assert_eq!(state, DaemonPidState::Unverified);
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains(if cfg!(target_os = "macos") {
-            "not bound"
-        } else {
-            "could not be authenticated"
-        }));
+    let message = result
+        .expect_err("an unverifiable daemon is not stopped")
+        .to_string();
+    // The wording names whichever observation lost the process first: a live
+    // stand-in with no authenticated health answer reads "could not be
+    // authenticated", while one the Linux runner has already reaped reads
+    // "cannot be safely identified". Both are refusals — the identity verdict
+    // asserted above is the part that must not move, and the message must still
+    // say the stop did not go ahead.
+    let accepted: &[&str] = if cfg!(target_os = "macos") {
+        &["not bound"]
+    } else if cfg!(target_os = "linux") {
+        &["could not be authenticated", "cannot be safely identified"]
+    } else {
+        &["could not be authenticated"]
+    };
+    assert!(
+        accepted.iter().any(|needle| message.contains(needle)),
+        "{message}"
+    );
     // Same platform limit as the refused-stop case above: the stand-in on the
     // Linux runner is gone by the time this runs, so only the platforms whose
     // stand-in outlives the call can assert it.
