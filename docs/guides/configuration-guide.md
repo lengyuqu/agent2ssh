@@ -1583,6 +1583,7 @@ shasum -a 256 -c <checksum> team-config.json
 | `AGENT2SSH_LOG_FORMAT` | daemon | `text` | daemon 控制台日志格式：`text` 或 `json`。 |
 | `AGENT2SSH_BRIDGE_DEPS` | daemon | 关闭（仅转 `agent2ssh*`） | 是否把依赖层（hyper/reqwest/russh/…）的 `WARN`/`ERROR` 也桥接进 `app.log`：`1`/`true`/`all` 用内置传输层前缀集，逗号分隔则自定义前缀，未设/`0`/`false` 关闭。依赖层事件不触发 error 告警（防回环），仅落盘排查传输问题用。 |
 | `AGENT2SSH_MASTER_PASSWORD` | CLI / MCP / daemon | 无 | 解锁 App 自建加密凭据库（`secrets.enc`，Argon2id + AES-256-GCM）的主密码（K1）。设置后这些无界面 surface 才能解密密码型主机的 SSH 密码；未设置时密码型主机不可用（密钥型/agent 认证不受影响）。桌面端改用启动解锁对话框，不读此变量。首次写入凭据时若已设此变量会用它初始化库。 |
+| `AGENT2SSH_AUTO_UNLOCK` | 全部 | 启用 | 是否用 OS 凭据库（macOS Keychain / Windows DPAPI）自动解封凭据库主密钥（K1 便利层）。设为 `0`/`false`/`no` 时关闭：锁定状态会一直保持到通过 `AGENT2SSH_MASTER_PASSWORD` 或桌面解锁对话框提供主密码，`secrets.enc` 的密码型主机在解锁前不可用。默认开启是为了让 daemon / MCP / CLI 在无人输入密码时也能解出凭据；关闭它意味着每次启动都要重新给密码，`host_secret_stdin` 等「锁定必须拒绝明文」的测试也用它构造真实的锁定态。 |
 | `AGENT2SSH_SECRETS_BACKEND` | 全部 | 生产 `encrypted`，测试 `memory` | 凭据库后端：`encrypted` 用真实加密库，`memory` 用进程内内存库（仅测试/无界面隔离用，重启即丢）。一般无需设置。 |
 | `AGENT2SSH_WEBDAV_URL` | CLI | 无 | WebDAV 同步 collection URL。也可写入 `webdav.toml` 或用 `agent2ssh webdav * --url` 传入。 |
 | `AGENT2SSH_WEBDAV_USERNAME` | CLI | 无 | WebDAV Basic Auth 用户名。 |
