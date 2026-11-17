@@ -217,8 +217,17 @@ jobs:
       # cancellation — with no panic message anywhere in the log. A bounded
       # command fails inside the job, keeps the run alive, and `--nocapture`
       # writes each panic to the log the moment it happens.
+      #
+      # The SSE case is split out while it is being diagnosed: it is the one
+      # that hangs on Linux, and separating it means a hang names itself instead
+      # of hiding behind whichever case ran last. Merge the two back once it
+      # passes.
       - name: Desktop daemon lifecycle end-to-end tests
-        run: timeout 480 cargo test --features daemon --test daemon_stop_e2e -- --test-threads=1 --nocapture
+        run: timeout 420 cargo test --features daemon --test daemon_stop_e2e -- --test-threads=1 --nocapture --skip stop_closes_an_active_event_stream_and_exits
+        working-directory: src-tauri
+
+      - name: Desktop daemon stop with an active event stream
+        run: timeout 120 cargo test --features daemon --test daemon_stop_e2e stop_closes_an_active_event_stream_and_exits -- --exact --nocapture
         working-directory: src-tauri
 
   build:

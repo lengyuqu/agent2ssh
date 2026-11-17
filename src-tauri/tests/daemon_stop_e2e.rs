@@ -1812,6 +1812,38 @@ fn stand_in_named_daemon(dir: &std::path::Path) -> Child {
         .expect("a process to name")
 }
 
+/// Wait until the process table describes the stand-in as a daemon.
+///
+/// `spawn` returns before `execve` replaces the forked image on Linux, so an
+/// immediate look sees the *test binary's* name and reads a perfectly good
+/// stand-in as a stranger — which is how this case reported "daemon PID N
+/// cannot be safely identified" on the runner while passing locally. Asking
+/// `/proc/<pid>/comm` is the direct question; the panic names what it actually
+/// read, so a different answer explains itself instead of timing out silently.
+fn wait_for_stand_in_to_be_named_daemon(pid: u32) {
+    #[cfg(target_os = "linux")]
+    {
+        let comm = format!("/proc/{pid}/comm");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen = String::new();
+        while Instant::now() < deadline {
+            seen = std::fs::read_to_string(&comm).unwrap_or_default();
+            if seen.trim() == "agent2ssh-daemon" {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("the stand-in never took the daemon name; /proc/{pid}/comm says {seen:?}");
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        // macOS and Windows publish the name before `spawn` returns; this is the
+        // margin the case has always used there.
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// A matching executable name is not proof of identity: an unrelated process
 /// can reuse the PID. This stub answers the old protocol — `200` to any body,
 /// including one carrying `expect_pid` — so the client cannot tell whether the
@@ -1840,8 +1872,7 @@ fn a_daemon_that_ignores_the_expected_pid_stops_and_says_so() {
     // something to name; the stub merely claims to be it.
     let mut host_process = stand_in_named_daemon(&dir);
     let pid = host_process.id();
-    // Give the kernel a moment to publish its start time.
-    std::thread::sleep(Duration::from_millis(200));
+    wait_for_stand_in_to_be_named_daemon(pid);
     let served_dir = std::fs::canonicalize(&dir)
         .expect("canonical config dir")
         .display()
@@ -1973,7 +2004,7 @@ fn stop_classifies_untrusted_receipts_without_claiming_authentication() {
         std::env::set_var(ADDR_ENV, listener.local_addr().unwrap().to_string());
         let child = Arc::new(Mutex::new(stand_in_named_daemon(&dir)));
         let pid = child.lock().unwrap().id();
-        std::thread::sleep(Duration::from_millis(200));
+        wait_for_stand_in_to_be_named_daemon(pid);
         let served_dir = std::fs::canonicalize(&dir).unwrap().display().to_string();
         let process = child.clone();
         let server = std::thread::spawn(move || {
