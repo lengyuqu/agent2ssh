@@ -22,6 +22,14 @@ fn run(dir: &std::path::Path, args: &[&str], input: &[u8], master: bool) -> Outp
         .args(args)
         .env("AGENT2SSH_CONFIG_DIR", dir)
         .env("AGENT2SSH_SECRETS_BACKEND", "encrypted")
+        // The subject here is the locked/unlocked contract, so "locked" has to
+        // mean locked. Auto-unlock wraps the derived key in the OS credential
+        // store, and on macOS that entry is process-wide rather than per config
+        // dir: a case that unlocks once leaves the wrap behind, the next case
+        // re-unlocks silently, and `--password` no longer fails closed. Turning
+        // the convenience layer off makes `master` the only way in, on every
+        // platform.
+        .env("AGENT2SSH_AUTO_UNLOCK", "0")
         .env_remove("AGENT2SSH_MASTER_PASSWORD")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

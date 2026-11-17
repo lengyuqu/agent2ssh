@@ -820,11 +820,33 @@ fn autounlock_path() -> Result<std::path::PathBuf> {
 
 static AUTOUNLOCK_TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Opt-out for the OS-wrapped key.
+///
+/// `AGENT2SSH_AUTO_UNLOCK=0` (also `false` / `no`) makes a locked store stay
+/// locked until a master password arrives through `AGENT2SSH_MASTER_PASSWORD`
+/// or the desktop prompt.
+///
+/// It exists because auto-unlock makes "locked" an almost unreachable state on
+/// a machine whose vault has been unlocked once: the wrap sits in the OS
+/// credential store, so the next process unlocks without anyone typing
+/// anything. That is the point of the layer, but it also means the locked
+/// branch is untestable there — this is how a test, or a user who does not
+/// accept same-user processes decrypting their vault, says no.
+fn auto_unlock_disabled() -> bool {
+    matches!(
+        std::env::var("AGENT2SSH_AUTO_UNLOCK")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "0" | "false" | "no"
+    )
+}
+
 /// Unlock the store from the OS-wrapped key, once per process. Subsequent
 /// calls are no-ops so a deliberate `lock` stays locked and failed attempts
 /// fall back to the master-password prompt instead of retrying forever.
 pub fn try_auto_unlock() -> bool {
-    if backend_is_memory() {
+    if backend_is_memory() || auto_unlock_disabled() {
         return false;
     }
     if cached_key().is_some() {
