@@ -1828,7 +1828,12 @@ fn wait_for_stand_in_to_be_named_daemon(pid: u32) {
         let mut seen = String::new();
         while Instant::now() < deadline {
             seen = std::fs::read_to_string(&comm).unwrap_or_default();
-            if seen.trim() == "agent2ssh-daemon" {
+            // A prefix, not the whole name: Linux cuts `comm` to 15 bytes
+            // counting the terminator, so the daemon arrives as
+            // "agent2ssh-daemo" and equality would never become true. The
+            // question here is only whether `execve` has replaced the forked
+            // image yet.
+            if seen.trim().len() >= 14 && seen.trim().starts_with("agent2ssh-daemo") {
                 return;
             }
             std::thread::sleep(Duration::from_millis(20));

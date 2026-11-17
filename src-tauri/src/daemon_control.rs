@@ -332,11 +332,40 @@ fn is_daemon_executable(value: &std::ffi::OsStr) -> bool {
 fn process_looks_like_daemon(process: &sysinfo::Process) -> bool {
     // The name remains useful on Windows when reading the command line is
     // denied; on Linux it may be truncated, so also inspect argv[0].
-    is_daemon_executable(process.name())
+    if is_daemon_executable(process.name())
         || process
             .cmd()
             .first()
             .is_some_and(|arg| is_daemon_executable(arg))
+    {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Linux cuts `/proc/<pid>/comm` to 15 bytes *counting the terminator*,
+        // so "agent2ssh-daemon" arrives as "agent2ssh-daemo" and the name check
+        // above can never match the real daemon. `cmd()` is the intended
+        // fallback, but it is only as reliable as the refresh kind that asked
+        // for it — measured empty on a runner for a process that had been
+        // running for seconds. argv[0] is the same fact read directly, with no
+        // cache between deciding and asking.
+        if let Some(argv0) = linux_cmdline_argv0(process.pid().as_u32()) {
+            return is_daemon_executable(&argv0);
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn linux_cmdline_argv0(pid: u32) -> Option<std::ffi::OsString> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let argv0 = raw.split(|byte| *byte == 0).next()?;
+    if argv0.is_empty() {
+        return None;
+    }
+    Some(std::ffi::OsString::from(
+        String::from_utf8_lossy(argv0).into_owned(),
+    ))
 }
 
 pub fn daemon_health_ok() -> bool {
