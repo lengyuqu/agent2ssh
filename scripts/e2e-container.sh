@@ -107,6 +107,11 @@ PASS=0
 FAIL=0
 SKIP=0
 REQUIRED_PASS=0
+# How many `ok` calls this script is expected to make. Bump it whenever a
+# mandatory section is added — the assertion at the end exists to catch a whole
+# section silently not running (a missing daemon, an unbuilt binary), which
+# would otherwise leave every remaining check green and the script exiting 0.
+EXPECTED_REQUIRED=11
 note()  { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 ok()    { PASS=$((PASS+1)); REQUIRED_PASS=$((REQUIRED_PASS+1)); printf '  \033[32mPASS\033[0m %s\n' "$*"; }
 ok_optional() { PASS=$((PASS+1)); printf '  \033[32mPASS\033[0m %s\n' "$*"; }
@@ -413,8 +418,8 @@ fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 # The independent system-ssh cross-check cannot substitute for a required check.
-if [[ "$REQUIRED_PASS" != 8 ]]; then
-  bad "expected 8 mandatory checks to pass, got $REQUIRED_PASS"
+if [[ "$REQUIRED_PASS" != "$EXPECTED_REQUIRED" ]]; then
+  bad "expected $EXPECTED_REQUIRED mandatory checks to pass, got $REQUIRED_PASS"
 fi
 note "Summary"
 printf '  runtime: %s (%s)\n' "${RT_ID:-unknown}" "$RT_BIN"

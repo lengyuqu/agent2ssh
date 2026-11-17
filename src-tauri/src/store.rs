@@ -2026,6 +2026,12 @@ mod tests {
 
     #[test]
     fn redaction_covers_credential_shaped_commands() {
+        // The live path reads `redact_rules.json` out of the config dir and
+        // seeds it on first use, so this test owns a directory: without one it
+        // races with every test that points the process-wide
+        // `AGENT2SSH_CONFIG_DIR` at a scratch directory and deletes it on drop,
+        // which surfaced as `[REDACTION UNAVAILABLE]`.
+        let _config = TestConfigDir::new("redact-credential-shaped");
         // mysql glued -p<pw>: redacted only in the mysql/mongo context.
         assert_eq!(
             redact_sensitive_text("mysql -uroot -pS3cret db"),

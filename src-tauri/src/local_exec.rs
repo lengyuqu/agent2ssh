@@ -203,10 +203,19 @@ pub(crate) fn check_exec_depth() -> Result<u32> {
 
 /// Lowercased file name with a trailing `.exe` removed, so `pwsh.exe` and
 /// `pwsh` classify the same way.
+///
+/// Both separators are accepted, and that is deliberate: `Path::file_name`
+/// splits on the *host* separator only, so a Windows path reaching a Unix build
+/// (a fixture in a test, or a profile written on another machine) would keep its
+/// directories in the "file name" and every lookup would miss. The strings here
+/// identify a shell binary, never a file this process opens, so treating `\` as
+/// a separator everywhere describes them correctly on every host — and makes the
+/// Git Bash selection testable without a Windows runner.
 fn file_stem_lower(path: &Path) -> String {
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
+    let raw = path.to_string_lossy();
+    let name = raw
+        .rsplit(['/', '\\'])
+        .next()
         .unwrap_or("")
         .to_ascii_lowercase();
     name.strip_suffix(".exe").unwrap_or(&name).to_string()

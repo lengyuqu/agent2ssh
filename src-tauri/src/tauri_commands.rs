@@ -4441,7 +4441,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn structured_sftp_listing_requires_desktop_authorization_before_connecting() {
+    async fn structured_sftp_listing_does_not_stop_for_an_agent_approval_policy() {
         let _config = crate::store::TestConfigDir::new("desktop-sftp-list-authorization");
         crate::approval::save_approval_policies(&[crate::approval::ApprovalPolicy {
             name: "approve directory reads".into(),
@@ -4454,13 +4454,20 @@ mod tests {
         }])
         .unwrap();
 
-        // This host deliberately has no profile: bypassing authorization would
-        // fail in host resolution instead, so assert the reason, not just Err.
+        // The click is the human decision (eeec4b3): a policy that stops an
+        // agent-facing surface for a card must not stop the desktop, because
+        // there is no desktop approval handler to answer it. The call therefore
+        // passes authorization and fails later, in host resolution — and the
+        // error saying so is what proves authorization did not reject it.
+        //
+        // This host deliberately has no profile, so `unknown host profile` is
+        // the expected end of the request; anything mentioning approval would
+        // mean the desktop gate started asking again.
         let error = sftp_read_dir("listing-test".into(), "/a  directory".into(), Some(1))
             .await
             .unwrap_err();
-        assert!(error.contains("approval required"), "{error}");
-        assert!(error.contains("daemon approval flow"), "{error}");
+        assert!(error.contains("unknown host profile"), "{error}");
+        assert!(!error.contains("approval required"), "{error}");
     }
 
     #[test]
