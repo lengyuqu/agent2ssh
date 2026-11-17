@@ -372,12 +372,25 @@ const LARGE_OUTPUT: &str = "seq 1 20000";
 #[cfg(windows)]
 const LARGE_OUTPUT: &str = "for /L %i in (1,1,20000) do @echo %i";
 
+/// The host the three platform-specific commands above run on.
+///
+/// `local` means "whatever this app would open as a terminal", and on the
+/// Windows runners that is PowerShell 7 — a different language from the `cmd`
+/// verbs those constants are written in. Naming `local:cmd` keeps the
+/// assertions about exec (partial output, bounding, concurrency) from depending
+/// on which shell a runner happens to default to; a POSIX default already
+/// matches the Unix spellings.
+#[cfg(unix)]
+const LOCAL_HOST: &str = LOCAL_TARGET_ID;
+#[cfg(windows)]
+const LOCAL_HOST: &str = "local:cmd";
+
 #[test]
 fn local_exec_route_keeps_partial_output_on_timeout() {
     let daemon = TestDaemon::start("timeout-partial");
 
     let response = daemon.post_local_exec(serde_json::json!({
-        "host": LOCAL_TARGET_ID,
+        "host": LOCAL_HOST,
         "command": PRINT_THEN_HANG,
         "force": true,
         "timeout_secs": 2,
@@ -430,7 +443,7 @@ fn mcp_exec_answers_with_text_and_a_timeout_keeps_its_output() {
         2,
         "local_exec",
         serde_json::json!({
-            "host": LOCAL_TARGET_ID, "command": PRINT_THEN_HANG, "force": true, "timeout_secs": 2
+            "host": LOCAL_HOST, "command": PRINT_THEN_HANG, "force": true, "timeout_secs": 2
         }),
     );
     let response = mcp.next_response();
@@ -459,7 +472,7 @@ fn mcp_bounds_a_large_output_and_saves_the_rest() {
         1,
         "local_exec",
         serde_json::json!({
-            "host": LOCAL_TARGET_ID, "command": LARGE_OUTPUT, "force": true, "timeout_secs": 120
+            "host": LOCAL_HOST, "command": LARGE_OUTPUT, "force": true, "timeout_secs": 120
         }),
     );
     let response = mcp.next_response();
@@ -509,7 +522,7 @@ fn mcp_runs_tool_calls_concurrently() {
     mcp.call(
         1,
         "local_exec",
-        serde_json::json!({ "host": LOCAL_TARGET_ID, "command": SLOW_COMMAND, "force": true }),
+        serde_json::json!({ "host": LOCAL_HOST, "command": SLOW_COMMAND, "force": true }),
     );
     mcp.call(
         2,
