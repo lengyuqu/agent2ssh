@@ -317,7 +317,7 @@ pub fn list_environments() -> Vec<LocalEnvironmentInfo> {
 
     let registry = current();
     let custom = registry.ids().into_iter().filter_map(|id| {
-        let env = registry.get(&id)?;
+        let env = registry.get(id)?;
         Some(LocalEnvironmentInfo {
             id: format!("local:{id}"),
             builtin: false,

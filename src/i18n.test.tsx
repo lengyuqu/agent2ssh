@@ -46,7 +46,7 @@ const SOURCES = import.meta.glob("./**/*.{ts,tsx}", {
 // are the same character at runtime; the dictionary must be compared after that
 // unescaping, or every quoted string in the UI reads as a missing key.
 const ESCAPES: Record<string, string> = { n: "\n", r: "\r", t: "\t", "0": "\0" };
-function unescape(raw: string): string {
+function unescapeLiteral(raw: string): string {
   return raw.replace(/\\(.)/g, (_match, char: string) => ESCAPES[char] ?? char);
 }
 
@@ -67,11 +67,12 @@ function literalCallSites(): CallSite[] {
     // routinely split across lines by prettier (26 sites did when this was
     // written, all in long help strings), and a per-line scan drops them
     // without a word -- the key then goes unchecked for good.
+    // `matchAll` starts from the source regex's `lastIndex`, and CALL is shared
+    // with the exec loop further down, so reset it rather than rely on it being 0.
     CALL.lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = CALL.exec(text)) !== null) {
+    for (const match of text.matchAll(CALL)) {
       sites.push({
-        key: unescape(match[1] ?? match[2] ?? ""),
+        key: unescapeLiteral(match[1] ?? match[2] ?? ""),
         where: `${file.replace(/^\.\//, "")}:${lineOf(text, match.index)}`,
       });
     }

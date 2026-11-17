@@ -244,9 +244,7 @@ pub fn master_password() -> Option<String> {
     if backend_is_memory() {
         return None;
     }
-    if cached_key().is_none() {
-        return None;
-    }
+    cached_key()?;
     master_password_cell()
         .lock()
         .expect("master password lock poisoned")
@@ -806,11 +804,16 @@ pub fn is_unlocked() -> bool {
 // safeStorage: same-user processes can decrypt, which is the boundary the
 // desktop already assumes.
 
+// Only the Windows DPAPI path keeps its wrapped key in a file; the macOS path
+// uses the Keychain and the others have no auto-unlock, so these are compiled
+// where they are used and nowhere else (they were dead code elsewhere).
+#[cfg(target_os = "windows")]
 const AUTOUNLOCK_FILE: &str = "autounlock.bin";
 
 #[cfg(target_os = "macos")]
 const AUTOUNLOCK_KEYCHAIN_SERVICE: &str = "agent2ssh autounlock";
 
+#[cfg(target_os = "windows")]
 fn autounlock_path() -> Result<std::path::PathBuf> {
     Ok(config_dir()?.join(AUTOUNLOCK_FILE))
 }

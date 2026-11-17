@@ -499,7 +499,13 @@ fn aes_128_cbc_decrypt(password: &str, ciphertext: &[u8]) -> Result<Vec<u8>> {
     let mut plain = Vec::with_capacity(ciphertext.len());
     for chunk in ciphertext.chunks_exact(block_size) {
         let mut block = chunk.to_vec();
-        cipher.decrypt_block(aes::cipher::Block::<Aes128>::from_mut_slice(&mut block));
+        // `chunks_exact(block_size)` guarantees the length, so this cannot fail;
+        // the conversion is `TryFrom` because `from_mut_slice` is deprecated.
+        let block_ref: &mut aes::cipher::Block<Aes128> = block
+            .as_mut_slice()
+            .try_into()
+            .map_err(|_| anyhow!("AES block has the wrong length"))?;
+        cipher.decrypt_block(block_ref);
         for (index, byte) in block.iter().enumerate() {
             plain.push(byte ^ previous[index]);
         }
