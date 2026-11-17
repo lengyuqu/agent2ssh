@@ -1438,6 +1438,10 @@ fn write_all_channel(
 #[derive(Debug)]
 pub(crate) struct ExecTimeout {
     pub(crate) timeout_secs: u64,
+    /// What the command printed before the deadline. `None` only between the
+    /// drain loop raising the timeout and `run_command_capture` attaching the
+    /// accumulators it owns.
+    pub(crate) partial: Option<crate::exec_capture::PartialCapture>,
 }
 
 impl std::fmt::Display for ExecTimeout {
@@ -1506,6 +1510,100 @@ const DRAIN_IDLE_SLEEP: Duration = Duration::from_millis(5);
 /// command has already been drained to EOF. Without it libssh2 blocks forever.
 pub(crate) const TEARDOWN_TIMEOUT_MS: u32 = 30_000;
 
+/// How long a borrowed connection gets to open a channel before it is taken for
+/// dead. Opening one is a single round trip to a live server, so five seconds is
+/// generous; a connection that has silently gone away (a NAT mapping that
+/// expired, a laptop that slept) would otherwise cost the full command timeout
+/// before the exec fell back to a fresh connection.
+const LEASE_OPEN_TIMEOUT_MS: u32 = 5_000;
+
+/// Bound on closing a channel that is being abandoned on a borrowed connection
+/// (a timeout, a cancellation, an error after the command was sent).
+const LEASE_RELEASE_TIMEOUT_MS: u32 = 5_000;
+
+/// One exec channel, and whether the connection under it is ours to tear down.
+///
+/// A connection this exec opened is simply aborted on any failure, as it always
+/// was. A borrowed one (see [`crate::connection::lease_session`]) is shared, so
+/// a failure must free only this channel: an SSH server caps the channels per
+/// connection (`MaxSessions`, 10 by default), and a channel left open on a
+/// retained connection is a slot gone for good. `Drop` does that, which is what
+/// lets every early `?` below stay a plain `?`.
+struct ExecChannel {
+    session: Session,
+    channel: crate::transport::Channel,
+    /// True when this exec opened the connection and may abort it.
+    owned: bool,
+    /// Set once the channel has closed on its own, so `Drop` has nothing to do.
+    finished: bool,
+}
+
+impl ExecChannel {
+    /// Stop the command's connection on a failure. Only an owned connection is
+    /// aborted; a borrowed one is left running for its other users and this
+    /// channel is closed by `Drop`.
+    fn abandon(&self) {
+        if self.owned {
+            self.session.abort();
+        }
+    }
+}
+
+impl Drop for ExecChannel {
+    fn drop(&mut self) {
+        if self.owned || self.finished {
+            return;
+        }
+        // Best effort. If the peer is wedged the bounded close times out and
+        // aborts the connection, which is then rightly gone for everyone.
+        self.session.set_timeout(LEASE_RELEASE_TIMEOUT_MS);
+        let _ = self.channel.close();
+    }
+}
+
+/// Open the channel an exec runs on: on `reuse` if it offers one, else on a
+/// connection of its own.
+///
+/// Falling back is only safe because nothing has been sent yet — a borrowed
+/// connection that cannot open a channel (dead, or already holding its maximum)
+/// has not seen the command. Once the command is on the wire this function is
+/// done, and a failure after that point is the caller's error to report.
+fn open_exec_channel(
+    host: &HostProfile,
+    timeout_secs: u64,
+    shutdown: Option<&crate::ws_drain::ShutdownToken>,
+    reuse: Option<Session>,
+) -> Result<ExecChannel> {
+    if let Some(lease) = reuse {
+        lease.set_timeout(LEASE_OPEN_TIMEOUT_MS);
+        if let Ok(channel) = lease.channel_session() {
+            lease.set_timeout(session_timeout_ms(timeout_secs));
+            return Ok(ExecChannel {
+                session: lease,
+                channel,
+                owned: false,
+                finished: false,
+            });
+        }
+        // A shutdown during the attempt is reported as one by the checks below.
+    }
+    let session = connect_embedded_ssh(host, timeout_secs)
+        .map_err(|error| map_shutdown_error(error, shutdown, None, false))?;
+    if shutdown.is_some_and(|token| token.is_cancelled_now()) {
+        session.abort();
+        return Err(ExecShutdown::BEFORE_DISPATCH.into());
+    }
+    let channel = session
+        .channel_session()
+        .map_err(|error| map_shutdown_error(error, shutdown, Some(&session), false))?;
+    Ok(ExecChannel {
+        session,
+        channel,
+        owned: true,
+        finished: false,
+    })
+}
+
 /// Run `command` over SSH and capture both output streams.
 ///
 /// `timeout_secs` bounds the command itself, starting once it has been sent —
@@ -1519,41 +1617,58 @@ pub(crate) fn run_command_capture(
     max_bytes: usize,
     shutdown: Option<crate::ws_drain::ShutdownToken>,
 ) -> Result<CapturedExec> {
+    run_command_capture_on(
+        host,
+        command,
+        stdin,
+        timeout_secs,
+        max_bytes,
+        shutdown,
+        None,
+    )
+}
+
+/// [`run_command_capture`] on a connection somebody else keeps open.
+///
+/// `reuse` is a lease from [`crate::connection::lease_session`]: the same live
+/// connection with blocking and timeout state of its own. The command gets a
+/// fresh channel on it, which saves the TCP connect, the key exchange and the
+/// authentication — and, for a host behind a jump host, the whole chain of them.
+/// If the lease cannot open a channel the exec quietly uses a connection of its
+/// own, exactly as `None` would.
+pub(crate) fn run_command_capture_on(
+    host: &HostProfile,
+    command: &str,
+    stdin: Option<&[u8]>,
+    timeout_secs: u64,
+    max_bytes: usize,
+    shutdown: Option<crate::ws_drain::ShutdownToken>,
+    reuse: Option<Session>,
+) -> Result<CapturedExec> {
     if shutdown
         .as_ref()
         .is_some_and(|token| token.is_cancelled_now())
     {
         return Err(ExecShutdown::BEFORE_DISPATCH.into());
     }
-    let session = connect_embedded_ssh(host, timeout_secs)
-        .map_err(|error| map_shutdown_error(error, shutdown.as_ref(), None, false))?;
+    let mut exec = open_exec_channel(host, timeout_secs, shutdown.as_ref(), reuse)?;
     if shutdown
         .as_ref()
         .is_some_and(|token| token.is_cancelled_now())
     {
-        session.abort();
+        exec.abandon();
         return Err(ExecShutdown::BEFORE_DISPATCH.into());
     }
-    let mut channel = session
-        .channel_session()
-        .map_err(|error| map_shutdown_error(error, shutdown.as_ref(), Some(&session), false))?;
-    if shutdown
-        .as_ref()
-        .is_some_and(|token| token.is_cancelled_now())
-    {
-        session.abort();
-        return Err(ExecShutdown::BEFORE_DISPATCH.into());
-    }
-    channel
+    exec.channel
         .exec(command)
-        .map_err(|error| map_shutdown_error(error, shutdown.as_ref(), Some(&session), true))?;
+        .map_err(|error| map_shutdown_error(error, shutdown.as_ref(), Some(&exec.session), true))?;
     if let Some(data) = stdin {
-        channel
-            .write_all(data)
-            .map_err(|error| map_shutdown_error(error, shutdown.as_ref(), Some(&session), true))?;
-        channel
-            .send_eof()
-            .map_err(|error| map_shutdown_error(error, shutdown.as_ref(), Some(&session), true))?;
+        exec.channel.write_all(data).map_err(|error| {
+            map_shutdown_error(error, shutdown.as_ref(), Some(&exec.session), true)
+        })?;
+        exec.channel.send_eof().map_err(|error| {
+            map_shutdown_error(error, shutdown.as_ref(), Some(&exec.session), true)
+        })?;
     }
 
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
@@ -1563,9 +1678,9 @@ pub(crate) fn run_command_capture(
     // Non-blocking I/O is only safe for the drain: `wait_close` needs a
     // request/confirm exchange, so blocking is restored once the command is
     // known to have finished.
-    session.set_blocking(false);
+    exec.session.set_blocking(false);
     let drained = drain_channel_output(
-        &mut channel,
+        &mut exec.channel,
         &mut stdout,
         &mut stderr,
         deadline,
@@ -1581,13 +1696,27 @@ pub(crate) fn run_command_capture(
         // command: a pty-less exec channel's process group is only reaped on
         // the pty path. Stopping it for real needs a PTY or a server-side
         // `timeout` wrapper — see `ExecRequest::timeout_secs`.
+        //
+        // A borrowed connection is not ours to abort: only this channel is
+        // closed (by `ExecChannel::drop`) and the connection carries on.
         let interrupted = error.is::<ExecShutdown>()
             || shutdown
                 .as_ref()
                 .is_some_and(|token| token.is_cancelled_now());
-        session.abort();
+        exec.abandon();
         return if interrupted {
             Err(ExecShutdown::OUTCOME_UNKNOWN.into())
+        } else if error.is::<ExecTimeout>() {
+            // The accumulators still hold everything read before the deadline.
+            // Hand it back with the timeout instead of dropping it: what a hung
+            // command printed last is what the caller needs to see.
+            Err(ExecTimeout {
+                timeout_secs,
+                partial: Some(crate::exec_capture::PartialCapture::from_captures(
+                    stdout, stderr,
+                )),
+            }
+            .into())
         } else {
             Err(error)
         };
@@ -1599,7 +1728,7 @@ pub(crate) fn run_command_capture(
         .as_ref()
         .is_some_and(|token| token.is_cancelled_now())
     {
-        session.abort();
+        exec.abandon();
         return Err(ExecShutdown::OUTCOME_UNKNOWN.into());
     }
 
@@ -1608,21 +1737,22 @@ pub(crate) fn run_command_capture(
     // teardown guard only — it bounds a wedged peer, it is not part of the
     // command's own budget, so it is deliberately not derived from
     // `timeout_secs`.
-    session.set_blocking(true);
-    session.set_timeout(TEARDOWN_TIMEOUT_MS);
+    exec.session.set_blocking(true);
+    exec.session.set_timeout(TEARDOWN_TIMEOUT_MS);
     let closed = if let Some(token) = shutdown.as_ref() {
-        channel.wait_close_cancellable(&|| token.is_cancelled_now())
+        exec.channel
+            .wait_close_cancellable(&|| token.is_cancelled_now())
     } else {
-        channel.wait_close().map(|()| true)
+        exec.channel.wait_close().map(|()| true)
     };
     match closed {
-        Ok(true) => {}
+        Ok(true) => exec.finished = true,
         Ok(false) => {
-            session.abort();
+            exec.abandon();
             return Err(ExecShutdown::OUTCOME_UNKNOWN.into());
         }
         Err(error) => {
-            session.abort();
+            exec.abandon();
             return if shutdown
                 .as_ref()
                 .is_some_and(|token| token.is_cancelled_now())
@@ -1635,11 +1765,9 @@ pub(crate) fn run_command_capture(
     }
 
     Ok(CapturedExec {
-        exit_code: Some(
-            channel.exit_status().map_err(|error| {
-                map_shutdown_error(error, shutdown.as_ref(), Some(&session), true)
-            })?,
-        ),
+        exit_code: Some(exec.channel.exit_status().map_err(|error| {
+            map_shutdown_error(error, shutdown.as_ref(), Some(&exec.session), true)
+        })?),
         truncated: stdout.truncated() || stderr.truncated(),
         dropped_bytes: stdout.dropped_bytes() + stderr.dropped_bytes(),
         stdout: stdout.into_bytes(),
@@ -1711,7 +1839,11 @@ fn drain_channel_output(
         }
 
         if Instant::now() >= deadline {
-            return Err(ExecTimeout { timeout_secs }.into());
+            return Err(ExecTimeout {
+                timeout_secs,
+                partial: None,
+            }
+            .into());
         }
 
         if !progressed {
@@ -1724,7 +1856,7 @@ fn drain_channel_output(
 ///
 /// The transport's `set_timeout` treats `0` as "wait forever", so a zero-second
 /// caller budget is clamped to 1 ms rather than disabling the bound.
-fn session_timeout_ms(timeout_secs: u64) -> u32 {
+pub(crate) fn session_timeout_ms(timeout_secs: u64) -> u32 {
     timeout_secs.saturating_mul(1000).clamp(1, u32::MAX as u64) as u32
 }
 

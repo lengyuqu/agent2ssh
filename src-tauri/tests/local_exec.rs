@@ -289,6 +289,50 @@ async fn local_exec_stops_a_command_that_outlives_its_timeout() {
     );
 }
 
+/// A timeout used to return the bare sentence and drop both streams. What a hung
+/// command printed last is usually the whole diagnosis, so the error now carries
+/// it — as a typed error, because `Ok` still has to mean "the command finished".
+#[tokio::test]
+#[serial_test::serial]
+async fn a_timed_out_local_command_keeps_what_it_printed() {
+    let _env = IsolatedEnv::new("timeout-partial");
+
+    #[cfg(unix)]
+    let command = "echo before-the-deadline; echo on-stderr 1>&2; sleep 30";
+    #[cfg(windows)]
+    let command = "echo before-the-deadline& echo on-stderr 1>&2& ping -n 30 127.0.0.1 >nul";
+    let mut request = local_request(command);
+    request.timeout_secs = Some(2);
+
+    let error = exec_local_core(request)
+        .await
+        .expect_err("the timeout must fail the exec");
+
+    // The sentence other surfaces print is unchanged.
+    assert!(
+        error
+            .to_string()
+            .starts_with("local command timed out after 2s"),
+        "error was {error}"
+    );
+    let timed_out = error
+        .downcast_ref::<agent2ssh::ExecTimedOut>()
+        .expect("a timeout must be the typed error, not a bare message");
+    assert_eq!(timed_out.timeout_secs, 2);
+    assert!(
+        timed_out.stdout.contains("before-the-deadline"),
+        "stdout was {:?}",
+        timed_out.stdout
+    );
+    assert!(
+        timed_out.stderr.contains("on-stderr"),
+        "stderr was {:?}",
+        timed_out.stderr
+    );
+    // The local target reaps the process tree before it returns.
+    assert!(timed_out.process_stopped);
+}
+
 /// The headline property of the local target: a timed-out command leaves nothing
 /// running behind it. The marker is written by a *descendant* of the shell, so
 /// killing only the shell would leave it alive to complete the write.

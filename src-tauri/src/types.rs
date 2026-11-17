@@ -538,6 +538,46 @@ impl ExecResult {
     }
 }
 
+/// A command that outlived its deadline, with whatever it printed before then.
+///
+/// This is the error `exec_ssh_core` and `exec_local_core` return on a timeout.
+/// Its `Display` is the sentence those functions always returned, so a surface
+/// that only prints the error is unchanged; a surface that wants the partial
+/// output — the MCP server and the daemon's exec routes — downcasts to this
+/// type instead of parsing the message.
+///
+/// It stays an error rather than becoming an `ExecResult` with no exit code on
+/// purpose: playbooks, batch strategies and the audit trail all read `Ok` as
+/// "the command finished", and a timed-out command did not.
+#[derive(Debug, Clone)]
+pub struct ExecTimedOut {
+    pub host: String,
+    pub command: String,
+    pub timeout_secs: u64,
+    /// Output captured before the deadline, bounded like any other capture.
+    pub stdout: String,
+    pub stderr: String,
+    pub truncated: bool,
+    pub dropped_bytes: usize,
+    /// False for an SSH target, where closing the channel does not stop the
+    /// remote process (see [`ExecRequest::timeout_secs`]); true for a local
+    /// target, whose process tree is reaped before the error is returned.
+    pub process_stopped: bool,
+}
+
+impl std::fmt::Display for ExecTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let target = if self.process_stopped { "local" } else { "SSH" };
+        write!(
+            f,
+            "{target} command timed out after {}s: '{}'",
+            self.timeout_secs, self.command
+        )
+    }
+}
+
+impl std::error::Error for ExecTimedOut {}
+
 #[cfg(test)]
 impl AuditEntry {
     /// An audit entry with every optional field empty and a fresh id/timestamp.

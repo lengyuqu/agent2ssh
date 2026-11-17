@@ -147,6 +147,8 @@ const STREAM_SETTLE_GRACE: Duration = Duration::from_millis(500);
 #[derive(Debug)]
 pub(crate) struct LocalExecTimeout {
     pub(crate) timeout_secs: u64,
+    /// What the command printed before it was killed.
+    pub(crate) partial: crate::exec_capture::PartialCapture,
 }
 
 impl std::fmt::Display for LocalExecTimeout {
@@ -1368,7 +1370,11 @@ pub(crate) fn run_local_command_capture(
         return Err(LocalExecShutdown.into());
     }
     if timed_out {
-        return Err(LocalExecTimeout { timeout_secs }.into());
+        return Err(LocalExecTimeout {
+            timeout_secs,
+            partial: crate::exec_capture::PartialCapture::from_captures(stdout, stderr),
+        }
+        .into());
     }
 
     Ok(CapturedExec {

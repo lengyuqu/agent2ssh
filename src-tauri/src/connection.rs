@@ -12,8 +12,11 @@ use tokio::sync::{watch, Mutex};
 use uuid::Uuid;
 
 use crate::{
-    app_state::app_state, embedded_ssh::connect_embedded_ssh, session::resolve_host,
-    store::load_config, types::ConnectionStatus,
+    app_state::app_state,
+    embedded_ssh::{connect_embedded_ssh, session_timeout_ms},
+    session::resolve_host,
+    store::load_config,
+    types::{ConnectionStatus, HostProfile},
 };
 
 /// How often the supervisor probes each retained connection's liveness (K5).
@@ -59,6 +62,25 @@ pub struct RetainedConnection {
     /// `disconnect_host` can close the lifecycle entry by the same ID
     /// that was used to reserve it.
     lifecycle_id: Uuid,
+    /// What the connection was made to, so a later edit of the host profile
+    /// (another address, user, key or jump host) stops it being lent out.
+    profile_key: String,
+}
+
+/// The parts of a host profile that decide where a connection goes and who it
+/// authenticates as. A retained connection is only lent to an exec whose profile
+/// still produces the same key.
+fn profile_key(host: &HostProfile) -> String {
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}",
+        host.name,
+        host.host,
+        host.port.unwrap_or(22),
+        host.user.as_deref().unwrap_or(""),
+        host.key_path.as_deref().unwrap_or(""),
+        host.jump_host.as_deref().unwrap_or(""),
+        host.proxy_id.as_deref().unwrap_or(""),
+    )
 }
 
 type ConnectionHandleSnapshot = (
@@ -137,6 +159,48 @@ pub async fn list_active_connections() -> Vec<ConnectionStatus> {
         .collect()
 }
 
+/// Lend the retained connection for `host` to one operation, if there is a
+/// usable one.
+///
+/// What comes back is the live connection with blocking and timeout state of its
+/// own ([`Session::lease`]), so the borrower can switch modes and set deadlines
+/// without touching anyone else on the connection — the supervisor's keepalive
+/// probe included. Opening a channel on it replaces a TCP connect, a key
+/// exchange and an authentication.
+///
+/// `None` means "connect for yourself", and is the answer whenever there is any
+/// doubt: no retained connection, one the supervisor has marked unhealthy or is
+/// reconnecting, one made for a profile that has since changed, or one whose
+/// session lock is busy. Reuse is opt-in by construction — only a host somebody
+/// asked to keep open with `ssh_connect` / `agent2ssh` connect is ever lent — so
+/// a caller that never retains a connection behaves exactly as before.
+pub(crate) async fn lease_session(host: &HostProfile, timeout_secs: u64) -> Option<Session> {
+    let (session, health, key) = {
+        let store = connections().lock().await;
+        let conn = store.get(&host.name)?;
+        (
+            conn.session.clone(),
+            conn.health.clone(),
+            conn.profile_key.clone(),
+        )
+    };
+    if key != profile_key(host) {
+        return None;
+    }
+    {
+        let health = health.lock().ok()?;
+        if !health.healthy || health.reconnecting {
+            return None;
+        }
+    }
+    // `try_lock`, never `lock`: this runs on an async worker, and a blocking wait
+    // here is a stalled runtime thread. The lock is only ever held to clone the
+    // handle out, so a miss costs one fresh connection, not a wait.
+    let live = session.try_lock().ok()?.as_ref()?.clone();
+    live.authenticated()
+        .then(|| live.lease(session_timeout_ms(timeout_secs)))
+}
+
 /// Manually establish and retain an embedded SSH connection to a specific host.
 pub async fn connect_host(host_name: &str) -> Result<()> {
     let host = resolve_host(host_name)?;
@@ -184,6 +248,7 @@ pub async fn connect_host(host_name: &str) -> Result<()> {
             })),
             drop_tx,
             lifecycle_id,
+            profile_key: profile_key(&host),
         },
     );
 
@@ -257,10 +322,14 @@ async fn supervise_one(
     // Probe liveness with a keepalive in a blocking task.
     let probe_session = session.clone();
     let probe = tokio::task::spawn_blocking(move || {
-        let guard = probe_session
+        // Clone the handle out and let go of the lock before probing: the probe
+        // waits on the network, and the lock is what `lease_session` tries.
+        let live = probe_session
             .lock()
-            .map_err(|_| "session lock poisoned".to_string())?;
-        match guard.as_ref() {
+            .map_err(|_| "session lock poisoned".to_string())?
+            .as_ref()
+            .cloned();
+        match live {
             Some(s) => s.keepalive_send().map(|_| ()).map_err(|e| e.to_string()),
             None => Err("no live session".to_string()),
         }
@@ -366,6 +435,57 @@ fn backoff_delay(failures: u32) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn host(name: &str) -> HostProfile {
+        HostProfile {
+            name: name.into(),
+            host: "10.0.0.5".into(),
+            user: Some("deploy".into()),
+            port: Some(22),
+            key_path: Some("/keys/id".into()),
+            ..HostProfile::default()
+        }
+    }
+
+    /// A retained connection is lent only while the profile still describes it.
+    #[test]
+    fn profile_key_changes_with_where_and_who_but_not_with_labels() {
+        let base = profile_key(&host("web1"));
+        assert_eq!(base, profile_key(&host("web1")));
+
+        // An unset port is port 22, so spelling it out changes nothing.
+        let mut unset_port = host("web1");
+        unset_port.port = None;
+        assert_eq!(base, profile_key(&unset_port));
+
+        // Labels and policy say nothing about the connection.
+        let mut relabelled = host("web1");
+        relabelled.tags = vec!["prod".into()];
+        relabelled.env = Some("prod".into());
+        assert_eq!(base, profile_key(&relabelled));
+
+        // Anything that decides where it goes or who it is does.
+        let edits: [fn(&mut HostProfile); 6] = [
+            |h| h.host = "10.0.0.6".into(),
+            |h| h.port = Some(2222),
+            |h| h.user = Some("root".into()),
+            |h| h.key_path = Some("/keys/other".into()),
+            |h| h.jump_host = Some("bastion".into()),
+            |h| h.proxy_id = Some("corp".into()),
+        ];
+        for edit in edits {
+            let mut changed = host("web1");
+            edit(&mut changed);
+            assert_ne!(base, profile_key(&changed));
+        }
+    }
+
+    #[tokio::test]
+    async fn nothing_is_lent_for_a_host_that_was_never_retained() {
+        assert!(lease_session(&host("never-retained-xyz"), 30)
+            .await
+            .is_none());
+    }
 
     #[test]
     fn backoff_grows_then_caps() {

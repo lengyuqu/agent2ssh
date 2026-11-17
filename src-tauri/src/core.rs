@@ -11,7 +11,7 @@ mod team_config;
 pub use team_config::*;
 
 use crate::{
-    embedded_ssh::{connect_embedded_ssh, run_command_capture, ExecShutdown, ExecTimeout},
+    embedded_ssh::{connect_embedded_ssh, run_command_capture_on, ExecShutdown, ExecTimeout},
     local_exec::{
         check_exec_depth, resolve_plan_for_host, run_local_command_capture, LocalExecShutdown,
         LocalExecTimeout,
@@ -25,8 +25,8 @@ use crate::{
     },
     types::{
         default_host_group, is_local_host, source_from_env, AuditEntry, AuditFilter, BatchStrategy,
-        ExecMultiBatchResult, ExecMultiResult, ExecRequest, ExecResult, HostFilter, HostGroup,
-        HostProfile, PingResult, ProxyProfile, RiskLevel, SftpDirEntry, SftpDirection,
+        ExecMultiBatchResult, ExecMultiResult, ExecRequest, ExecResult, ExecTimedOut, HostFilter,
+        HostGroup, HostProfile, PingResult, ProxyProfile, RiskLevel, SftpDirEntry, SftpDirection,
         SftpDownloadRequest, SftpResult, SftpUploadRequest, WalkEntry, LOCAL_ENV_PREFIX,
         LOCAL_TARGET_ID,
     },
@@ -1043,14 +1043,19 @@ async fn exec_ssh_core_impl(
     let embedded_host = host.clone();
     let embedded_command = request.command.clone();
     let embedded_stdin = request.stdin.clone();
+    // A host somebody asked to keep connected lends that connection to the exec,
+    // which then opens a channel instead of a whole new connection. `None` for
+    // every other host, and whenever the retained one is in doubt.
+    let retained = crate::connection::lease_session(&embedded_host, timeout_secs).await;
     let embedded_output = tokio::task::spawn_blocking(move || {
-        run_command_capture(
+        run_command_capture_on(
             &embedded_host,
             &embedded_command,
             embedded_stdin.as_deref().map(str::as_bytes),
             timeout_secs,
             max_bytes,
             shutdown,
+            retained,
         )
     })
     .await
@@ -1070,8 +1075,11 @@ async fn exec_ssh_core_impl(
             );
             return error;
         }
-        if let Some(timeout) = error.downcast_ref::<ExecTimeout>() {
-            let message = format!("command timed out after {}s", timeout.timeout_secs);
+        if let Some(timeout_secs) = error
+            .downcast_ref::<ExecTimeout>()
+            .map(|timeout| timeout.timeout_secs)
+        {
+            let message = format!("command timed out after {timeout_secs}s");
             append_incomplete_exec_audit(
                 &request,
                 risk,
@@ -1079,11 +1087,7 @@ async fn exec_ssh_core_impl(
                 &message,
                 started.elapsed().as_millis(),
             );
-            return anyhow!(
-                "SSH command timed out after {}s: '{}'",
-                timeout.timeout_secs,
-                request.command
-            );
+            return timed_out_error(&request, timeout_secs, false, error);
         }
         error
     })?;
@@ -1125,6 +1129,46 @@ async fn exec_ssh_core_impl(
     );
 
     Ok(result)
+}
+
+/// Turn a transport timeout into the public [`ExecTimedOut`], moving the
+/// partial capture out of the transport error instead of copying it.
+fn timed_out_error(
+    request: &ExecRequest,
+    timeout_secs: u64,
+    process_stopped: bool,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let partial = if process_stopped {
+        error
+            .downcast::<LocalExecTimeout>()
+            .ok()
+            .map(|timeout| timeout.partial)
+    } else {
+        error
+            .downcast::<ExecTimeout>()
+            .ok()
+            .and_then(|timeout| timeout.partial)
+    };
+    let (stdout, stderr, truncated, dropped_bytes) = match partial {
+        Some(partial) => (
+            String::from_utf8_lossy(&partial.stdout).into_owned(),
+            String::from_utf8_lossy(&partial.stderr).into_owned(),
+            partial.truncated,
+            partial.dropped_bytes,
+        ),
+        None => (String::new(), String::new(), false, 0),
+    };
+    anyhow::Error::new(ExecTimedOut {
+        host: request.host.clone(),
+        command: request.command.clone(),
+        timeout_secs,
+        stdout,
+        stderr,
+        truncated,
+        dropped_bytes,
+        process_stopped,
+    })
 }
 
 /// Run a command on this machine instead of over SSH.
@@ -1270,8 +1314,11 @@ async fn exec_local_core_impl(
             );
             return anyhow!(message);
         }
-        if let Some(timeout) = error.downcast_ref::<LocalExecTimeout>() {
-            let message = format!("command timed out after {}s", timeout.timeout_secs);
+        if let Some(timeout_secs) = error
+            .downcast_ref::<LocalExecTimeout>()
+            .map(|timeout| timeout.timeout_secs)
+        {
+            let message = format!("command timed out after {timeout_secs}s");
             append_incomplete_exec_audit(
                 &request,
                 risk,
@@ -1279,11 +1326,7 @@ async fn exec_local_core_impl(
                 &message,
                 started.elapsed().as_millis(),
             );
-            return anyhow!(
-                "local command timed out after {}s: '{}'",
-                timeout.timeout_secs,
-                request.command
-            );
+            return timed_out_error(&request, timeout_secs, true, error);
         }
         error
     })?;

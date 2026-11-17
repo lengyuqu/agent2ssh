@@ -18,6 +18,10 @@ use agent2ssh::store::CONFIG_DIR_ENV;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+/// A counting TCP proxy in front of an sshd, for tests that claim something
+/// about how many connections were made.
+pub mod ssh_proxy;
+
 /// The isolated directory chosen at process start (or the caller's own, if
 /// `AGENT2SSH_CONFIG_DIR` was already set to something other than the real dir).
 static DEFAULT_CONFIG_DIR: OnceLock<std::ffi::OsString> = OnceLock::new();

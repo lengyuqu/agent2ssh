@@ -24,6 +24,31 @@ pub(crate) struct CapturedExec {
     pub(crate) dropped_bytes: usize,
 }
 
+/// What a command had printed when its deadline expired.
+///
+/// A timeout used to discard both streams, which left the caller with nothing
+/// but "timed out" — and the last lines a hung build or a stuck prompt printed
+/// are usually the whole diagnosis. Both exec targets hand their accumulators
+/// here so the two report a partial capture in exactly the same shape.
+#[derive(Debug)]
+pub(crate) struct PartialCapture {
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+    pub(crate) truncated: bool,
+    pub(crate) dropped_bytes: usize,
+}
+
+impl PartialCapture {
+    pub(crate) fn from_captures(stdout: BoundedCapture, stderr: BoundedCapture) -> Self {
+        Self {
+            truncated: stdout.truncated() || stderr.truncated(),
+            dropped_bytes: stdout.dropped_bytes() + stderr.dropped_bytes(),
+            stdout: stdout.into_bytes(),
+            stderr: stderr.into_bytes(),
+        }
+    }
+}
+
 /// Bounded head+tail accumulator for a single output stream.
 ///
 /// Retains the first `max_bytes / 2` bytes and a rolling window of the last

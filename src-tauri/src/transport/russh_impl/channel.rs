@@ -32,17 +32,34 @@ use russh::{ChannelMsg, ChannelWriteHalf};
 use super::block_on;
 use crate::transport::types::Error;
 
-/// Session-wide blocking/timeout state.
+/// What belongs to the connection itself, as opposed to one user of it: whether
+/// it has been torn down, and the socket that tears it down.
 ///
-/// Shared by every channel of one session because libssh2's equivalents were
-/// session-level, and callers switch modes mid-flight
+/// Shared by every [`Settings`] view of one connection, because an abort has to
+/// reach all of them — a connection that one caller gave up on is gone for
+/// everyone, and a caller that did not abort must still see that it is.
+struct Link {
+    aborted: AtomicBool,
+    socket: Mutex<Option<TcpStream>>,
+}
+
+/// Blocking/timeout state, plus the connection's [`Link`].
+///
+/// Shared by every channel of one *view* of a session, because libssh2's
+/// equivalents were session-level and callers switch modes mid-flight
 /// (`embedded_ssh.rs` sets non-blocking, drains, then restores blocking for the
 /// teardown handshake).
+///
+/// A connection normally has one view, so that is the same as session-wide. A
+/// retained connection that several operations borrow at once gets one view per
+/// borrower ([`Settings::view`]): one exec switching to non-blocking, or setting
+/// a short teardown timeout, must not change what a concurrent exec, a keepalive
+/// probe or an SFTP transfer on the same connection sees. The abort state stays
+/// shared on purpose.
 pub(super) struct Settings {
     blocking: AtomicBool,
     timeout_ms: AtomicU64,
-    aborted: AtomicBool,
-    socket: Mutex<Option<TcpStream>>,
+    link: Arc<Link>,
 }
 
 impl Settings {
@@ -50,8 +67,20 @@ impl Settings {
         Self {
             blocking: AtomicBool::new(true),
             timeout_ms: AtomicU64::new(0),
-            aborted: AtomicBool::new(false),
-            socket: Mutex::new(None),
+            link: Arc::new(Link {
+                aborted: AtomicBool::new(false),
+                socket: Mutex::new(None),
+            }),
+        }
+    }
+
+    /// Another user of the same connection: blocking, with its own timeout, and
+    /// the same abort state.
+    pub(super) fn view(&self, timeout_ms: u32) -> Self {
+        Self {
+            blocking: AtomicBool::new(true),
+            timeout_ms: AtomicU64::new(u64::from(timeout_ms)),
+            link: Arc::clone(&self.link),
         }
     }
 
@@ -78,21 +107,21 @@ impl Settings {
     }
 
     pub(super) fn set_socket(&self, socket: &TcpStream) -> io::Result<()> {
-        *self.socket.lock().unwrap() = Some(socket.try_clone()?);
-        self.aborted.store(false, Ordering::SeqCst);
+        *self.link.socket.lock().unwrap() = Some(socket.try_clone()?);
+        self.link.aborted.store(false, Ordering::SeqCst);
         Ok(())
     }
 
     pub(super) fn aborted(&self) -> bool {
-        self.aborted.load(Ordering::SeqCst)
+        self.link.aborted.load(Ordering::SeqCst)
     }
 
     /// Cancelling a request future does not cancel russh's connection task.
     /// Shut down its socket too, so a silent peer cannot retain a worker or
     /// deliver a late authentication/request reply to a subsequent operation.
     pub(super) fn abort(&self) {
-        self.aborted.store(true, Ordering::SeqCst);
-        if let Some(socket) = self.socket.lock().unwrap().take() {
+        self.link.aborted.store(true, Ordering::SeqCst);
+        if let Some(socket) = self.link.socket.lock().unwrap().take() {
             let _ = socket.shutdown(Shutdown::Both);
         }
     }
@@ -653,6 +682,37 @@ mod tests {
             second.message(),
             "SSH connection was closed after an operation timed out"
         );
+    }
+
+    /// A view is how one retained connection is lent to several operations: what
+    /// one sets for itself must not reach the others, while an abort — which ends
+    /// the connection — must reach all of them.
+    #[test]
+    fn a_view_has_its_own_mode_and_deadline_but_shares_the_abort() {
+        let connection = Settings::new();
+        connection.set_timeout(1_000);
+        let borrower = connection.view(5_000);
+
+        borrower.set_blocking(false);
+        borrower.set_timeout(30_000);
+        assert!(
+            connection.blocking(),
+            "a borrower's mode switch reached the connection"
+        );
+        assert_eq!(connection.timeout(), Some(Duration::from_millis(1_000)));
+        assert_eq!(borrower.timeout(), Some(Duration::from_millis(30_000)));
+        assert!(
+            connection.view(7).blocking(),
+            "a new view starts blocking, whatever another one set"
+        );
+
+        assert!(!connection.aborted() && !borrower.aborted());
+        borrower.abort();
+        assert!(
+            connection.aborted(),
+            "the borrower's abort must end the connection for its owner"
+        );
+        assert!(connection.view(7).aborted(), "and for later borrowers");
     }
 
     #[test]

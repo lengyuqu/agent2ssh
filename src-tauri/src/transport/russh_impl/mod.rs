@@ -502,15 +502,23 @@ struct Inner {
 }
 
 /// A single SSH connection.
+///
+/// Cloning shares the connection *and* its blocking/timeout settings, which is
+/// what every existing caller relies on. [`Session::lease`] is the one way to
+/// get the connection with settings of its own.
 #[derive(Clone)]
 pub struct Session {
     inner: Arc<Inner>,
+    /// The blocking/timeout state this handle's operations run under. The same
+    /// `Arc` as `inner.settings` unless the handle came from [`Session::lease`].
+    ops: Arc<channel::Settings>,
 }
 
 impl Session {
     pub fn new() -> Result<Self, Error> {
         let settings = Arc::new(channel::Settings::new());
         Ok(Self {
+            ops: Arc::clone(&settings),
             inner: Arc::new(Inner {
                 forwards: Arc::new(forward::Registry::new(Arc::clone(&settings))),
                 settings,
@@ -606,24 +614,40 @@ impl Session {
     }
 
     pub fn set_timeout(&self, timeout_ms: u32) {
-        self.inner.settings.set_timeout(timeout_ms);
+        self.ops.set_timeout(timeout_ms);
     }
 
     /// Abort the owned connection socket without waiting for the peer.
+    ///
+    /// This ends the connection for every handle to it, leased or not.
     pub(crate) fn abort(&self) {
-        self.inner.settings.abort();
+        self.ops.abort();
     }
 
     pub fn set_blocking(&self, blocking: bool) {
-        self.inner.settings.set_blocking(blocking);
+        self.ops.set_blocking(blocking);
+    }
+
+    /// The same live connection, with blocking and timeout state of its own.
+    ///
+    /// For lending one retained connection to several operations at once: what
+    /// one of them sets with [`set_blocking`](Self::set_blocking) or
+    /// [`set_timeout`](Self::set_timeout) is invisible to the others. Only the
+    /// settings are separate — [`abort`](Self::abort), and the aborted state a
+    /// timed-out request leaves behind, still belong to the connection.
+    pub(crate) fn lease(&self, timeout_ms: u32) -> Session {
+        Session {
+            inner: Arc::clone(&self.inner),
+            ops: Arc::new(self.inner.settings.view(timeout_ms)),
+        }
     }
 
     pub fn authenticated(&self) -> bool {
-        !self.inner.settings.aborted() && self.inner.authenticated.load(Ordering::SeqCst)
+        !self.ops.aborted() && self.inner.authenticated.load(Ordering::SeqCst)
     }
 
     fn ensure_connected(&self) -> Result<(), Error> {
-        if self.inner.settings.aborted() {
+        if self.ops.aborted() {
             Err(other(
                 "SSH connection was closed after an operation timed out",
             ))
@@ -639,7 +663,7 @@ impl Session {
         T: Send,
         F: std::future::Future<Output = Result<T, Error>> + Send,
     {
-        self.inner.settings.run(operation, future)
+        self.ops.run(operation, future)
     }
 }
 
@@ -1012,7 +1036,7 @@ impl Session {
             };
             Ok::<_, Error>(handle.channel_open_session().await?)
         })?;
-        Ok(channel::open(channel, Arc::clone(&self.inner.settings)))
+        Ok(channel::open(channel, Arc::clone(&self.ops)))
     }
 
     pub fn channel_direct_tcpip(
@@ -1033,7 +1057,7 @@ impl Session {
                     .await?,
             )
         })?;
-        Ok(channel::open(channel, Arc::clone(&self.inner.settings)))
+        Ok(channel::open(channel, Arc::clone(&self.ops)))
     }
 
     pub fn channel_forward_listen(
