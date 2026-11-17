@@ -30,6 +30,9 @@ fn cli(dir: &Path) -> Command {
     command
         .env("AGENT2SSH_CONFIG_DIR", dir)
         .env("AGENT2SSH_SECRETS_BACKEND", "encrypted")
+        // Locked has to mean locked: the OS credential store would otherwise
+        // re-unlock this scratch store behind the test's back.
+        .env("AGENT2SSH_AUTO_UNLOCK", "0")
         .env_remove("AGENT2SSH_MASTER_PASSWORD")
         .env_remove("DYLD_INSERT_LIBRARIES")
         .env_remove("A2S_HOOK_STAGE")
