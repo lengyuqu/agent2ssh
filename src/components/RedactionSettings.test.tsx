@@ -100,7 +100,13 @@ describe("RedactionSettings", () => {
     await waitFor(() =>
       expect(mockApi.addRedactRule).toHaveBeenCalledWith("secret-project", "<REDACTED:project>")
     );
-    expect((screen.getByPlaceholderText("Pattern") as HTMLInputElement).value).toBe("");
+    // The form clears after the call resolves, not when it is issued. Waiting on
+    // the empty value keeps this deterministic on a slow machine: asserting it
+    // right after "the API was called" raced the state update that follows the
+    // awaiting handler and failed on the Windows runner.
+    await waitFor(() =>
+      expect((screen.getByPlaceholderText("Pattern") as HTMLInputElement).value).toBe("")
+    );
     expect(await screen.findByText("secret-project")).toBeTruthy();
   });
 
