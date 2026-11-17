@@ -904,6 +904,8 @@ fn stop_refuses_a_daemon_named_process_without_authenticated_health() {
     let started = Instant::now();
     let refused = stop_daemon_process(pid).expect_err("an unauthenticated daemon is not stopped");
     let elapsed = started.elapsed();
+    let alive_after = process_is_alive(pid);
+    let state_after = process_state_letter(pid);
     let still_running = child.try_wait().unwrap().is_none();
     let pid_retained = dir.path().join("daemon.pid").exists();
     let _ = child.kill();
@@ -921,7 +923,8 @@ fn stop_refuses_a_daemon_named_process_without_authenticated_health() {
     assert!(
         still_running && pid_retained,
         "a refused stop must leave the process and its record alone: \
-         alive_before={alive_before} still_running={still_running} \
+         alive_before={alive_before} alive_after={alive_after} \
+         state_after={state_after} still_running={still_running} \
          pid_retained={pid_retained} elapsed={elapsed:?}"
     );
 }
@@ -1821,6 +1824,27 @@ fn stand_in_named_daemon(dir: &std::path::Path) -> Child {
         .stderr(Stdio::null())
         .spawn()
         .expect("a process to name")
+}
+
+/// The `/proc/<pid>/stat` state letter: `R`/`S` while running, `Z` once the
+/// process has exited but nothing has reaped it. `kill(pid, 0)` answers "yes"
+/// for a zombie, so an aliveness check alone cannot tell "still working" from
+/// "finished and waiting to be collected" — `Child::try_wait` can.
+#[cfg(target_os = "linux")]
+fn process_state_letter(pid: u32) -> String {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|raw| {
+            raw.rsplit(')')
+                .next()
+                .and_then(|rest| rest.split_whitespace().next().map(str::to_string))
+        })
+        .unwrap_or_else(|| "<gone>".to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_state_letter(_pid: u32) -> String {
+    "<n/a>".to_string()
 }
 
 /// Wait until the process table describes the stand-in as a daemon.
