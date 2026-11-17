@@ -893,6 +893,7 @@ fn stop_refuses_a_daemon_named_process_without_authenticated_health() {
     symlink("/bin/sleep", &executable).unwrap();
     let mut child = Command::new(executable).arg("30").spawn().unwrap();
     let pid = child.id();
+    wait_for_stand_in_to_be_named_daemon(pid);
     let silent = TcpListener::bind("127.0.0.1:0").unwrap();
     std::env::set_var(CONFIG_DIR_ENV, dir.path());
     std::env::set_var(ADDR_ENV, silent.local_addr().unwrap().to_string());
@@ -912,7 +913,11 @@ fn stop_refuses_a_daemon_named_process_without_authenticated_health() {
         } else {
             "could not be authenticated"
         }));
-    assert!(still_running && pid_retained);
+    assert!(
+        still_running && pid_retained,
+        "a refused stop must leave the process and its record alone: \
+         still_running={still_running} pid_retained={pid_retained}"
+    );
 }
 
 #[test]

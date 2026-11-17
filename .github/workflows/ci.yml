@@ -219,15 +219,19 @@ jobs:
       # writes each panic to the log the moment it happens.
       #
       # The SSE case is split out while it is being diagnosed: it is the one
-      # that hangs on Linux, and separating it means a hang names itself instead
-      # of hiding behind whichever case ran last. Merge the two back once it
-      # passes.
+      # thought to hang on Linux, and separating it names the culprit instead of
+      # hiding it behind whichever case ran last. Both runs are collected into
+      # one step so a failure in the first does not skip the second; merge them
+      # back once both pass.
       - name: Desktop daemon lifecycle end-to-end tests
-        run: timeout 420 cargo test --features daemon --test daemon_stop_e2e -- --test-threads=1 --nocapture --skip stop_closes_an_active_event_stream_and_exits
-        working-directory: src-tauri
-
-      - name: Desktop daemon stop with an active event stream
-        run: timeout 120 cargo test --features daemon --test daemon_stop_e2e stop_closes_an_active_event_stream_and_exits -- --exact --nocapture
+        run: |
+          set +e
+          timeout 420 cargo test --features daemon --test daemon_stop_e2e -- --test-threads=1 --nocapture --skip stop_closes_an_active_event_stream_and_exits
+          rest=$?
+          timeout 120 cargo test --features daemon --test daemon_stop_e2e stop_closes_an_active_event_stream_and_exits -- --exact --nocapture
+          sse=$?
+          echo "daemon_stop_e2e: rest=$rest sse=$sse"
+          [[ $rest == 0 && $sse == 0 ]]
         working-directory: src-tauri
 
   build:
