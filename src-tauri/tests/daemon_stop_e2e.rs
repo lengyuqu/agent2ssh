@@ -901,6 +901,18 @@ fn stop_refuses_a_daemon_named_process_without_authenticated_health() {
     // Before the stop is the only way to tell "the process was already gone"
     // from "the stop ended it" when the assertion below fails.
     let alive_before = process_is_alive(pid);
+    // Probe the stand-in while nothing else touches it. If it reaches `Z` here,
+    // the stop is innocent and something outside this case is ending it; if it
+    // stays `S` for a second and dies during the stop, the stop signalled a
+    // process it had just refused to stop.
+    for probe in 0..10 {
+        std::thread::sleep(Duration::from_millis(100));
+        eprintln!(
+            "stand-in probe {probe}: state={} alive={}",
+            process_state_letter(pid),
+            process_is_alive(pid)
+        );
+    }
     let started = Instant::now();
     let refused = stop_daemon_process(pid).expect_err("an unauthenticated daemon is not stopped");
     let elapsed = started.elapsed();
