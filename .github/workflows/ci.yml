@@ -211,8 +211,14 @@ jobs:
         run: cargo test --lib
         working-directory: src-tauri
 
+      # `timeout` is the point, not decoration: libtest prints a failure's
+      # details only after the whole binary finishes, so one hanging case turned
+      # this step into 23 minutes of silence and then the job's own 30-minute
+      # cancellation — with no panic message anywhere in the log. A bounded
+      # command fails inside the job, keeps the run alive, and `--nocapture`
+      # writes each panic to the log the moment it happens.
       - name: Desktop daemon lifecycle end-to-end tests
-        run: cargo test --features daemon --test daemon_stop_e2e -- --test-threads=1
+        run: timeout 480 cargo test --features daemon --test daemon_stop_e2e -- --test-threads=1 --nocapture
         working-directory: src-tauri
 
   build:
