@@ -208,12 +208,32 @@ fn local_exec_route_runs_a_user_defined_environment() {
 
     assert_eq!(status, 200, "unexpected response: {body}");
     assert_eq!(body["host"], host);
+
+    // `%CD%` is cmd's own variable and only cmd expands it; `$PWD` plays the
+    // same role for a POSIX shell. A probe that comes back verbatim means the
+    // definition ran in another shell, so a missing `A2S_CUSTOM` would be a
+    // symptom rather than the cause — the failure message has to say which.
+    let probe_command = if cfg!(windows) {
+        "echo [%CD%]"
+    } else {
+        "echo [$PWD]"
+    };
+    let probe = daemon.post_local_exec(serde_json::json!({
+        "host": host,
+        "command": probe_command,
+        "force": true,
+    }));
+    let probe_body: serde_json::Value = probe
+        .json()
+        .unwrap_or_else(|error| serde_json::json!({ "probe_error": error.to_string() }));
+
     assert!(
         body["stdout"]
             .as_str()
             .unwrap_or_default()
             .contains("from-the-file"),
-        "the variable from environments.toml should reach the command: {body}"
+        "the variable from environments.toml should reach the command: {body}; \
+         shell probe {probe_command:?}: {probe_body}"
     );
 
     // The daemon re-reads the file when it changes: an edit is visible to the
