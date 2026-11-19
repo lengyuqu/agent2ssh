@@ -179,7 +179,7 @@ fn local_exec_route_selects_a_named_environment() {
 }
 
 /// The end-to-end version of the user-defined environment: a real daemon reads
-/// `environments.toml` at start and a real `/local-exec` request runs in it.
+/// `environments.toml` and a real `/local-exec` request runs in it.
 #[test]
 fn local_exec_route_runs_a_user_defined_environment() {
     let (base, show) = if cfg!(windows) {
@@ -216,8 +216,9 @@ fn local_exec_route_runs_a_user_defined_environment() {
         "the variable from environments.toml should reach the command: {body}"
     );
 
-    // The daemon read the file at start. Changing it now must change nothing —
-    // the environment this daemon serves is the one it started with.
+    // The daemon re-reads the file when it changes: an edit is visible to the
+    // next command without a restart, and so is a definition added after the
+    // daemon started.
     std::fs::write(
         daemon
             .dir
@@ -234,15 +235,15 @@ fn local_exec_route_runs_a_user_defined_environment() {
     let body: serde_json::Value = again.json().expect("an ExecResult");
     let stdout = body["stdout"].as_str().unwrap_or_default();
     assert!(
-        stdout.contains("from-the-file") && !stdout.contains("tampered"),
-        "an edit after start must not take effect: {body}"
+        stdout.contains("tampered") && !stdout.contains("from-the-file"),
+        "an edit after start must take effect: {body}"
     );
     let late = daemon.post_local_exec(serde_json::json!({
         "host": format!("{LOCAL_TARGET_ID}:late"),
         "command": "echo hi",
         "force": true,
     }));
-    assert_eq!(late.status(), 400, "{}", body_text(late));
+    assert_eq!(late.status(), 200, "{}", body_text(late));
 }
 
 /// A definition the daemon rejected is refused over the wire with its reason.
@@ -287,10 +288,12 @@ fn local_exec_route_rejects_an_unknown_environment() {
         body.contains("nope"),
         "expected the refusal to name the unknown environment: {body}"
     );
-    assert!(
-        body.contains("gitbash"),
-        "expected the refusal to list what is available: {body}"
-    );
+    for id in agent2ssh::local_exec::LocalEnvironment::SELECTABLE_IDS {
+        assert!(
+            body.contains(id),
+            "expected the refusal to list {id}, which this host offers: {body}"
+        );
+    }
 }
 
 /// The end-to-end version of the headline case: a real daemon establishes a real

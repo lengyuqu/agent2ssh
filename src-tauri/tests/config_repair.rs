@@ -250,7 +250,7 @@ fn restore_pair_recovers_a_mismatched_tag_state() {
     assert!(list.status.success());
     let pairs: serde_json::Value =
         serde_json::from_slice(&list.stdout).expect("--list --json must be valid JSON");
-    assert!(pairs.as_array().unwrap().len() >= 1);
+    assert!(!pairs.as_array().unwrap().is_empty());
 
     let applied = run(
         dir.path(),

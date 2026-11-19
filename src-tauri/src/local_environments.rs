@@ -546,7 +546,8 @@ fn validate_prelude(prelude: &str, base: LocalEnvironment) -> Result<String, Str
     // `Remove-Item -Recurse -Force` and `del /s /q` come back Low — so for those
     // bases it would reject harmless lines and wave through the harmful ones. A
     // floor that is wrong in both directions is worse than none, so those bases
-    // rely on the load-once rule alone and the module note says so.
+    // rest on the file being as trusted as the policy file and the module note
+    // says so.
     if !classifier_understands(base) {
         return Ok(prelude.to_string());
     }

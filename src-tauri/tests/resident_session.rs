@@ -344,10 +344,12 @@ async fn unknown_environments_are_refused_with_the_selectable_list() {
         .await
         .expect_err("an unknown environment is a refusal, never a fallback");
     let message = error.to_string();
-    assert!(
-        message.contains("pwsh") && message.contains("vs"),
-        "the refusal should list what is selectable, got: {message}"
-    );
+    for id in agent2ssh::local_exec::LocalEnvironment::SELECTABLE_IDS {
+        assert!(
+            message.contains(id),
+            "the refusal should list {id} as selectable, got: {message}"
+        );
+    }
 }
 
 #[tokio::test]

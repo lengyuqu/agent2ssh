@@ -2391,7 +2391,15 @@ const HELPER_STATUS: [(&str, &str); 31] = [
 /// The fourth field is a phrase the path block must still carry, so the
 /// exemption cannot decay into silence — the refusal stays documented, just not
 /// as a status. Rewording that prose breaks this test on purpose.
-const INBAND_REJECTIONS: [(&str, &str, &[&str], &str, &[&str]); 4] = [
+type InbandRejection = (
+    &'static str,
+    &'static str,
+    &'static [&'static str],
+    &'static str,
+    &'static [&'static str],
+);
+
+const INBAND_REJECTIONS: [InbandRejection; 4] = [
     (
         "get",
         "/exec/stream",
@@ -3709,40 +3717,38 @@ fn response_description(operation: &str, code: &str) -> Option<String> {
     let lines: Vec<&str> = operation.lines().collect();
     let key = format!("\"{code}\":");
     let at = lines.iter().position(|line| line.trim() == key)?;
-    for line in &lines[at + 1..] {
-        let trimmed = line.trim();
-        let Some(rest) = trimmed.strip_prefix("description: ") else {
-            // Anything other than a description immediately after the code means
-            // this response has none.
-            return None;
-        };
-        if matches!(rest, "|" | "|-" | ">" | ">-") {
-            let base = line.len() - line.trim_start().len();
-            let mut folded = String::new();
-            let mut started = false;
-            for continuation in &lines[at + 1..] {
-                let text = continuation.trim();
-                if text.is_empty() {
-                    continue;
-                }
-                if !started {
-                    // The first continuation line is the marker itself.
-                    started = true;
-                    continue;
-                }
-                if continuation.len() - continuation.trim_start().len() <= base {
-                    break;
-                }
-                if !folded.is_empty() {
-                    folded.push(' ');
-                }
-                folded.push_str(text);
+    let line = lines.get(at + 1)?;
+    let trimmed = line.trim();
+    let Some(rest) = trimmed.strip_prefix("description: ") else {
+        // Anything other than a description immediately after the code means
+        // this response has none.
+        return None;
+    };
+    if matches!(rest, "|" | "|-" | ">" | ">-") {
+        let base = line.len() - line.trim_start().len();
+        let mut folded = String::new();
+        let mut started = false;
+        for continuation in &lines[at + 1..] {
+            let text = continuation.trim();
+            if text.is_empty() {
+                continue;
             }
-            return (!folded.is_empty()).then_some(folded);
+            if !started {
+                // The first continuation line is the marker itself.
+                started = true;
+                continue;
+            }
+            if continuation.len() - continuation.trim_start().len() <= base {
+                break;
+            }
+            if !folded.is_empty() {
+                folded.push(' ');
+            }
+            folded.push_str(text);
         }
-        return Some(rest.to_string());
+        return (!folded.is_empty()).then_some(folded);
     }
-    None
+    Some(rest.to_string())
 }
 
 #[test]

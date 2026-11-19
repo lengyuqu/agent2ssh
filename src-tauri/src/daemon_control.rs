@@ -490,7 +490,7 @@ fn expected_config_dir() -> Option<String> {
 // A health response alone can be forged. This observation is deliberately
 // independent of the executable name so a renamed daemon remains visible.
 // It is still a seconds-resolution snapshot, not proof of daemon identity.
-#[cfg(any(not(target_os = "macos"), test))]
+#[cfg(not(target_os = "macos"))]
 fn observable_live_start_time(pid: u32) -> Option<u64> {
     let sys_pid = sysinfo::Pid::from_u32(pid);
     let mut system = new_process_system()?;
@@ -1755,10 +1755,10 @@ impl Drop for BoundProcess {
 ///
 /// [`BoundProcess::open`] always answers `None` here, so the handle path is
 /// never taken and the Unix observers keep deciding.
-#[cfg(all(not(windows), any(not(target_os = "macos"), test)))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 struct BoundProcess;
 
-#[cfg(all(not(windows), any(not(target_os = "macos"), test)))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 impl BoundProcess {
     fn open(_pid: u32, _expected_start: u64) -> Option<Self> {
         None
@@ -1771,7 +1771,7 @@ impl BoundProcess {
 /// ended) or it does not (that object is running). That is the whole point of
 /// binding it — the three-way guess exists because a PID can be reinterpreted,
 /// and a handle cannot.
-#[cfg(any(not(target_os = "macos"), test))]
+#[cfg(not(target_os = "macos"))]
 fn wait_for_bound_exit(
     bound: Option<&BoundProcess>,
     pid: u32,

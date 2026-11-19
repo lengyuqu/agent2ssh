@@ -480,10 +480,12 @@ async fn an_unknown_environment_is_refused_and_audited() {
 
     let message = error.to_string();
     assert!(message.contains("nope"), "message was {message}");
-    assert!(
-        message.contains("gitbash"),
-        "the refusal should say what is available: {message}"
-    );
+    for id in agent2ssh::local_exec::LocalEnvironment::SELECTABLE_IDS {
+        assert!(
+            message.contains(id),
+            "the refusal should say {id} is available: {message}"
+        );
+    }
     assert_eq!(
         audit_entries().len(),
         1,

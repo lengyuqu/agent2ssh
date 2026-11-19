@@ -449,7 +449,10 @@ fn retag_refuses_a_real_v1_store_without_rewriting_it() {
     let secrets = std::collections::HashMap::from([(ACCOUNT, SECRET_A)]);
     let plaintext = serde_json::to_vec(&secrets).unwrap();
     let ciphertext = Aes256Gcm::new((&key).into())
-        .encrypt(Nonce::from_slice(&nonce), plaintext.as_ref())
+        .encrypt(
+            &Nonce::try_from(nonce.as_slice()).unwrap(),
+            plaintext.as_ref(),
+        )
         .unwrap();
     let v1 = serde_json::json!({"version":1,"kdf":"argon2id","salt":STANDARD.encode(salt),"nonce":STANDARD.encode(nonce),"ciphertext":STANDARD.encode(ciphertext)});
     fs::write(

@@ -887,6 +887,10 @@ mod tests {
 
     #[tokio::test]
     async fn risk_override_is_applied_before_approval() {
+        // The posture is read from `approval_policies.toml`; without an isolated
+        // directory this asserts about whatever mode the machine happens to be
+        // in, and `full` turns the expected "not approved" into a failure.
+        let _dir = crate::store::TestConfigDir::new("risk-override-approval");
         let auth_scope = None;
         let input = CommandAuthorizationInput {
             auth_scope: &auth_scope,
