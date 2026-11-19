@@ -223,7 +223,15 @@ jobs:
 
   build:
     needs: contract-consistency
-    timeout-minutes: 45
+    # 90, not 45: the cache key is `hashFiles(src-tauri/Cargo.lock)`, so any
+    # version bump or dependency change makes every leg compile from scratch.
+    # Run 44535711205 was cancelled at 45 minutes inside the Windows
+    # `Rust CLI contract tests` step while macOS (7m19s) and Linux had already
+    # passed, and a cancelled job saves no cache — the next run would have
+    # started cold and cancelled at the same point. A warm Windows leg finishes
+    # in about 19 minutes. The bound still catches a hang; it just no longer
+    # sits below the cold-start cost.
+    timeout-minutes: 90
     strategy:
       matrix:
         include:
