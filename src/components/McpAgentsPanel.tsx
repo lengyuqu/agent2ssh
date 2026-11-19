@@ -1,8 +1,17 @@
-import { ArrowUpCircle, BookOpen, Bot, BrainCircuit, CheckCircle2, Clipboard, Code2, Globe, Laptop, PlugZap, RefreshCw, Send, ShieldAlert, Trash2, Users, Wrench } from "lucide-react";
-import { memo, useEffect, useMemo, useState  } from "react";
+import { ArrowUpCircle, BookOpen, Bot, CheckCircle2, Clipboard, Code2, PlugZap, RefreshCw, ShieldAlert, Trash2 } from "lucide-react";
+import { memo, useEffect, useMemo, useState } from "react";
+import claudeLogo from "../assets/logos/claude.png";
+import codebuddyLogo from "../assets/logos/codebuddy.png";
+import codexLogo from "../assets/logos/codex.svg";
+import cursorLogo from "../assets/logos/cursor.png";
+import qoderLogo from "../assets/logos/qoder.png";
+import qoderCnLogo from "../assets/logos/qoder-cn.png";
+import traeLogo from "../assets/logos/trae.png";
+import windsurfLogo from "../assets/logos/windsurf.png";
+import workbuddyLogo from "../assets/logos/workbuddy.png";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
-import type { AgentSkillStatus, McpAgentConfigStatus } from "../types";
+import type { CliPathStatus, McpAgentConfigStatus, SkillHarnessStatus } from "../types";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
@@ -12,27 +21,24 @@ import { confirmDialog } from "./ui/dialog";
 
 const chipCls = "max-w-full truncate rounded bg-muted px-1.5 py-1 text-xs text-muted-foreground";
 
-function agentIconFor(agent: McpAgentConfigStatus) {
-  switch (agent.id) {
-    case "cursor":
-      return Code2;
-    case "codebuddy":
-      return BrainCircuit;
-    case "windsurf":
-      return Send;
-    case "workbuddy":
-      return Users;
-    case "qoder_work":
-      return Laptop;
-    case "trae":
-    case "trae_solo":
-      return Globe;
-    case "claude_desktop":
-      return Wrench;
-    case "codex":
-    default:
-      return Bot;
-  }
+const AGENT_LOGOS: Record<string, string> = {
+  claude_code: claudeLogo,
+  claude_desktop: claudeLogo,
+  codex: codexLogo,
+  cursor: cursorLogo,
+  codebuddy: codebuddyLogo,
+  windsurf: windsurfLogo,
+  workbuddy: workbuddyLogo,
+  qoder: qoderLogo,
+  qoder_cn: qoderCnLogo,
+  trae: traeLogo,
+  trae_cn: traeLogo,
+};
+
+function AgentLogo({ id }: { id: string }) {
+  const src = AGENT_LOGOS[id];
+  if (!src) return null;
+  return <img src={src} alt="" width={18} height={18} className="size-[18px] shrink-0 rounded-[4px]" />;
 }
 
 function McpAgentsPanel() {
@@ -43,8 +49,12 @@ function McpAgentsPanel() {
   const [configuring, setConfiguring] = useState<string | null>(null);
   const [uninstalling, setUninstalling] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
-  const [skill, setSkill] = useState<AgentSkillStatus | null>(null);
-  const [skillBusy, setSkillBusy] = useState(false);
+  const [harnesses, setHarnesses] = useState<SkillHarnessStatus[]>([]);
+  const [skillBusy, setSkillBusy] = useState<string | null>(null);
+  const [cli, setCli] = useState<CliPathStatus | null>(null);
+  const [cliBusy, setCliBusy] = useState(false);
+  const [mode, setMode] = useState<"mcp" | "cli">("cli");
+  const [scannedAt, setScannedAt] = useState<string | null>(null);
 
   const detectedCount = useMemo(() => agents.filter((agent) => agent.detected).length, [agents]);
   const configuredCount = useMemo(
@@ -54,52 +64,80 @@ function McpAgentsPanel() {
 
   async function refresh() {
     setLoading(true);
+    let scanned = false;
     try {
       setAgents(await api.listMcpAgentConfigs());
+      scanned = true;
     } catch (err) {
       showToast("error", String(err));
       reportError("mcp-agents-panel", "list mcp agent configs failed", err);
-    } finally {
-      setLoading(false);
     }
     try {
-      setSkill(await api.agentSkillStatus());
+      setHarnesses(await api.listSkillHarnesses());
+      scanned = true;
     } catch (err) {
-      reportError("mcp-agents-panel", "agent skill status failed", err);
+      showToast("error", String(err));
+      reportError("mcp-agents-panel", "list skill harnesses failed", err);
+    }
+    try {
+      setCli(await api.getCliPathStatus());
+    } catch (err) {
+      reportError("mcp-agents-panel", "cli path status failed", err);
+    } finally {
+      if (scanned) setScannedAt(new Date().toLocaleTimeString());
+      setLoading(false);
     }
   }
 
-  async function installSkill() {
-    setSkillBusy(true);
+  async function toggleCliPath() {
+    setCliBusy(true);
     try {
-      const status = await api.installAgentSkill();
-      setSkill(status);
+      const status = cli?.installed ? await api.removeCliFromPath() : await api.installCliToPath();
+      setCli(status);
+      showToast("success", status.message);
+    } catch (err) {
+      showToast("error", String(err));
+      reportError("mcp-agents-panel", "cli path change failed", err);
+    } finally {
+      setCliBusy(false);
+    }
+  }
+
+  function replaceHarness(next: SkillHarnessStatus) {
+    setHarnesses((current) => current.map((item) => (item.id === next.id ? next : item)));
+  }
+
+  async function installSkill(harness: SkillHarnessStatus) {
+    setSkillBusy(harness.id);
+    try {
+      const status = await api.installSkillHarness(harness.id);
+      replaceHarness(status);
       showToast("success", t("Agent skill installed to {path}", { path: status.path }));
     } catch (err) {
       showToast("error", String(err));
-      reportError("mcp-agents-panel", "install agent skill failed", err);
+      reportError("mcp-agents-panel", "install agent skill failed", err, { harness: harness.id });
     } finally {
-      setSkillBusy(false);
+      setSkillBusy(null);
     }
   }
 
-  async function uninstallSkill() {
+  async function uninstallSkill(harness: SkillHarnessStatus) {
     const ok = await confirmDialog({
-      title: t("Remove the installed agent skill?"),
+      title: t("Remove the Agent2SSH skill from {name}?", { name: harness.name }),
       confirmLabel: t("Uninstall"),
       danger: true,
     });
     if (!ok) return;
-    setSkillBusy(true);
+    setSkillBusy(harness.id);
     try {
-      const status = await api.uninstallAgentSkill();
-      setSkill(status);
+      const status = await api.uninstallSkillHarness(harness.id);
+      replaceHarness(status);
       showToast("success", t("Agent skill removed"));
     } catch (err) {
       showToast("error", String(err));
-      reportError("mcp-agents-panel", "uninstall agent skill failed", err);
+      reportError("mcp-agents-panel", "uninstall agent skill failed", err, { harness: harness.id });
     } finally {
-      setSkillBusy(false);
+      setSkillBusy(null);
     }
   }
 
@@ -157,18 +195,37 @@ function McpAgentsPanel() {
 
   return (
     <Card className="space-y-3.5 p-4">
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <h3 className="flex items-center gap-2 font-semibold">
           <Bot size={16} className="text-muted-foreground" />
-          {t("MCP Agents")}
+          {t("MCP/CLI")}
         </h3>
-        <Button variant="secondary" size="sm" className="ml-auto" onClick={refresh} disabled={loading}>
-          {loading ? <Spinner /> : <RefreshCw />}
-          {t("Refresh")}
-        </Button>
+        <div className="ml-auto flex flex-wrap items-center gap-1">
+          <Button
+            size="sm"
+            variant={mode === "cli" ? "default" : "secondary"}
+            onClick={() => setMode("cli")}
+          >
+            {t("Skills + CLI")}
+          </Button>
+          <Button
+            size="sm"
+            variant={mode === "mcp" ? "default" : "secondary"}
+            onClick={() => setMode("mcp")}
+          >
+            {t("MCP")}
+          </Button>
+          <Button variant="secondary" size="sm" onClick={() => void refresh()} disabled={loading}>
+            {loading ? <Spinner /> : <RefreshCw />}
+            {t("Refresh")}
+          </Button>
+          {scannedAt && (
+            <span className="text-xs text-muted-foreground">{t("Scanned {time}", { time: scannedAt })}</span>
+          )}
+        </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-2.5">
+      {mode === "mcp" && <div className="grid grid-cols-2 gap-2.5">
         <div className="rounded-lg border border-border bg-muted/40 p-3">
           <strong className="block text-2xl leading-none">{detectedCount}</strong>
           <span className="mt-1 block text-xs text-muted-foreground">{t("detected")}</span>
@@ -177,71 +234,123 @@ function McpAgentsPanel() {
           <strong className="block text-2xl leading-none">{configuredCount}</strong>
           <span className="mt-1 block text-xs text-muted-foreground">{t("configured")}</span>
         </div>
-      </div>
+      </div>}
 
-      {skill && (
+      <p className="text-xs text-muted-foreground">
+        {mode === "cli"
+          ? t(
+              "Each harness has its own skill directory. Install writes the skill there; a harness is detected from its app, its config directory, or its CLI on PATH."
+            )
+          : t(
+              "Registers agent2ssh-mcp in the client. Those tools stay in the harness context for every session."
+            )}
+      </p>
+
+      {mode === "cli" && cli && (
         <div className="flex items-center justify-between gap-3.5 rounded-lg border border-border bg-card p-3 max-md:flex-col max-md:items-stretch">
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <BookOpen size={16} className="text-muted-foreground" />
-              <strong>{t("Agent Skill")}</strong>
-              <Badge
-                variant={
-                  !skill.installed ? "secondary" : skill.update_available ? "warning" : "success"
-                }
-              >
-                {!skill.installed
-                  ? t("Not installed")
-                  : skill.update_available
-                    ? t("Update available")
-                    : t("Installed")}
+              <Code2 size={16} className="text-muted-foreground" />
+              <strong>{t("CLI")}</strong>
+              <Badge variant={cli.installed ? "success" : "secondary"}>
+                {cli.installed ? t("On PATH") : t("Not on PATH")}
               </Badge>
-              {skill.installed && skill.installed_version && (
-                <Badge variant="outline">v{skill.installed_version}</Badge>
-              )}
             </div>
             <div className="mt-2 flex flex-wrap gap-1.5">
-              <span className={chipCls} title={skill.path}>
-                {skill.dir}
-              </span>
-              {skill.available_version && (
-                <code className={chipCls}>
-                  {t("bundled: v{version}", { version: skill.available_version })}
-                </code>
-              )}
+              <code className={chipCls} title={cli.cliPath}>
+                {cli.cliPath}
+              </code>
             </div>
             <p className="mt-1.5 text-xs text-muted-foreground">
-              {t(
-                "Installs the Agent2SSH SKILL.md into the Claude Code skills directory so skill-capable agents pick up CLI/MCP usage guidance automatically."
-              )}
+              {cli.message} {t("Open a new terminal after changing PATH.")}
             </p>
+            <code className="mt-2 block truncate text-[11px] text-muted-foreground">
+              {t("Example")} agent2ssh local exec -H local:zsh &quot;cargo build&quot; --json
+            </code>
           </div>
           <div className="flex items-center gap-2 max-md:justify-end">
-            <Button size="sm" onClick={installSkill} disabled={skillBusy}>
-              {skill.update_available ? <ArrowUpCircle size={14} /> : <BookOpen size={14} />}
-              {skillBusy
-                ? t("Working...")
-                : skill.update_available
-                  ? t("Update")
-                  : skill.installed
-                    ? t("Reinstall")
-                    : t("Install")}
-            </Button>
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={uninstallSkill}
-              disabled={skillBusy || !skill.installed}
-              title={t("Remove the installed agent skill")}
-            >
-              <Trash2 size={14} />
-              {t("Uninstall")}
+            <Button size="sm" onClick={toggleCliPath} disabled={cliBusy || !cli.cliExists}>
+              {cliBusy ? t("Working...") : cli.installed ? t("Remove CLI from PATH") : t("Add CLI to PATH")}
             </Button>
           </div>
         </div>
       )}
 
-      <div className="grid gap-2.5">
+      {mode === "cli" && (
+        <div className="grid gap-2.5">
+          {harnesses.map((harness) => {
+            const busy = skillBusy !== null;
+            return (
+              <div
+                key={harness.id}
+                className="flex items-center justify-between gap-3.5 rounded-lg border border-border bg-card p-3 max-md:flex-col max-md:items-stretch"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <AgentLogo id={harness.id} />
+                    <strong>{harness.name}</strong>
+                    <Badge variant={harness.detected ? "default" : "secondary"}>
+                      {harness.detected ? t("Detected") : t("Not detected")}
+                    </Badge>
+                    <Badge
+                      variant={
+                        !harness.installed
+                          ? "secondary"
+                          : harness.update_available
+                            ? "warning"
+                            : "success"
+                      }
+                    >
+                      {!harness.installed
+                        ? t("Not installed")
+                        : harness.update_available
+                          ? t("Update available")
+                          : t("Installed")}
+                    </Badge>
+                    {harness.installed && harness.installed_version && (
+                      <Badge variant="outline">v{harness.installed_version}</Badge>
+                    )}
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    <span className={chipCls} title={harness.path}>
+                      {harness.dir}
+                    </span>
+                    {harness.available_version && (
+                      <code className={chipCls}>
+                        {t("bundled: v{version}", { version: harness.available_version })}
+                      </code>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 max-md:justify-end">
+                  <Button size="sm" onClick={() => installSkill(harness)} disabled={busy}>
+                    {harness.update_available ? <ArrowUpCircle size={14} /> : <BookOpen size={14} />}
+                    {skillBusy === harness.id
+                      ? t("Working...")
+                      : harness.update_available
+                        ? t("Update")
+                        : harness.installed
+                          ? t("Reinstall")
+                          : t("Install")}
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={() => uninstallSkill(harness)}
+                    disabled={busy || !harness.installed}
+                    title={t("Remove the installed agent skill")}
+                  >
+                    <Trash2 size={14} />
+                    {t("Uninstall")}
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {mode === "mcp" && <div className="grid gap-2.5">
         {agents.map((agent) => {
           const invalid = agent.status.startsWith("invalid_config");
           const needsRebind = agent.status === "needs_rebind";
@@ -253,10 +362,7 @@ function McpAgentsPanel() {
             >
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
-                  {(() => {
-                    const AgentIcon = agentIconFor(agent);
-                    return <AgentIcon size={16} className="text-muted-foreground" />;
-                  })()}
+                  <AgentLogo id={agent.id} />
                   <strong>{agent.name}</strong>
                   <Badge
                     variant={
@@ -339,7 +445,7 @@ function McpAgentsPanel() {
             </div>
           );
         })}
-      </div>
+      </div>}
     </Card>
   );
 }

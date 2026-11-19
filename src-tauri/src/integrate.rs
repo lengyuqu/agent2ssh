@@ -74,6 +74,8 @@ pub struct McpClientCandidate {
     pub config_path: PathBuf,
     pub format: McpConfigFormat,
     pub detection_paths: Vec<PathBuf>,
+    /// Executable names that count as an install when one of them is on `PATH`.
+    pub cli_names: &'static [&'static str],
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -116,199 +118,240 @@ fn home_path(relative: &str) -> PathBuf {
         .join(relative)
 }
 
-fn mcp_candidate_paths(legacy_path: &str, platform_path: &str) -> Vec<PathBuf> {
+/// Per-user config root: `~/Library/Application Support` on macOS, `%APPDATA%`
+/// on Windows, `~/.config` on Linux.
+fn user_config_file(parts: &[&str]) -> PathBuf {
+    let mut path = dirs::config_dir().unwrap_or_else(|| home_path(".config"));
+    for part in parts {
+        path = path.join(part);
+    }
+    path
+}
+
+fn user_data_dir(name: &str) -> PathBuf {
+    user_config_file(&[name])
+}
+
+/// Install locations that differ by operating system. A hit on any of them, or
+/// on a CLI name later, means the client is installed. Home dot-directories
+/// (`.claude`, `.trae-cn`, …) are the same shape on every OS and are added by
+/// the caller.
+fn install_evidence(app_names: &[&str]) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-
-    if let Some(config_dir) = dirs::config_dir() {
-        paths.push(config_dir.join(platform_path));
+    if cfg!(target_os = "macos") {
+        for name in app_names {
+            let bundle = format!("{name}.app");
+            paths.push(PathBuf::from("/Applications").join(&bundle));
+            paths.push(home_path("Applications").join(bundle));
+        }
+    } else if cfg!(windows) {
+        let mut roots = Vec::new();
+        for key in ["ProgramFiles", "ProgramFiles(x86)"] {
+            if let Some(value) = std::env::var_os(key) {
+                roots.push(PathBuf::from(value));
+            }
+        }
+        if let Some(local) = dirs::data_local_dir() {
+            roots.push(local.join("Programs"));
+        }
+        for root in roots {
+            for name in app_names {
+                paths.push(root.join(name));
+            }
+        }
+    } else {
+        for name in app_names {
+            let slug = name.to_ascii_lowercase().replace(' ', "-");
+            paths.push(PathBuf::from("/opt").join(name));
+            paths.push(PathBuf::from("/usr/bin").join(&slug));
+            paths.push(PathBuf::from("/usr/share/applications").join(format!("{slug}.desktop")));
+            paths.push(home_path(".local/share/applications").join(format!("{slug}.desktop")));
+        }
     }
-    if let Some(local_dir) = dirs::data_local_dir() {
-        paths.push(local_dir.join(platform_path));
-    }
-
-    paths.push(home_path(legacy_path));
     paths
 }
 
-fn preferred_mcp_path(legacy_path: &str, platform_path: &str) -> PathBuf {
-    mcp_candidate_paths(legacy_path, platform_path)
-        .into_iter()
-        .find(|path| path.exists())
-        .or_else(|| {
-            dirs::config_dir()
-                .map(|config_dir| config_dir.join(platform_path))
-                .or_else(|| dirs::data_local_dir().map(|local_dir| local_dir.join(platform_path)))
-                .or_else(|| Some(home_path(legacy_path)))
-        })
-        .unwrap_or_else(|| PathBuf::from("."))
+struct ClientSpec {
+    id: &'static str,
+    name: &'static str,
+    source: &'static str,
+    mcp_config: Option<PathBuf>,
+    mcp_format: McpConfigFormat,
+    /// `~/<dot>/skills/agent2ssh` when this client loads Agent Skills.
+    skill_dir: Option<PathBuf>,
+    detection_paths: Vec<PathBuf>,
+    cli_names: &'static [&'static str],
 }
 
-pub fn mcp_client_candidates() -> Vec<McpClientCandidate> {
-    let mut claude_detection_paths =
-        mcp_candidate_paths("Library/Application Support/Claude", "Claude");
-    let mut cursor_detection_paths = mcp_candidate_paths(".cursor", "Cursor");
-    let mut codebuddy_detection_paths =
-        mcp_candidate_paths("Library/Application Support/CodeBuddy", "CodeBuddy");
-    let mut windsurf_detection_paths = mcp_candidate_paths(".codeium/windsurf", "Codeium/windsurf");
-    let mut workbuddy_detection_paths =
-        mcp_candidate_paths("Library/Application Support/WorkBuddy", "WorkBuddy");
-    let mut qoder_work_detection_paths = mcp_candidate_paths(
-        "Library/Application Support/Qoder/SharedClientCache/mcp.json",
-        "Qoder/SharedClientCache/mcp.json",
-    );
-    let mut trae_detection_paths = mcp_candidate_paths("Library/Application Support/Trae", "Trae");
-    let mut trae_solo_detection_paths =
-        mcp_candidate_paths("Library/Application Support/TRAE SOLO", "TRAE SOLO");
+fn skill_install_dir(dot_dir: &str) -> PathBuf {
+    home_path(dot_dir).join("skills").join(SKILL_DIR_NAME)
+}
 
-    if cfg!(target_os = "macos") {
-        claude_detection_paths.push(PathBuf::from("/Applications/Claude.app"));
-        cursor_detection_paths.push(PathBuf::from("/Applications/Cursor.app"));
-        codebuddy_detection_paths.push(PathBuf::from("/Applications/CodeBuddy.app"));
-        windsurf_detection_paths.push(PathBuf::from("/Applications/Windsurf.app"));
-        workbuddy_detection_paths.push(PathBuf::from("/Applications/WorkBuddy.app"));
-        qoder_work_detection_paths.push(PathBuf::from("/Applications/QoderWork.app"));
-        qoder_work_detection_paths.push(PathBuf::from("/Applications/Qoder.app"));
-        trae_detection_paths.push(PathBuf::from("/Applications/Trae.app"));
-        trae_solo_detection_paths.push(PathBuf::from("/Applications/TRAE SOLO.app"));
-    }
+fn with_apps(mut paths: Vec<PathBuf>, app_names: &[&str]) -> Vec<PathBuf> {
+    paths.extend(install_evidence(app_names));
+    paths
+}
 
+fn client_specs() -> Vec<ClientSpec> {
     vec![
-        McpClientCandidate {
+        ClientSpec {
             id: "claude_code",
             name: "Claude Code",
             source: "claude_code",
-            config_path: home_path(".claude.json"),
-            format: McpConfigFormat::Json,
+            mcp_config: Some(home_path(".claude.json")),
+            mcp_format: McpConfigFormat::Json,
+            skill_dir: Some(skill_install_dir(".claude")),
             detection_paths: vec![home_path(".claude"), home_path(".claude.json")],
+            cli_names: &["claude"],
         },
-        McpClientCandidate {
+        ClientSpec {
             id: "codex",
             name: "Codex",
             source: "codex",
-            config_path: home_path(".codex/config.toml"),
-            format: McpConfigFormat::Toml,
+            mcp_config: Some(home_path(".codex/config.toml")),
+            mcp_format: McpConfigFormat::Toml,
+            skill_dir: Some(skill_install_dir(".codex")),
             detection_paths: vec![home_path(".codex"), home_path(".codex/config.toml")],
+            cli_names: &["codex"],
         },
-        McpClientCandidate {
-            id: "gemini_cli",
-            name: "Gemini CLI",
-            source: "gemini_cli",
-            config_path: home_path(".gemini/settings.json"),
-            format: McpConfigFormat::Json,
-            detection_paths: vec![home_path(".gemini"), home_path(".gemini/settings.json")],
-        },
-        McpClientCandidate {
+        ClientSpec {
             id: "claude_desktop",
             name: "Claude Desktop",
             source: "claude_desktop",
-            config_path: preferred_mcp_path(
-                "Library/Application Support/Claude/claude_desktop_config.json",
-                "Claude/claude_desktop_config.json",
-            ),
-            format: McpConfigFormat::Json,
-            detection_paths: claude_detection_paths,
+            mcp_config: Some(user_config_file(&["Claude", "claude_desktop_config.json"])),
+            mcp_format: McpConfigFormat::Json,
+            skill_dir: None,
+            detection_paths: with_apps(vec![user_data_dir("Claude")], &["Claude"]),
+            cli_names: &[],
         },
-        McpClientCandidate {
+        ClientSpec {
             id: "cursor",
             name: "Cursor",
             source: "cursor",
-            config_path: preferred_mcp_path(".cursor/mcp.json", "Cursor/mcp.json"),
-            format: McpConfigFormat::Json,
-            detection_paths: cursor_detection_paths,
+            mcp_config: Some(home_path(".cursor/mcp.json")),
+            mcp_format: McpConfigFormat::Json,
+            skill_dir: Some(skill_install_dir(".cursor")),
+            detection_paths: with_apps(
+                vec![home_path(".cursor"), user_data_dir("Cursor")],
+                &["Cursor"],
+            ),
+            cli_names: &["cursor"],
         },
-        McpClientCandidate {
+        ClientSpec {
             id: "codebuddy",
             name: "CodeBuddy",
             source: "codebuddy",
-            config_path: preferred_mcp_path(
-                "Library/Application Support/CodeBuddy/mcp.json",
-                "CodeBuddy/mcp.json",
+            mcp_config: Some(home_path(".codebuddy/mcp.json")),
+            mcp_format: McpConfigFormat::Json,
+            skill_dir: Some(skill_install_dir(".codebuddy")),
+            detection_paths: with_apps(
+                vec![home_path(".codebuddy"), user_data_dir("CodeBuddy")],
+                &["CodeBuddy"],
             ),
-            format: McpConfigFormat::Json,
-            detection_paths: {
-                codebuddy_detection_paths
-                    .into_iter()
-                    .chain([home_path(".codebuddy")])
-                    .collect()
-            },
+            cli_names: &["codebuddy"],
         },
-        McpClientCandidate {
+        ClientSpec {
             id: "windsurf",
             name: "Windsurf",
             source: "windsurf",
-            config_path: preferred_mcp_path(
-                ".codeium/windsurf/mcp_config.json",
-                "Codeium/windsurf/mcp_config.json",
+            mcp_config: Some(home_path(".codeium/windsurf/mcp_config.json")),
+            mcp_format: McpConfigFormat::Json,
+            skill_dir: None,
+            detection_paths: with_apps(
+                vec![home_path(".codeium/windsurf"), user_data_dir("Windsurf")],
+                &["Windsurf"],
             ),
-            format: McpConfigFormat::Json,
-            detection_paths: windsurf_detection_paths,
+            cli_names: &["windsurf"],
         },
-        McpClientCandidate {
+        ClientSpec {
             id: "workbuddy",
             name: "WorkBuddy",
             source: "workbuddy",
-            config_path: preferred_mcp_path(".workbuddy/mcp.json", "WorkBuddy/mcp.json"),
-            format: McpConfigFormat::Json,
-            detection_paths: {
-                let mut paths = workbuddy_detection_paths;
-                paths.push(home_path(".workbuddy"));
-                paths.push(home_path(
-                    "Library/Application Support/@genie/workbuddy-desktop",
-                ));
-                paths
-            },
-        },
-        McpClientCandidate {
-            id: "qoder_work",
-            name: "Qoder Work",
-            source: "qoder_work",
-            config_path: preferred_mcp_path(
-                "Library/Application Support/Qoder/SharedClientCache/mcp.json",
-                "Qoder/SharedClientCache/mcp.json",
+            mcp_config: Some(home_path(".workbuddy/mcp.json")),
+            mcp_format: McpConfigFormat::Json,
+            skill_dir: Some(skill_install_dir(".workbuddy")),
+            detection_paths: with_apps(
+                vec![home_path(".workbuddy"), user_data_dir("WorkBuddy")],
+                &["WorkBuddy"],
             ),
-            format: McpConfigFormat::Json,
-            detection_paths: {
-                let mut paths = qoder_work_detection_paths;
-                paths.push(home_path("Library/Application Support/QoderWork"));
-                paths.push(home_path("Library/Application Support/Qoder"));
-                paths.push(home_path(".qoderwork"));
-                paths.push(home_path(".qoder"));
-                paths
-            },
+            cli_names: &["workbuddy"],
         },
-        McpClientCandidate {
+        ClientSpec {
+            id: "qoder",
+            name: "Qoder",
+            source: "qoder",
+            // Connectors live in `mcpServers` inside settings.json. A bare
+            // `~/.qoder` is not an install: this machine keeps leftover logs there.
+            mcp_config: Some(home_path(".qoder/settings.json")),
+            mcp_format: McpConfigFormat::Json,
+            skill_dir: Some(skill_install_dir(".qoder")),
+            detection_paths: with_apps(
+                vec![
+                    home_path(".qoder/settings.json"),
+                    user_data_dir("com.qoder.app.stable"),
+                ],
+                &["Qoder"],
+            ),
+            cli_names: &["qoder"],
+        },
+        ClientSpec {
+            id: "qoder_cn",
+            name: "Qoder CN",
+            source: "qoder_cn",
+            mcp_config: Some(home_path(".qoder-cn/settings.json")),
+            mcp_format: McpConfigFormat::Json,
+            skill_dir: Some(skill_install_dir(".qoder-cn")),
+            detection_paths: with_apps(
+                vec![
+                    home_path(".qoder-cn"),
+                    user_data_dir("com.qodercn.app.stable"),
+                ],
+                &["Qoder CN"],
+            ),
+            cli_names: &["qodercn", "qoder-cn"],
+        },
+        ClientSpec {
             id: "trae",
             name: "Trae",
             source: "trae",
-            config_path: preferred_mcp_path(
-                "Library/Application Support/Trae/User/mcp.json",
-                "Trae/User/mcp.json",
-            ),
-            format: McpConfigFormat::Json,
-            detection_paths: {
-                trae_detection_paths
-                    .into_iter()
-                    .chain([home_path(".trae"), home_path(".trae-cn")])
-                    .collect()
-            },
+            mcp_config: Some(user_config_file(&["Trae", "User", "mcp.json"])),
+            mcp_format: McpConfigFormat::Json,
+            skill_dir: Some(skill_install_dir(".trae")),
+            detection_paths: with_apps(vec![user_data_dir("Trae"), home_path(".trae")], &["Trae"]),
+            cli_names: &["trae"],
         },
-        McpClientCandidate {
-            id: "trae_solo",
-            name: "Trae Solo",
-            source: "trae_solo",
-            config_path: preferred_mcp_path(
-                "Library/Application Support/TRAE SOLO/User/mcp.json",
-                "TRAE SOLO/User/mcp.json",
+        ClientSpec {
+            id: "trae_cn",
+            name: "Trae CN",
+            source: "trae_cn",
+            mcp_config: Some(user_config_file(&["Trae CN", "User", "mcp.json"])),
+            mcp_format: McpConfigFormat::Json,
+            skill_dir: Some(skill_install_dir(".trae-cn")),
+            detection_paths: with_apps(
+                vec![user_data_dir("Trae CN"), home_path(".trae-cn")],
+                &["Trae CN", "TRAE CN"],
             ),
-            format: McpConfigFormat::Json,
-            detection_paths: {
-                trae_solo_detection_paths
-                    .into_iter()
-                    .chain([home_path(".trae"), home_path(".trae-cn")])
-                    .collect()
-            },
+            cli_names: &["trae-cn", "traecn"],
         },
     ]
+}
+
+pub fn mcp_client_candidates() -> Vec<McpClientCandidate> {
+    client_specs()
+        .into_iter()
+        .filter_map(|spec| {
+            let config_path = spec.mcp_config?;
+            Some(McpClientCandidate {
+                id: spec.id,
+                name: spec.name,
+                source: spec.source,
+                config_path,
+                format: spec.mcp_format,
+                detection_paths: spec.detection_paths,
+                cli_names: spec.cli_names,
+            })
+        })
+        .collect()
 }
 
 fn find_candidate(client_id: &str) -> Result<McpClientCandidate> {
@@ -350,8 +393,20 @@ pub fn resolve_mcp_binary_path() -> Result<PathBuf> {
     Err(anyhow!("agent2ssh-mcp not found near {}", exe.display()))
 }
 
+fn path_or_cli_detected(paths: &[PathBuf], cli_names: &[&str], config_path: Option<&Path>) -> bool {
+    paths.iter().any(|path| path.exists())
+        || cli_names
+            .iter()
+            .any(|name| resolve_path_command(name).is_some())
+        || config_path.is_some_and(|path| path.exists())
+}
+
 fn client_detected(candidate: &McpClientCandidate) -> bool {
-    candidate.config_path.exists() || candidate.detection_paths.iter().any(|path| path.exists())
+    path_or_cli_detected(
+        &candidate.detection_paths,
+        candidate.cli_names,
+        Some(&candidate.config_path),
+    )
 }
 
 type ConfiguredEntry = (bool, Option<String>, Option<String>, Option<String>);
@@ -793,6 +848,88 @@ pub fn uninstall_agent_skill() -> Result<bool> {
     uninstall_agent_skill_at(&default_skill_dir()?)
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillHarnessStatus {
+    pub id: String,
+    pub name: String,
+    pub detected: bool,
+    pub dir: String,
+    pub path: String,
+    pub installed: bool,
+    pub installed_version: Option<String>,
+    pub available_version: Option<String>,
+    pub update_available: bool,
+}
+
+struct SkillHarness {
+    id: &'static str,
+    name: &'static str,
+    dir: PathBuf,
+    detection_paths: Vec<PathBuf>,
+    cli_names: &'static [&'static str],
+}
+
+fn skill_harnesses() -> Vec<SkillHarness> {
+    client_specs()
+        .into_iter()
+        .filter_map(|spec| {
+            let dir = spec.skill_dir?;
+            Some(SkillHarness {
+                id: spec.id,
+                name: spec.name,
+                dir,
+                detection_paths: spec.detection_paths,
+                cli_names: spec.cli_names,
+            })
+        })
+        .collect()
+}
+
+fn skill_harness_status(harness: &SkillHarness) -> SkillHarnessStatus {
+    let status = agent_skill_status_at(&harness.dir);
+    SkillHarnessStatus {
+        id: harness.id.to_string(),
+        name: harness.name.to_string(),
+        detected: path_or_cli_detected(&harness.detection_paths, harness.cli_names, None),
+        dir: status.dir,
+        path: status.path,
+        installed: status.installed,
+        installed_version: status.installed_version,
+        available_version: status.available_version,
+        update_available: status.update_available,
+    }
+}
+
+fn find_skill_harness(harness_id: &str) -> Result<SkillHarness> {
+    skill_harnesses()
+        .into_iter()
+        .find(|harness| harness.id == harness_id)
+        .ok_or_else(|| {
+            let known = skill_harnesses()
+                .iter()
+                .map(|harness| harness.id)
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow!("unknown skill harness '{harness_id}' (known: {known})")
+        })
+}
+
+pub fn list_skill_harnesses() -> Result<Vec<SkillHarnessStatus>> {
+    Ok(skill_harnesses().iter().map(skill_harness_status).collect())
+}
+
+pub fn install_skill_harness(harness_id: &str) -> Result<SkillHarnessStatus> {
+    let harness = find_skill_harness(harness_id)?;
+    install_agent_skill_at(&harness.dir)?;
+    Ok(skill_harness_status(&harness))
+}
+
+pub fn uninstall_skill_harness(harness_id: &str) -> Result<SkillHarnessStatus> {
+    let harness = find_skill_harness(harness_id)?;
+    uninstall_agent_skill_at(&harness.dir)?;
+    Ok(skill_harness_status(&harness))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1069,15 +1206,116 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    fn component_is(path: &Path, name: &str) -> bool {
+        path.components()
+            .any(|component| component.as_os_str() == name)
+    }
+
     #[test]
-    fn candidates_include_claude_code_and_gemini_cli() {
+    fn candidates_cover_the_editions_people_actually_install() {
         let candidates = mcp_client_candidates();
         assert!(candidates.iter().any(|c| c.id == "claude_code"));
-        assert!(candidates.iter().any(|c| c.id == "gemini_cli"));
-        // Every id is unique.
+        assert!(candidates.iter().any(|c| c.id == "trae"));
+        assert!(candidates.iter().any(|c| c.id == "trae_cn"));
+        assert!(candidates.iter().any(|c| c.id == "qoder"));
+        assert!(candidates.iter().any(|c| c.id == "qoder_cn"));
+        assert!(candidates.iter().all(|c| c.id != "gemini_cli"));
+        assert!(candidates.iter().all(|c| c.id != "qoder_work"));
+        assert!(candidates.iter().all(|c| c.id != "trae_solo"));
         let mut ids: Vec<_> = candidates.iter().map(|c| c.id).collect();
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), candidates.len());
+
+        let qoder = candidates.iter().find(|c| c.id == "qoder").unwrap();
+        assert!(
+            qoder.config_path.ends_with(".qoder/settings.json")
+                || qoder.config_path.ends_with(r".qoder\settings.json")
+        );
+        assert!(qoder
+            .detection_paths
+            .iter()
+            .all(|path| path.file_name().and_then(|name| name.to_str()) != Some(".qoder")));
+        assert!(qoder
+            .detection_paths
+            .iter()
+            .any(|path| path.file_name().and_then(|name| name.to_str()) == Some("settings.json")));
+        assert_eq!(qoder.cli_names, &["qoder"]);
+
+        let qoder_cn = candidates.iter().find(|c| c.id == "qoder_cn").unwrap();
+        assert!(
+            qoder_cn.config_path.ends_with(".qoder-cn/settings.json")
+                || qoder_cn.config_path.ends_with(r".qoder-cn\settings.json")
+        );
+        assert!(qoder_cn.cli_names.contains(&"qodercn"));
+
+        let config_root = dirs::config_dir().expect("config dir");
+        let trae = candidates.iter().find(|c| c.id == "trae").unwrap();
+        assert!(trae.config_path.starts_with(&config_root));
+        assert!(trae
+            .config_path
+            .ends_with(Path::new("Trae").join("User").join("mcp.json")));
+        assert!(trae
+            .detection_paths
+            .iter()
+            .all(|path| !component_is(path, ".trae-cn")));
+        assert!(trae
+            .detection_paths
+            .iter()
+            .any(|path| component_is(path, ".trae")));
+
+        let trae_cn = candidates.iter().find(|c| c.id == "trae_cn").unwrap();
+        assert!(trae_cn.config_path.starts_with(&config_root));
+        assert!(trae_cn
+            .config_path
+            .ends_with(Path::new("Trae CN").join("User").join("mcp.json")));
+        assert!(trae_cn
+            .detection_paths
+            .iter()
+            .any(|path| component_is(path, ".trae-cn")));
+        assert!(trae_cn
+            .detection_paths
+            .iter()
+            .all(|path| !component_is(path, ".trae")));
+    }
+
+    #[test]
+    fn skill_harnesses_use_each_clients_own_directory() {
+        let harnesses = list_skill_harnesses().unwrap();
+        let dir_of = |id: &str| {
+            harnesses
+                .iter()
+                .find(|harness| harness.id == id)
+                .unwrap_or_else(|| panic!("missing skill harness {id}"))
+                .dir
+                .clone()
+        };
+        assert!(
+            dir_of("claude_code").ends_with(".claude/skills/agent2ssh")
+                || dir_of("claude_code").ends_with(r".claude\skills\agent2ssh")
+        );
+        assert!(
+            dir_of("qoder_cn").ends_with(".qoder-cn/skills/agent2ssh")
+                || dir_of("qoder_cn").ends_with(r".qoder-cn\skills\agent2ssh")
+        );
+        assert!(
+            dir_of("trae").ends_with(".trae/skills/agent2ssh")
+                || dir_of("trae").ends_with(r".trae\skills\agent2ssh")
+        );
+        assert!(
+            dir_of("trae_cn").ends_with(".trae-cn/skills/agent2ssh")
+                || dir_of("trae_cn").ends_with(r".trae-cn\skills\agent2ssh")
+        );
+        assert!(harnesses
+            .iter()
+            .all(|harness| harness.id != "claude_desktop"));
+        assert!(harnesses.iter().all(|harness| harness.id != "windsurf"));
+        let mut ids: Vec<_> = harnesses
+            .iter()
+            .map(|harness| harness.id.as_str())
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), harnesses.len());
     }
 }

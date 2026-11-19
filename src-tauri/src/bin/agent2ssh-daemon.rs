@@ -1929,8 +1929,9 @@ async fn exec(
 /// Run a command on the machine the daemon itself is running on.
 ///
 /// `host` selects the terminal environment: `local` for the shell the app would
-/// open, `local:<environment>` for a named one (`local:pwsh`, `local:cmd`,
-/// `local:gitbash`, `local:vs`, `local:wsl[:<distribution>]`), or
+/// open, `local:<environment>` for a named shell of this machine's OS
+/// (Windows: `pwsh`/`cmd`/`gitbash`/`vs`/`wsl[:<distribution>]`; macOS:
+/// `zsh`/`bash`/`sh`/`pwsh`; Linux: `bash`/`sh`/`dash`/`zsh`/`pwsh`), or
 /// `local:<runtime>:<container-id>` (`local:docker:abc123`) to run one command
 /// inside a container through the runtime CLI's non-TTY exec. The
 /// environment rides in the host id so that everything already keyed on `host` —
@@ -5787,8 +5788,41 @@ async fn serve_console() -> axum::response::Html<&'static str> {
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
+/// `--version` and `--help` must exit before anything listens. A harness that
+/// probes the binary used to start a real daemon on `127.0.0.1:7722`.
+fn startup_probe(args: &[String]) -> Option<&'static str> {
+    let wants_version = args.iter().any(|arg| arg == "--version" || arg == "-V");
+    let wants_help = args.iter().any(|arg| arg == "--help" || arg == "-h");
+    match (wants_version, wants_help) {
+        (true, _) => Some("version"),
+        (false, true) => Some("help"),
+        (false, false) => None,
+    }
+}
+
+fn print_startup_probe(kind: &str) {
+    let version = env!("CARGO_PKG_VERSION");
+    match kind {
+        "version" => println!("agent2ssh-daemon {version}"),
+        "help" => println!(
+            "agent2ssh-daemon {version}\n\
+             \n\
+             Listen on 127.0.0.1:7722 for the local agent2ssh daemon.\n\
+             \n\
+               --version, -V   print the version and exit\n\
+               --help, -h      print this help and exit"
+        ),
+        _ => {}
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(kind) = startup_probe(&args) {
+        print_startup_probe(kind);
+        return Ok(());
+    }
     std::env::set_var("AGENT2SSH_APPROVAL_PERSIST", "1");
     let config_dir = config_dir()?;
     #[cfg(target_os = "macos")]
@@ -5879,10 +5913,9 @@ async fn main() -> anyhow::Result<()> {
     }
     install_hangup_handler();
 
-    // User-defined local environments are read here, once, and not again for the
-    // life of this process (see `local_environments`): an edit to the file
-    // becomes effective only by restarting the daemon, which a request cannot do.
-    // Problems are logged now so a bad definition is seen before an agent hits it.
+    // User-defined local environments are read here so a bad definition is
+    // logged before an agent hits it. A later edit is picked up by the next
+    // command that resolves an environment; this read is the startup copy.
     let custom_environments = agent2ssh::local_environments::reload();
     if !custom_environments.is_empty() {
         tracing::info!(
@@ -6225,6 +6258,19 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn version_and_help_are_answered_before_the_listener_starts() {
+        assert_eq!(
+            super::startup_probe(&["--version".to_string()]),
+            Some("version")
+        );
+        assert_eq!(super::startup_probe(&["-V".to_string()]), Some("version"));
+        assert_eq!(super::startup_probe(&["--help".to_string()]), Some("help"));
+        assert_eq!(super::startup_probe(&["-h".to_string()]), Some("help"));
+        assert_eq!(super::startup_probe(&[]), None);
+        assert_eq!(super::startup_probe(&["--foreground".to_string()]), None);
+    }
+
     #[tokio::test]
     async fn stalled_websocket_future_is_dropped_after_shutdown_deadline() {
         use std::sync::{

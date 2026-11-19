@@ -6,7 +6,7 @@ Agent2SSH 作为 MCP (Model Context Protocol) stdio 服务器运行，可与任�
 >
 > ```bash
 > agent2ssh integrate list                # 查看各客户端的探测/注册状态
-> agent2ssh integrate add claude_code     # 注册（支持 claude_code / claude_desktop / cursor / codex / gemini_cli / windsurf 等）
+> agent2ssh integrate add claude_code     # 注册（支持 claude_code / claude_desktop / cursor / codex / trae / trae_cn / qoder / qoder_cn / windsurf 等）
 > agent2ssh integrate rm claude_code      # 移除注册（保留备份）
 > agent2ssh integrate skill install       # 将 Agent Skill 安装到 ~/.claude/skills/agent2ssh
 > ```

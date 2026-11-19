@@ -28,10 +28,10 @@ agent2ssh integrate skill uninstall
 
 # MCP 客户端注册也有对应的一条命令：
 agent2ssh integrate list
-agent2ssh integrate add claude_code   # 或 claude_desktop / cursor / codex / gemini_cli / windsurf 等
+agent2ssh integrate add claude_code   # 或 claude_desktop / cursor / codex / trae / trae_cn / qoder / qoder_cn / windsurf 等
 ```
 
-桌面端 **MCP Agents 面板**提供同样的图形化操作：客户端探测与 MCP 注册/更新/卸载，以及 Agent Skill 的安装/更新（内置版本高于已装版本时提示）/卸载。
+桌面端 **MCP/CLI 面板**按当前系统的安装位置探测客户端：MCP 页注册 `agent2ssh-mcp`，Skills + CLI 页把同一份 skill 装进每家 harness 自己的 skill 目录（Claude Code、Codex、Cursor、CodeBuddy、WorkBuddy、Qoder、Qoder CN、Trae、Trae CN）。CLI 的 `integrate skill` 仍默认写 `~/.claude/skills/agent2ssh`，可用 `--dir` 覆盖。
 
 ---
 

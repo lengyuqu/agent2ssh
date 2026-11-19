@@ -423,6 +423,23 @@ pub fn daemon_health_pid() -> Option<u32> {
     health_identity().map(|identity| identity.pid)
 }
 
+/// Whether the macOS identity channel says `pid` is the daemon in the PID record.
+///
+/// `/health` on this platform is not a proof of identity, so a match here does
+/// not authorize sending the admin token during the check. It does say the
+/// desktop may attach to the process that already answered the hello.
+#[cfg(target_os = "macos")]
+pub fn macos_identity_confirms_pid(pid: u32) -> bool {
+    if daemon_health_pid() != Some(pid) {
+        return false;
+    }
+    let Ok(dir) = config_dir() else {
+        return false;
+    };
+    crate::daemon_identity::macos_client::inspect_unbound(&dir, pid)
+        .is_ok_and(|observed| observed.peer_pid == pid)
+}
+
 /// What the unchanged `/health` route says about the process that answered it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HealthIdentity {
@@ -2399,6 +2416,12 @@ pub fn request_unbound_graceful_shutdown(pid: u32) -> Result<ShutdownReceipt> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_pid_with_no_identity_record_is_not_confirmed() {
+        assert!(!macos_identity_confirms_pid(u32::MAX));
+    }
 
     #[test]
     fn shutdown_receipt_requires_true_ok_and_matching_numeric_pid() {

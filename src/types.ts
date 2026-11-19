@@ -358,6 +358,18 @@ export type AgentSkillStatus = {
   update_available: boolean;
 };
 
+export type SkillHarnessStatus = {
+  id: string;
+  name: string;
+  detected: boolean;
+  dir: string;
+  path: string;
+  installed: boolean;
+  installed_version?: string | null;
+  available_version?: string | null;
+  update_available: boolean;
+};
+
 // Rust: types.rs — SftpResult
 // direction is SftpDirection enum (rename_all = "lowercase"): "upload" | "download"
 export type SftpResult = {

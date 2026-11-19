@@ -303,8 +303,9 @@ pub enum LocalEnvironment {
     /// Windows `cmd.exe`.
     Cmd,
     /// The MSYS shell shipped with Git for Windows, so `git`, `grep`, `sed` and
-    /// POSIX path handling behave as they do in Git Bash. Aliases: `gitbash`,
-    /// `bash`.
+    /// POSIX path handling behave as they do in Git Bash. Addressed as
+    /// `gitbash`. On Windows the bare name `bash` is an alias for this; on
+    /// macOS and Linux `bash` is the system shell, [`Self::Bash`].
     GitBash,
     /// A Visual Studio developer shell: MSVC's `cl.exe`/`link.exe` on `PATH` and
     /// `INCLUDE`/`LIB`/`LIBPATH` populated, so a compile works without the user
@@ -315,12 +316,35 @@ pub enum LocalEnvironment {
     /// for the default distribution, or `local:wsl:<distribution>` for a named
     /// one. Windows only, in practice.
     Wsl,
+    /// The system `zsh`. The macOS login shell, and a named target on Linux.
+    Zsh,
+    /// The system `bash`. This is not Git Bash — that name is [`Self::GitBash`],
+    /// and on Windows `bash` still resolves to it.
+    Bash,
+    /// The system POSIX `sh`.
+    Sh,
+    /// Debian and Ubuntu's `/bin/sh`, when it is Dash rather than Bash. A Linux
+    /// target; macOS has no Dash.
+    Dash,
 }
 
 impl LocalEnvironment {
     /// The ids a caller may name after `local:`, in the order an error message
     /// should list them.
-    pub const SELECTABLE_IDS: [&'static str; 5] = ["pwsh", "cmd", "gitbash", "vs", "wsl"];
+    ///
+    /// The set for this host's operating system. Windows names its consoles.
+    /// macOS names zsh, bash and sh. Linux names bash, sh, dash and zsh.
+    /// PowerShell is on every set because it installs on all three. `cmd`,
+    /// `gitbash`, `vs` and `wsl` still parse off Windows, so a request for one
+    /// fails later with the missing binary named.
+    #[cfg(windows)]
+    pub const SELECTABLE_IDS: &'static [&'static str] = &["pwsh", "cmd", "gitbash", "vs", "wsl"];
+
+    #[cfg(target_os = "macos")]
+    pub const SELECTABLE_IDS: &'static [&'static str] = &["zsh", "bash", "sh", "pwsh"];
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub const SELECTABLE_IDS: &'static [&'static str] = &["bash", "sh", "dash", "zsh", "pwsh"];
 
     /// The id that follows `local:` on the wire.
     pub const fn id(self) -> &'static str {
@@ -331,6 +355,10 @@ impl LocalEnvironment {
             Self::GitBash => "gitbash",
             Self::VsDevShell => "vs",
             Self::Wsl => "wsl",
+            Self::Zsh => "zsh",
+            Self::Bash => "bash",
+            Self::Sh => "sh",
+            Self::Dash => "dash",
         }
     }
 
@@ -343,24 +371,40 @@ impl LocalEnvironment {
         match id.trim().to_ascii_lowercase().as_str() {
             "pwsh" | "powershell" => Some(Self::Pwsh),
             "cmd" => Some(Self::Cmd),
-            "gitbash" | "bash" => Some(Self::GitBash),
+            "gitbash" => Some(Self::GitBash),
+            // On Windows a bare `bash` has always meant Git Bash. On macOS and
+            // Linux it is the system bash; Git Bash keeps the explicit name.
+            "bash" => Some(bash_environment()),
             "vs" | "vsdev" => Some(Self::VsDevShell),
             "wsl" => Some(Self::Wsl),
+            "zsh" => Some(Self::Zsh),
+            "sh" => Some(Self::Sh),
+            "dash" => Some(Self::Dash),
             _ => None,
         }
     }
 
-    /// How this environment is described in prose and in error messages.
     /// Whether a command this environment interprets is bash, so the risk
     /// classifier — which parses bash — reads the same language.
     ///
     /// `local:wsl` counts: the id enters a Unix shell inside the distribution.
-    /// `GitBash` counts for the same reason. The rest do not, and that is the
-    /// whole point of the question.
+    /// `GitBash` counts for the same reason, and so do the system POSIX shells
+    /// (`zsh`, `bash`, `sh`, `dash`). The Windows consoles do not, and that is
+    /// the whole point of the question.
     pub const fn is_bash_compatible(self) -> bool {
-        matches!(self, Self::Default | Self::GitBash | Self::Wsl)
+        matches!(
+            self,
+            Self::Default
+                | Self::GitBash
+                | Self::Wsl
+                | Self::Zsh
+                | Self::Bash
+                | Self::Sh
+                | Self::Dash
+        )
     }
 
+    /// How this environment is described in prose and in error messages.
     pub const fn label(self) -> &'static str {
         match self {
             Self::Default => "the default shell",
@@ -369,9 +413,34 @@ impl LocalEnvironment {
             Self::GitBash => "Git Bash",
             Self::VsDevShell => "the Visual Studio developer shell",
             Self::Wsl => "a WSL distribution",
+            Self::Zsh => "zsh",
+            Self::Bash => "bash",
+            Self::Sh => "sh",
+            Self::Dash => "dash",
         }
     }
 }
+
+/// What the bare name `bash` means on this host.
+///
+/// Windows has no system bash that runs commands: `bash.exe` on PATH is Git
+/// Bash or a WSL launcher, and the name has meant Git Bash since the
+/// environment existed. macOS and Linux have a real `/bin/bash`.
+#[cfg(windows)]
+const fn bash_environment() -> LocalEnvironment {
+    LocalEnvironment::GitBash
+}
+
+#[cfg(not(windows))]
+const fn bash_environment() -> LocalEnvironment {
+    LocalEnvironment::Bash
+}
+
+#[cfg(windows)]
+const WSL_HINT: &str = ", a WSL distribution as 'local:wsl:<distribution>'";
+
+#[cfg(not(windows))]
+const WSL_HINT: &str = "";
 
 /// A local environment as requested, decoded from a `local[:...]` host id.
 ///
@@ -410,9 +479,8 @@ pub fn environment_for_host(host: &str) -> Result<LocalEnvironmentRequest> {
     };
     let environment = LocalEnvironment::from_id(kind).ok_or_else(|| {
         anyhow!(
-            "unknown local environment '{kind}': expected one of {}, a WSL distribution as \
-             'local:wsl:<distribution>', or a container as 'local:<runtime>:<container-id>' \
-             (runtime: {})",
+            "unknown local environment '{kind}': expected one of {}{WSL_HINT}, or a container \
+             as 'local:<runtime>:<container-id>' (runtime: {})",
             LocalEnvironment::SELECTABLE_IDS.join(", "),
             ContainerRuntime::ALL
                 .iter()
@@ -496,6 +564,13 @@ impl EnvironmentPlan {
             cwd: None,
         }
     }
+}
+
+/// A system POSIX shell addressed by its binary stem (`zsh`, `bash`, `sh`, `dash`).
+fn posix_shell_plan(installed: &[ShellInfo], stem: &str) -> Result<EnvironmentPlan> {
+    shell_with_stem(installed, &[stem])
+        .map(|shell| EnvironmentPlan::plain(&shell))
+        .ok_or_else(|| anyhow!("{stem} is not installed on this machine"))
 }
 
 /// The first installed shell whose binary stem is one of `stems`, in the order
@@ -761,6 +836,10 @@ pub(crate) fn resolve_environment(request: LocalEnvironmentRequest) -> Result<En
             }),
         LocalEnvironment::VsDevShell => vs_dev_shell_plan(&installed),
         LocalEnvironment::Wsl => wsl_plan(distro.as_deref(), &installed),
+        LocalEnvironment::Zsh => posix_shell_plan(&installed, "zsh"),
+        LocalEnvironment::Bash => posix_shell_plan(&installed, "bash"),
+        LocalEnvironment::Sh => posix_shell_plan(&installed, "sh"),
+        LocalEnvironment::Dash => posix_shell_plan(&installed, "dash"),
         // Returned before the scan. Kept so the match stays total and a future
         // variant cannot silently inherit another environment's behaviour.
         LocalEnvironment::Default => Ok(EnvironmentPlan::plain(&resolve_shell())),
@@ -1577,7 +1656,7 @@ mod tests {
 
     #[test]
     fn environment_ids_round_trip_with_their_aliases() {
-        for id in LocalEnvironment::SELECTABLE_IDS {
+        for id in LocalEnvironment::SELECTABLE_IDS.iter().copied() {
             let environment = LocalEnvironment::from_id(id).expect("a selectable id must parse");
             assert_eq!(environment.id(), id, "id and parsing must agree");
         }
@@ -1585,9 +1664,17 @@ mod tests {
             LocalEnvironment::from_id("powershell"),
             Some(LocalEnvironment::Pwsh)
         );
+        // `bash` is Git Bash only on Windows. Elsewhere it is the system shell,
+        // and Git Bash keeps the explicit id.
+        #[cfg(windows)]
         assert_eq!(
             LocalEnvironment::from_id("bash"),
             Some(LocalEnvironment::GitBash)
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            LocalEnvironment::from_id("bash"),
+            Some(LocalEnvironment::Bash)
         );
         assert_eq!(
             LocalEnvironment::from_id("vsdev"),
@@ -1596,6 +1683,27 @@ mod tests {
         assert_eq!(
             LocalEnvironment::from_id("VS"),
             Some(LocalEnvironment::VsDevShell)
+        );
+    }
+
+    /// macOS and Linux `local:bash` runs the system bash. Git Bash stays the
+    /// explicit `local:gitbash` id, and that id still parses here so a request
+    /// for it is refused by name rather than treated as an unknown environment.
+    #[cfg(unix)]
+    #[test]
+    fn bash_on_unix_is_the_system_shell() {
+        assert_eq!(
+            LocalEnvironment::from_id("gitbash"),
+            Some(LocalEnvironment::GitBash)
+        );
+        let plan = resolve_environment(LocalEnvironmentRequest::plain(LocalEnvironment::Bash))
+            .expect("this host has a system bash");
+        assert_eq!(file_stem_lower(&plan.program), "bash");
+        assert!(plan.risk_is_classifiable());
+        assert!(
+            !plan.label.to_ascii_lowercase().contains("git"),
+            "system bash was labeled as Git Bash: {}",
+            plan.label
         );
     }
 
@@ -1609,7 +1717,7 @@ mod tests {
         let error = environment_for_host("local:nope").expect_err("must be refused");
         let message = error.to_string();
         assert!(message.contains("nope"), "message was {message}");
-        for id in LocalEnvironment::SELECTABLE_IDS {
+        for id in LocalEnvironment::SELECTABLE_IDS.iter().copied() {
             assert!(message.contains(id), "message omits '{id}': {message}");
         }
     }
@@ -2043,6 +2151,10 @@ mod tests {
     fn the_environment_base_decides_not_the_operating_system() {
         assert!(LocalEnvironment::GitBash.is_bash_compatible());
         assert!(LocalEnvironment::Wsl.is_bash_compatible());
+        assert!(LocalEnvironment::Zsh.is_bash_compatible());
+        assert!(LocalEnvironment::Bash.is_bash_compatible());
+        assert!(LocalEnvironment::Sh.is_bash_compatible());
+        assert!(LocalEnvironment::Dash.is_bash_compatible());
         assert!(!LocalEnvironment::Cmd.is_bash_compatible());
         assert!(!LocalEnvironment::Pwsh.is_bash_compatible());
         assert!(!LocalEnvironment::VsDevShell.is_bash_compatible());

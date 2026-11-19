@@ -23,18 +23,19 @@ use agent2ssh::store::{audit_path, compute_metrics_trend, restrict_file_to_owner
 use agent2ssh::types::{HighlightRule, RedactRuleInfo};
 use agent2ssh::{
     add_host_core, add_snippet, collect_health_snapshot, compare_exec_results, dry_run_playbook,
-    effective_command_risk, exec_multi_core, exec_multi_with_strategy, exec_ssh_core,
-    export_audit_csv, export_audit_jsonl, export_team_config, filter_hosts, import_ssh_config_core,
-    import_team_config, list_audit_core, list_daemons_core, list_hosts_filtered_core,
-    list_playbooks_core, load_snippets, ping_hosts_core, preview_exec, preview_exec_multi,
-    remove_host_core, remove_snippet, run_playbook_core_with_source_and_approved_steps,
-    sftp_download_core_with_source, sftp_ls_core_with_source, sftp_mkdir_core_with_source,
-    sftp_remove_dir_all_core_with_source, sftp_remove_dir_core_with_source,
-    sftp_remove_file_core_with_source, sftp_rename_core_with_source, sftp_stat_core_with_source,
-    sftp_upload_core_with_source, source_from_transport, validate_policy_path, AuditFilter,
-    BatchStrategy, ExecComparison, ExecMultiBatchRequest, ExecMultiRequest, ExecRequest,
-    ExecutionGateStatus, ForwardDirection, ForwardRule, HostFilter, HostProfile, PolicyDecision,
-    PolicyTestResult, RiskLevel, SftpDownloadRequest, SftpUploadRequest, Snippet, TeamConfigExport,
+    effective_command_risk, exec_local_core, exec_multi_core, exec_multi_with_strategy,
+    exec_ssh_core, export_audit_csv, export_audit_jsonl, export_team_config, filter_hosts,
+    import_ssh_config_core, import_team_config, list_audit_core, list_daemons_core,
+    list_hosts_filtered_core, list_playbooks_core, load_snippets, ping_hosts_core, preview_exec,
+    preview_exec_multi, remove_host_core, remove_snippet,
+    run_playbook_core_with_source_and_approved_steps, sftp_download_core_with_source,
+    sftp_ls_core_with_source, sftp_mkdir_core_with_source, sftp_remove_dir_all_core_with_source,
+    sftp_remove_dir_core_with_source, sftp_remove_file_core_with_source,
+    sftp_rename_core_with_source, sftp_stat_core_with_source, sftp_upload_core_with_source,
+    source_from_transport, validate_policy_path, AuditFilter, BatchStrategy, ExecComparison,
+    ExecMultiBatchRequest, ExecMultiRequest, ExecRequest, ExecutionGateStatus, ForwardDirection,
+    ForwardRule, HostFilter, HostProfile, PolicyDecision, PolicyTestResult, RiskLevel,
+    SftpDownloadRequest, SftpUploadRequest, Snippet, TeamConfigExport,
 };
 use agent2ssh::{
     highlight::{
@@ -1336,9 +1337,10 @@ enum RedactCommands {
 enum LocalCommands {
     /// Run one command in a one-shot local environment via the daemon
     Exec {
-        /// Target environment: `local`, `local:<environment>` (`local:pwsh`,
-        /// `local:cmd`, `local:gitbash`, `local:vs`, `local:wsl[:<dist>]`, or an
-        /// id you defined in `environments.toml`) or
+        /// Target environment: `local`, `local:<environment>` for a shell of
+        /// this machine's OS (Windows: `pwsh`/`cmd`/`gitbash`/`vs`/`wsl[:<dist>]`;
+        /// macOS: `zsh`/`bash`/`sh`/`pwsh`; Linux: `bash`/`sh`/`dash`/`zsh`/`pwsh`;
+        /// or an id from `environments.toml`) or
         /// `local:<runtime>:<container-id>` (`local:docker:abc123`)
         #[arg(short = 'H', long)]
         host: String,
@@ -1802,6 +1804,15 @@ async fn remote_config<R: serde::de::DeserializeOwned>(
         .json()
         .await
         .context("failed to decode the daemon's config response")
+}
+
+/// True when the daemon was not reached at all, so nothing was sent.
+fn daemon_was_not_reached(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|err| err.is_connect())
+    })
 }
 
 /// The alias to route through, or `None` to act on this machine.
@@ -4443,23 +4454,51 @@ async fn async_main() -> Result<()> {
                 side_effect,
                 json,
             } => {
-                let result: serde_json::Value = remote_config(
-                    daemon_alias.as_deref().unwrap_or("localhost"),
-                    reqwest::Method::POST,
-                    "/local-exec",
-                    Some(serde_json::json!({
-                        "host": host,
-                        "command": command,
-                        "timeout_secs": timeout_secs,
-                        "force": force,
-                        "reason": reason,
-                        "change_id": change_id,
-                        "side_effect": side_effect,
-                        "source": "cli",
-                    })),
-                )
-                .await?;
-                print_daemon_exec_result(&result, json)?;
+                let payload = serde_json::json!({
+                    "host": host,
+                    "command": command,
+                    "timeout_secs": timeout_secs,
+                    "force": force,
+                    "reason": reason,
+                    "change_id": change_id,
+                    "side_effect": side_effect,
+                    "source": "cli",
+                });
+                let alias = daemon_alias.as_deref().unwrap_or("localhost");
+                match remote_config(alias, reqwest::Method::POST, "/local-exec", Some(payload))
+                    .await
+                {
+                    Ok(result) => print_daemon_exec_result(&result, json)?,
+                    Err(error) if alias == "localhost" && daemon_was_not_reached(&error) => {
+                        eprintln!(
+                            "agent2ssh: daemon is not running, so this command runs in this process. A high-risk command cannot raise an approval card here; pass --force or start the daemon."
+                        );
+                        let mut req = ExecRequest {
+                            host,
+                            command,
+                            force,
+                            timeout_secs,
+                            stdin: None,
+                            max_output_bytes: None,
+                            reason,
+                            change_id,
+                            side_effect,
+                            source: Some("cli".to_string()),
+                        };
+                        authorize_local_exec_request(&mut req).await?;
+                        let result = exec_local_core(req).await?;
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&result)?);
+                        } else {
+                            print!("{}", result.stdout);
+                            eprint!("{}", result.stderr);
+                            if result.exit_code.unwrap_or(1) != 0 {
+                                std::process::exit(result.exit_code.unwrap_or(1));
+                            }
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         },
         Commands::Resident { command } => match command {

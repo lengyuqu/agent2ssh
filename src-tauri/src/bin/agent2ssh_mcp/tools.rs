@@ -1014,7 +1014,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
                 },
                 {
                     "name": "local_exec",
-                    "description": "Run one command on the machine the daemon runs on, in a one-shot terminal environment: 'local' for the default shell, 'local:<environment>' for a named one (local:pwsh, local:cmd, local:gitbash, local:vs, local:wsl[:<distribution>], or an id you defined in environments.toml), or 'local:<runtime>:<container-id>' (local:docker:abc123) for one command inside a container. Forwards to the daemon, so the same gate chain as SSH exec applies (scope, risk, approval). For a shell whose state persists across commands use resident_session_open.",
+                    "description": "Run one command on the machine the daemon runs on, in a one-shot terminal environment: 'local' for the default shell, 'local:<environment>' for a named shell of this machine's OS (Windows: local:pwsh, local:cmd, local:gitbash, local:vs, local:wsl[:<distribution>]; macOS: local:zsh, local:bash, local:sh, local:pwsh; Linux: local:bash, local:sh, local:dash, local:zsh, local:pwsh; or an id you defined in environments.toml), or 'local:<runtime>:<container-id>' (local:docker:abc123) for one command inside a container. Forwards to the daemon, so the same gate chain as SSH exec applies (scope, risk, approval). For a shell whose state persists across commands use resident_session_open.",
                     "inputSchema": {
                         "type": "object",
                         "required": ["host", "command"],

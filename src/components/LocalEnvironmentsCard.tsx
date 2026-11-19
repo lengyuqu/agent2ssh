@@ -13,14 +13,15 @@ type LocalEnvInfo = {
   cwd: string | null;
   env_count: number;
   description: string | null;
+  platform?: string;
 };
 
 /**
- * The local-environment listing for Host Management: the built-in
- * `local:<id>` exec targets (pwsh / cmd / gitbash / vs / wsl / default) plus
- * the custom ones hand-defined in `~/.agent2ssh/environments.toml`. These are
- * not SSH hosts and have no connection step — exec addresses them directly —
- * so the card is an inventory, not a connector list.
+ * The local-environment listing for Host Management. The built-in rows are
+ * the shells of this machine's operating system — Windows consoles, the macOS
+ * zsh/bash/sh set, or the Linux bash/sh/dash/zsh set — plus custom ones from
+ * `~/.agent2ssh/environments.toml`. These are not SSH hosts and have no
+ * connection step, so the card is an inventory, not a connector list.
  */
 export default function LocalEnvironmentsCard() {
   const { t } = useI18n();
@@ -34,7 +35,7 @@ export default function LocalEnvironmentsCard() {
   }, []);
 
   if (environments.length === 0) return null;
-  const custom = environments.filter((env) => !env.builtin);
+  const platform = environments.find((env) => env.platform)?.platform;
 
   return (
     <Card className="space-y-3 p-4">
@@ -43,6 +44,7 @@ export default function LocalEnvironmentsCard() {
           <Cpu size={16} className="text-muted-foreground" />
           {t("Local environments")}
         </h3>
+        {platform && <Badge variant="outline">{platform}</Badge>}
         <Badge variant="secondary" className="font-mono">
           local:*
         </Badge>
@@ -92,7 +94,7 @@ export default function LocalEnvironmentsCard() {
         <FileCode2 size={12} className="mt-0.5 shrink-0" />
         <span>
           {t(
-            "Address them as local:<id> targets in Execution, the CLI and MCP. Custom environments are defined in ~/.agent2ssh/environments.toml (loaded at startup)."
+            "These targets are the shells for this machine's operating system. Address them as local:<id> in Execution, the CLI and MCP. Custom environments are defined in ~/.agent2ssh/environments.toml (loaded at startup)."
           )}
         </span>
       </div>

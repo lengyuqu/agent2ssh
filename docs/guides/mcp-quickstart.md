@@ -42,7 +42,7 @@ MCP 服务器以 `agent2ssh-mcp` 二进制运行，通过标准输入/输出与 
 }
 ```
 
-`AGENT2SSH_SOURCE` 会写入 audit 和 Live Activity 的来源字段。不同客户端应使用不同值，例如 `workbuddy`、`qoder_work`、`trae`、`codex` 或 `claude_desktop`。
+`AGENT2SSH_SOURCE` 会写入 audit 和 Live Activity 的来源字段。不同客户端应使用不同值，例如 `qoder`、`qoder_cn`、`trae`、`trae_cn`、`codex` 或 `claude_desktop`。
 
 配置完成后，Agent 将自动发现并调用 SSH 工具。为了不让工具定义占满上下文，`tools/list` 默认只列出 26 个 **core** 工具（约 4.4k token，全部 76 个约 11k）：主机列表、`ssh_exec` / `ssh_exec_multi`、SFTP、会话、连接保留、`local_exec` 和常驻会话。其余工具分组（`ops` 转发/playbook/片段、`admin` 主机与审批管理、`rules` 脱敏/高亮/算法规则、`diagnostics` 诊断与指标）在 MCP 服务器的环境变量里设置 `AGENT2SSH_MCP_TOOLS=all`（或 `rules,diagnostics` 这样的分组列表）后才会列出。未列出的工具仍可按名字调用，只是不再被自动发现；`initialize` 返回的 `instructions` 会告诉模型还有多少工具未列出。分组表见 [MCP Tools Reference](../skills.md)。
 

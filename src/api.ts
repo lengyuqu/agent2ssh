@@ -31,6 +31,7 @@ import type {
   LocalDirListing,
   WalkEntry,
   AgentSkillStatus,
+  SkillHarnessStatus,
   McpAgentConfigureResult,
   McpAgentConfigStatus,
   McpAgentUninstallResult,
@@ -762,6 +763,11 @@ export const api = {
   agentSkillStatus: () => invoke<AgentSkillStatus>("agent_skill_status"),
   installAgentSkill: () => invoke<AgentSkillStatus>("install_agent_skill"),
   uninstallAgentSkill: () => invoke<AgentSkillStatus>("uninstall_agent_skill"),
+  listSkillHarnesses: () => invoke<SkillHarnessStatus[]>("list_skill_harnesses"),
+  installSkillHarness: (harnessId: string) =>
+    invoke<SkillHarnessStatus>("install_skill_harness", { harnessId }),
+  uninstallSkillHarness: (harnessId: string) =>
+    invoke<SkillHarnessStatus>("uninstall_skill_harness", { harnessId }),
 
   pauseGate: async (reason?: string): Promise<ExecutionGateStatus> => {
     const token = await invoke<string>("get_daemon_token");

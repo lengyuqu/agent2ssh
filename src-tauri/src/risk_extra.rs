@@ -98,6 +98,8 @@ pub(crate) fn classify_extra(
 
 fn classify_sql(command: &str) -> RiskLevel {
     // Whitespace-collapsed so `DROP   TABLE` matches the single-space pattern.
+    // Only a database client, or a line whose own head is the SQL verb, counts.
+    // `echo "drop table"` mentions the words; it does not run them.
     let collapsed = command
         .to_lowercase()
         .split_whitespace()
@@ -109,7 +111,15 @@ fn classify_sql(command: &str) -> RiskLevel {
         "drop schema",
         "truncate table",
     ];
-    if DESTRUCTIVE.iter().any(|pat| collapsed.contains(pat)) {
+    if !DESTRUCTIVE.iter().any(|pat| collapsed.contains(pat)) {
+        return RiskLevel::Low;
+    }
+    let head = analyze_command(command).canonical_head.unwrap_or_default();
+    const SQL_HEADS: &[&str] = &[
+        "drop", "truncate", "mysql", "mariadb", "psql", "sqlite3", "sqlcmd", "mysqlsh", "mycli",
+        "pgcli", "duckdb",
+    ];
+    if head.is_empty() || SQL_HEADS.iter().any(|name| head == *name) {
         RiskLevel::High
     } else {
         RiskLevel::Low

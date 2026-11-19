@@ -167,7 +167,7 @@ describe("ContainersPanel", () => {
     // *issued* dropped the click on a slow runner and the re-query never
     // happened. Waiting for the control to be usable is the actual precondition;
     // a longer timeout alone would only have waited for a click that never came.
-    const toggle = screen.getByRole("button", { name: /Include stopped/ });
+    const toggle = screen.getAllByRole("button", { name: /Include stopped/ })[0];
     await waitFor(() =>
       expect((toggle as HTMLButtonElement).disabled).toBe(false)
     );
@@ -230,5 +230,27 @@ describe("ContainersPanel", () => {
     // The launch button must leave its busy label behind and stay clickable.
     expect(await screen.findByText("Open in terminal")).toBeTruthy();
     expect(screen.queryByText("Opening...")).toBeNull();
+  });
+
+  it("selects a container and shows its identity", async () => {
+    mockApi.discoverContainers.mockResolvedValue([dockerTarget]);
+    renderPanel();
+
+    fireEvent.click(await screen.findByRole("button", { name: /web-server/ }));
+
+    expect(await screen.findByText("Container id")).toBeTruthy();
+    expect(screen.getByText("abc123def456")).toBeTruthy();
+    expect(screen.getByText("nginx:latest")).toBeTruthy();
+  });
+
+  it("re-queries one runtime when its badge is chosen", async () => {
+    renderPanel();
+    const runtime = await screen.findByRole("button", { name: /WSL containers/ });
+    await waitFor(() => expect((runtime as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(runtime);
+
+    await waitFor(() =>
+      expect(mockApi.discoverContainers).toHaveBeenCalledWith({ all: false, runtime: "wslc" })
+    );
   });
 });

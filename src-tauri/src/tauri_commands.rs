@@ -87,9 +87,10 @@ use crate::shell_profile::{build_shell_profile_line, SHELL_PROFILE_SENTINEL};
 
 mod mcp_agent_config;
 pub use mcp_agent_config::{
-    agent_skill_status, configure_mcp_agent, install_agent_skill, list_mcp_agent_configs,
-    uninstall_agent_skill, uninstall_mcp_agent, AgentSkillStatus, McpAgentConfigStatus,
-    McpAgentConfigureResult, McpAgentUninstallResult,
+    agent_skill_status, configure_mcp_agent, install_agent_skill, install_skill_harness,
+    list_mcp_agent_configs, list_skill_harnesses, uninstall_agent_skill, uninstall_mcp_agent,
+    uninstall_skill_harness, AgentSkillStatus, McpAgentConfigStatus, McpAgentConfigureResult,
+    McpAgentUninstallResult, SkillHarnessStatus,
 };
 
 fn desktop_session_input_buffers() -> &'static Mutex<HashMap<Uuid, String>> {
@@ -1854,6 +1855,25 @@ pub fn daemon_start(app: AppHandle) -> Result<DaemonControlResult, String> {
                 } else {
                     format!("Daemon is already running (pid={pid}).")
                 },
+                diagnosis: None,
+            });
+        }
+        // macOS will not call a live daemon Healthy from `/health` alone, and
+        // starting another one is refused while the PID file remains. The
+        // identity hello confirms the recorded PID without sending the admin
+        // token. The terminal then reads that token from the local file.
+        #[cfg(target_os = "macos")]
+        if crate::daemon_control::macos_identity_confirms_pid(pid) {
+            let _ = append_diagnostic_log(
+                "info",
+                "tauri",
+                "reusing daemon confirmed by the identity channel",
+                Some(serde_json::json!({ "pid": pid })),
+            );
+            return Ok(DaemonControlResult {
+                running: true,
+                pid: Some(pid),
+                message: format!("Daemon PID {pid} answered the identity channel. Reusing it."),
                 diagnosis: None,
             });
         }
@@ -3911,6 +3931,9 @@ pub fn run_tauri() {
             mcp_agent_config::agent_skill_status,
             mcp_agent_config::install_agent_skill,
             mcp_agent_config::uninstall_agent_skill,
+            mcp_agent_config::list_skill_harnesses,
+            mcp_agent_config::install_skill_harness,
+            mcp_agent_config::uninstall_skill_harness,
             // Diagnostics
             list_diagnostic_logs,
             write_diagnostic_log,

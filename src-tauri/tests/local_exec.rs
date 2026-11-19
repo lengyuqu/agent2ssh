@@ -951,19 +951,18 @@ async fn a_rejected_definition_is_refused_with_its_reason_and_audited() {
     assert_eq!(audit_entries().len(), 1, "the refusal must be recorded");
 }
 
-/// The property the trust model rests on: editing the file does not change what
-/// the running process will run. An agent that can write `environments.toml`
-/// through some other local command gets nothing until the daemon restarts.
+/// An edit is visible on the next exec. An agent writes the file and then
+/// addresses `local:<id>` in the same task; waiting for a daemon restart would
+/// make that task fail.
 #[tokio::test]
 #[serial_test::serial]
-async fn editing_the_file_does_not_change_the_running_registry() {
-    let env = IsolatedEnv::new("custom-env-frozen");
+async fn editing_the_file_is_visible_on_the_next_exec() {
+    let env = IsolatedEnv::new("custom-env-reload");
     define_environments(
         &env,
         "[[environment]]\nid = \"mine\"\n[environment.env]\nA2S_CUSTOM = \"original\"\n",
     );
 
-    // Rewritten on disk but deliberately not reloaded.
     std::fs::write(
         env.dir
             .join(agent2ssh::local_environments::ENVIRONMENTS_FILE),
@@ -972,30 +971,20 @@ async fn editing_the_file_does_not_change_the_running_registry() {
     )
     .unwrap();
 
-    // No prelude in this definition, so the observation must not read one back:
-    // `set NAME` on an undefined variable exits 1 in cmd.
     let mut request = local_request(SHOW_CUSTOM_ENV_ONLY);
     request.host = format!("{LOCAL_TARGET_ID}:mine");
     let result = exec_local_core(request).await.expect("custom env exec");
     assert!(
-        result.stdout.contains("original") && !result.stdout.contains("tampered"),
+        result.stdout.contains("tampered") && !result.stdout.contains("original"),
         "{:?}",
         result.stdout
     );
 
     let mut request = local_request("echo hi");
     request.host = format!("{LOCAL_TARGET_ID}:added");
-    let message = exec_local_core(request)
+    exec_local_core(request)
         .await
-        .expect_err("an environment added after load must not exist")
-        .to_string();
-    assert!(message.contains("unknown local environment"), "{message}");
-
-    // An explicit reload — what a daemon restart amounts to — does pick it up.
-    agent2ssh::local_environments::reload();
-    let mut request = local_request("echo hi");
-    request.host = format!("{LOCAL_TARGET_ID}:added");
-    exec_local_core(request).await.expect("now defined");
+        .expect("an environment added to the file is usable on the next exec");
 }
 
 /// The built-ins keep working, and keep their own spelling, when a file defines

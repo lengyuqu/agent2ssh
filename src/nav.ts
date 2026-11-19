@@ -42,7 +42,7 @@ export const MODULES = [
   { id: "files-sessions", label: "Files", icon: FolderOpen },
   { id: "tunnels", label: "Tunnels", icon: ArrowLeftRight },
   { id: "activity", label: "Activity", icon: Activity },
-  { id: "mcp-agents", label: "MCP Agents", icon: Bot },
+  { id: "mcp-agents", label: "MCP/CLI", icon: Bot },
   { id: "sync", label: "Sync", icon: Cloud },
   { id: "keys", label: "Keys", icon: Key },
   { id: "playbooks", label: "Playbooks", icon: BookOpen },

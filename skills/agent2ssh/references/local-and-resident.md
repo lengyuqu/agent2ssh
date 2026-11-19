@@ -19,12 +19,15 @@ agent2ssh local exec --host local:docker:abc123 "cat /etc/os-release" --json
 # MCP: local_exec  host: "local:gitbash"  command: "..."
 ```
 
-The environment rides in `host` — `local`, `local:<environment>` (`pwsh`,
-`cmd`, `gitbash`, `vs`, `wsl[:<distribution>]`), a user-defined `local:<id>`
-from `~/.agent2ssh/environments.toml`, or `local:<runtime>:<container-id>` for
+The environment rides in `host` — `local`, `local:<environment>` for a shell
+of this machine's OS (Windows: `pwsh`, `cmd`, `gitbash`, `vs`,
+`wsl[:<distribution>]`; macOS: `zsh`, `bash`, `sh`, `pwsh`; Linux: `bash`,
+`sh`, `dash`, `zsh`, `pwsh`), a user-defined `local:<id>` from
+`~/.agent2ssh/environments.toml`, or `local:<runtime>:<container-id>` for
 capture exec inside a container. Because it is still a host id, scope,
 approval host patterns and the audit log can each name it without learning a
-new concept.
+new concept. The examples above that name `pwsh`, `vs` or `wsl` are Windows
+shells.
 
 Three things to know:
 

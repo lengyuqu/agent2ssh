@@ -3,6 +3,7 @@
 
 pub use crate::integrate::{
     AgentSkillStatus, McpAgentConfigStatus, McpAgentConfigureResult, McpAgentUninstallResult,
+    SkillHarnessStatus,
 };
 
 #[tauri::command]
@@ -37,4 +38,19 @@ pub fn install_agent_skill() -> Result<AgentSkillStatus, String> {
 pub fn uninstall_agent_skill() -> Result<AgentSkillStatus, String> {
     crate::integrate::uninstall_agent_skill().map_err(|e| e.to_string())?;
     crate::integrate::agent_skill_status().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_skill_harnesses() -> Result<Vec<SkillHarnessStatus>, String> {
+    crate::integrate::list_skill_harnesses().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn install_skill_harness(harness_id: String) -> Result<SkillHarnessStatus, String> {
+    crate::integrate::install_skill_harness(&harness_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn uninstall_skill_harness(harness_id: String) -> Result<SkillHarnessStatus, String> {
+    crate::integrate::uninstall_skill_harness(&harness_id).map_err(|e| e.to_string())
 }

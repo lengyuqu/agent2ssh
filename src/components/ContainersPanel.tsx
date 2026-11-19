@@ -7,6 +7,7 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { IconButton } from "./ui/icon-button";
+import { cn } from "../lib/utils";
 import { EmptyState, LoadingState, Spinner } from "./ui/state";
 import { useToast } from "./ui/toast";
 
@@ -70,18 +71,26 @@ function ContainersPanel() {
   const [copied, setCopied] = useState<string | null>(null);
   const [launching, setLaunching] = useState<string | null>(null);
   const [startingService, setStartingService] = useState(false);
+  const [runtimeFilter, setRuntimeFilter] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  async function refresh(includeStoppedNow = includeStopped) {
+  async function refresh(includeStoppedNow = includeStopped, runtimeNow = runtimeFilter) {
     setBusy(true);
     try {
       // Both calls together: the list answers "what can I connect to", the
       // runtime states answer "why is it empty" when it is.
       const [found, infos] = await Promise.all([
-        api.discoverContainers({ all: includeStoppedNow }),
+        api.discoverContainers({
+          all: includeStoppedNow,
+          ...(runtimeNow ? { runtime: runtimeNow } : {}),
+        }),
         api.containerRuntimes(),
       ]);
       setTargets(found);
       setRuntimes(infos);
+      setSelectedId((current) =>
+        current && found.some((target) => target.id === current) ? current : null,
+      );
     } catch (err) {
       showToast("error", String(err));
       reportError("containers-panel", "container discovery failed", err);
@@ -127,6 +136,12 @@ function ContainersPanel() {
     refresh(next);
   }
 
+  function selectRuntime(runtime: string) {
+    const next = runtimeFilter === runtime ? null : runtime;
+    setRuntimeFilter(next);
+    refresh(includeStopped, next);
+  }
+
   function copyCommand(target: ContainerDiscoveryTarget) {
     // Absent outside a secure context (and in jsdom). Reaching through it would
     // throw and skip the confirmation below, so a copy that cannot happen must
@@ -155,6 +170,7 @@ function ContainersPanel() {
   }
 
   const anyAvailable = runtimes.some((info) => info.available);
+  const selected = targets.find((target) => target.id === selectedId) ?? null;
 
   return (
     <Card className="space-y-3.5 p-4">
@@ -192,10 +208,25 @@ function ContainersPanel() {
       {runtimes.length > 0 && (
         <div className="flex flex-wrap items-center gap-1.5">
           {runtimes.map((info) => (
-            <Badge
+            <Button
               key={info.runtime}
-              variant={info.available ? (info.selected ? "success" : "secondary") : "outline"}
-              title={info.unsupported_reason ?? info.binary ?? undefined}
+              type="button"
+              size="sm"
+              variant={
+                runtimeFilter === info.runtime
+                  ? "default"
+                  : info.available
+                    ? "secondary"
+                    : "outline"
+              }
+              disabled={!info.available || busy}
+              aria-pressed={runtimeFilter === info.runtime}
+              title={
+                info.available
+                  ? t("Show containers for this runtime")
+                  : (info.unsupported_reason ?? info.binary ?? undefined)
+              }
+              onClick={() => selectRuntime(info.runtime)}
             >
               {/* Separate spans so each half is its own text node: the runtime
                   name and its state answer different questions, and a test (or a
@@ -203,7 +234,7 @@ function ContainersPanel() {
                   them glued together. */}
               <span>{info.display_name}</span>
               <span className="opacity-75">{runtimeState(info, t)}</span>
-            </Badge>
+            </Button>
           ))}
           {stoppable !== null && (
             <Button
@@ -232,14 +263,63 @@ function ContainersPanel() {
                   "Install Docker, WSL containers (wslc) or Apple container on this host, then refresh. Only the runtimes this platform supports are listed."
                 )
           }
+          action={
+            anyAvailable && !includeStopped
+              ? { label: t("Include stopped"), onClick: toggleIncludeStopped }
+              : undefined
+          }
         />
+      )}
+
+      {selected && (
+        <div className="grid gap-1 rounded-lg border border-border bg-muted/30 px-3 py-2.5 text-xs">
+          <div className="text-sm font-medium text-foreground">{selected.container_name}</div>
+          <div>
+            <span className="text-muted-foreground">{t("Container id")}</span>{" "}
+            <span className="font-mono text-foreground">{selected.container_id}</span>
+          </div>
+          <div>
+            <span className="text-muted-foreground">{t("Image")}</span>{" "}
+            <span className="text-foreground">{selected.image || "—"}</span>
+          </div>
+          <div>
+            <span className="text-muted-foreground">{t("Status")}</span>{" "}
+            <span className="text-foreground">{selected.status}</span>
+          </div>
+          <div>
+            <span className="text-muted-foreground">{t("Runtime")}</span>{" "}
+            <span className="text-foreground">{PLATFORM_LABEL[selected.platform]}</span>
+          </div>
+          {selected.namespace && (
+            <div>
+              <span className="text-muted-foreground">{t("Namespace")}</span>{" "}
+              <span className="text-foreground">{selected.namespace}</span>
+            </div>
+          )}
+          <div className="truncate font-mono text-muted-foreground" title={execCommand(selected)}>
+            {execCommand(selected)}
+          </div>
+        </div>
       )}
 
       <div className="grid gap-2">
         {targets.map((target) => (
           <div
             key={target.id}
-            className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/20 px-2.5 py-2"
+            role="button"
+            tabIndex={0}
+            aria-pressed={selectedId === target.id}
+            onClick={() => setSelectedId(target.id)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                setSelectedId(target.id);
+              }
+            }}
+            className={cn(
+              "flex flex-wrap items-center gap-2 rounded-md border bg-muted/20 px-2.5 py-2 text-left",
+              selectedId === target.id ? "border-primary bg-primary/10" : "border-border",
+            )}
           >
             <Badge variant="outline">{PLATFORM_LABEL[target.platform]}</Badge>
             <div className="min-w-0 flex-1">
@@ -258,7 +338,10 @@ function ContainersPanel() {
             <IconButton
               variant="ghost"
               size="sm"
-              onClick={() => copyCommand(target)}
+              onClick={(event) => {
+                event.stopPropagation();
+                copyCommand(target);
+              }}
               aria-label={t("Copy exec command")}
               title={t("Copy exec command")}
             >
@@ -267,7 +350,10 @@ function ContainersPanel() {
             <Button
               variant="secondary"
               size="sm"
-              onClick={() => openInTerminal(target)}
+              onClick={(event) => {
+                event.stopPropagation();
+                void openInTerminal(target);
+              }}
               disabled={launching === target.id}
               title={t("Open in terminal")}
             >

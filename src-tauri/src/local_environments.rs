@@ -1,7 +1,9 @@
 //! User-defined local environments — `~/.agent2ssh/environments.toml`.
 //!
-//! The built-in local environments (`local:pwsh`, `local:vs`, `local:wsl`, ...)
-//! are a fixed set. This file lets the person who owns the machine add their own
+//! The built-in local environments are the shells of the machine's own
+//! operating system: Windows offers `pwsh`, `cmd`, `gitbash`, `vs` and `wsl`;
+//! macOS offers `zsh`, `bash`, `sh` and `pwsh`; Linux offers `bash`, `sh`,
+//! `dash`, `zsh` and `pwsh`. This file lets the person who owns the machine add their own
 //! under the same `local:<id>` addressing: a base shell plus a working
 //! directory, process environment variables, and a one-line prelude that runs in
 //! the shell before every command.
@@ -9,7 +11,7 @@
 //! ```toml
 //! [[environment]]
 //! id = "py-ml"                      # addressed as `local:py-ml`
-//! base = "gitbash"                  # default | pwsh | cmd | gitbash | vs | wsl
+//! base = "gitbash"                  # a built-in shell id for this OS, or "default"
 //! cwd = "D:/work/ml"                # optional, absolute (a leading `~/` is expanded)
 //! prelude = "source .venv/Scripts/activate"
 //!
@@ -29,21 +31,20 @@
 //! authorization chain did not review, and the file that holds it has to be as
 //! hard for an agent to influence as the policy file. Two rules follow:
 //!
-//! * **Loaded once per process, not hot-reloaded.** An agent that can write
-//!   `environments.toml` through some other local command still cannot make the
-//!   running daemon pick the edit up: the registry changes only on
-//!   [`reload`], which the daemon calls at start and which no request path
-//!   reaches. Every other config file in this directory is hot-reloaded; this one
-//!   deliberately is not.
+//! * **Re-read when the file changes.** The next command that resolves an
+//!   environment sees a new or edited definition without a daemon restart, so
+//!   an agent can write the file and use `local:<id>` in the same task. The
+//!   prelude is classified at that read, the same way it is at startup.
 //! * **A prelude is classified at load time** with the same built-in classifier a
 //!   command gets, and a definition whose prelude rates `high` or `blocked` is
 //!   rejected rather than loaded. That is a floor, not a proof — user policy
 //!   rules are not consulted here — but it keeps an obviously destructive setup
 //!   step out of the one place the per-command checks cannot see. The classifier
 //!   reads bash, so this applies to the POSIX-family bases only (`gitbash`,
-//!   `wsl`, and `default` off Windows). For `pwsh`, `cmd` and `vs` it is skipped:
+//!   `wsl`, `zsh`, `bash`, `sh`, `dash`, and `default` off Windows). For
+//!   `pwsh`, `cmd` and `vs` it is skipped:
 //!   run over PowerShell or cmd it rejects harmless lines and passes harmful
-//!   ones, and those bases rest on the load-once rule alone.
+//!   ones, so a prelude on those bases runs as written once the file is saved.
 //!
 //! A definition that fails validation is rejected on its own; the rest still
 //! load. A file that does not parse at all disables only the custom
@@ -57,6 +58,7 @@ use std::{
     collections::{BTreeMap, HashSet},
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::SystemTime,
 };
 
 use crate::{
@@ -241,12 +243,26 @@ impl EnvironmentRegistry {
 
 // ── Process-wide registry ───────────────────────────────────────────────────
 
-static REGISTRY: Mutex<Option<Arc<EnvironmentRegistry>>> = Mutex::new(None);
+struct RegistryCache {
+    /// `None` when the file is absent. A later create or edit changes this and
+    /// the next lookup reads the file again.
+    fingerprint: Option<(SystemTime, u64)>,
+    registry: Arc<EnvironmentRegistry>,
+}
 
-fn registry_slot() -> std::sync::MutexGuard<'static, Option<Arc<EnvironmentRegistry>>> {
+static REGISTRY: Mutex<Option<RegistryCache>> = Mutex::new(None);
+
+fn registry_slot() -> std::sync::MutexGuard<'static, Option<RegistryCache>> {
     REGISTRY
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// `(mtime, length)` of `environments.toml`, or `None` when it is not there.
+fn file_fingerprint() -> Option<(SystemTime, u64)> {
+    let path = config_dir().ok()?.join(ENVIRONMENTS_FILE);
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
 }
 
 fn read_from_disk() -> EnvironmentRegistry {
@@ -272,10 +288,6 @@ fn read_from_disk() -> EnvironmentRegistry {
     }
 }
 
-/// The registry this process loaded, reading the file on first use.
-///
-/// Never re-reads on its own — see the module note on why this file is not
-/// hot-reloaded.
 /// One entry of the local-environment listing surfaced in the desktop UI.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LocalEnvironmentInfo {
@@ -289,6 +301,60 @@ pub struct LocalEnvironmentInfo {
     pub cwd: Option<String>,
     pub env_count: usize,
     pub description: Option<String>,
+    /// The operating system this catalog belongs to: `Windows`, `macOS` or
+    /// `Linux`. Every row of one listing carries the same value, so the desktop
+    /// can label the card without guessing from the ids.
+    pub platform: String,
+}
+
+fn host_platform() -> &'static str {
+    if cfg!(windows) {
+        "Windows"
+    } else if cfg!(target_os = "macos") {
+        "macOS"
+    } else {
+        "Linux"
+    }
+}
+
+/// The built-in `local` / `local:<id>` rows for this operating system, in the
+/// order the desktop lists them.
+///
+/// Windows, macOS and Linux do not share a shell set. Offering `cmd`, Git Bash,
+/// the Visual Studio shell and WSL on a Mac describes a machine that is not
+/// this one, and a Linux box is not a Mac: Dash is a Linux shell, zsh is the
+/// macOS login shell.
+fn builtin_catalog() -> Vec<(&'static str, String)> {
+    let platform = host_platform();
+    let default = match crate::shell_list::default_shell() {
+        Some(shell) => format!("{platform} default shell ({})", shell.name),
+        None => format!("{platform} default shell"),
+    };
+    let mut rows = vec![("local", default)];
+    #[cfg(windows)]
+    rows.extend([
+        ("local:pwsh", "PowerShell".to_string()),
+        ("local:cmd", "Windows Command Prompt".to_string()),
+        ("local:gitbash", "Git Bash".to_string()),
+        ("local:vs", "Visual Studio developer shell".to_string()),
+        ("local:wsl", "WSL".to_string()),
+    ]);
+    #[cfg(target_os = "macos")]
+    rows.extend([
+        ("local:zsh", "Zsh".to_string()),
+        ("local:bash", "Bash".to_string()),
+        ("local:sh", "POSIX sh".to_string()),
+        ("local:pwsh", "PowerShell".to_string()),
+    ]);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    rows.extend([
+        ("local:bash", "Bash".to_string()),
+        ("local:sh", "POSIX sh".to_string()),
+        ("local:dash", "Dash".to_string()),
+        ("local:zsh", "Zsh".to_string()),
+        ("local:pwsh", "PowerShell".to_string()),
+    ]);
+    rows
 }
 
 /// The built-in environments plus everything loaded from
@@ -296,24 +362,19 @@ pub struct LocalEnvironmentInfo {
 /// definitions and a load error are surfaced so a hand-edited file that
 /// failed validation is visible instead of silently absent.
 pub fn list_environments() -> Vec<LocalEnvironmentInfo> {
-    let builtins = [
-        ("local", "Default shell"),
-        ("local:pwsh", "PowerShell"),
-        ("local:cmd", "Windows Command Prompt"),
-        ("local:gitbash", "Git Bash"),
-        ("local:vs", "Visual Studio Developer Shell"),
-        ("local:wsl", "WSL"),
-    ]
-    .into_iter()
-    .map(|(id, description)| LocalEnvironmentInfo {
-        id: id.to_string(),
-        builtin: true,
-        base: None,
-        distro: None,
-        cwd: None,
-        env_count: 0,
-        description: Some(description.to_string()),
-    });
+    let platform = host_platform().to_string();
+    let builtins = builtin_catalog()
+        .into_iter()
+        .map(|(id, description)| LocalEnvironmentInfo {
+            id: id.to_string(),
+            builtin: true,
+            base: None,
+            distro: None,
+            cwd: None,
+            env_count: 0,
+            description: Some(description),
+            platform: platform.clone(),
+        });
 
     let registry = current();
     let custom = registry.ids().into_iter().filter_map(|id| {
@@ -326,6 +387,7 @@ pub fn list_environments() -> Vec<LocalEnvironmentInfo> {
             cwd: env.cwd.as_ref().map(|path| path.display().to_string()),
             env_count: env.env.len(),
             description: env.description.clone(),
+            platform: platform.clone(),
         })
     });
 
@@ -333,16 +395,34 @@ pub fn list_environments() -> Vec<LocalEnvironmentInfo> {
 }
 
 pub fn current() -> Arc<EnvironmentRegistry> {
+    let fingerprint = file_fingerprint();
     let mut slot = registry_slot();
-    Arc::clone(slot.get_or_insert_with(|| Arc::new(read_from_disk())))
+    if let Some(cached) = slot.as_ref() {
+        if cached.fingerprint == fingerprint {
+            return Arc::clone(&cached.registry);
+        }
+    }
+    let registry = Arc::new(read_from_disk());
+    let loaded = Arc::clone(&registry);
+    *slot = Some(RegistryCache {
+        fingerprint,
+        registry,
+    });
+    loaded
 }
 
-/// Re-read the file and replace the process's registry. Called by the daemon at
-/// start; there is deliberately no request path to it.
+/// Re-read the file and replace the process's registry.
+///
+/// [`current`] already does this when the file's mtime or length changed.
+/// This forces that read, which is what startup and the tests use.
 pub fn reload() -> Arc<EnvironmentRegistry> {
-    let fresh = Arc::new(read_from_disk());
-    *registry_slot() = Some(Arc::clone(&fresh));
-    fresh
+    let registry = Arc::new(read_from_disk());
+    let loaded = Arc::clone(&registry);
+    *registry_slot() = Some(RegistryCache {
+        fingerprint: file_fingerprint(),
+        registry,
+    });
+    loaded
 }
 
 // ── Validation ──────────────────────────────────────────────────────────────
@@ -433,7 +513,12 @@ fn expand_cwd(cwd: &str) -> Result<PathBuf, String> {
 /// off Windows, where it is a POSIX shell.
 fn classifier_understands(base: LocalEnvironment) -> bool {
     match base {
-        LocalEnvironment::GitBash | LocalEnvironment::Wsl => true,
+        LocalEnvironment::GitBash
+        | LocalEnvironment::Wsl
+        | LocalEnvironment::Zsh
+        | LocalEnvironment::Bash
+        | LocalEnvironment::Sh
+        | LocalEnvironment::Dash => true,
         LocalEnvironment::Default => !cfg!(windows),
         LocalEnvironment::Pwsh | LocalEnvironment::Cmd | LocalEnvironment::VsDevShell => false,
     }
@@ -638,6 +723,61 @@ CUDA_VISIBLE_DEVICES = "0"
     }
 
     #[test]
+    fn the_builtin_catalog_follows_this_operating_system() {
+        let listed: Vec<String> = list_environments()
+            .into_iter()
+            .filter(|env| env.builtin)
+            .map(|env| env.id)
+            .collect();
+        let catalog: Vec<String> = builtin_catalog()
+            .into_iter()
+            .map(|(id, _)| id.to_string())
+            .collect();
+        assert_eq!(listed, catalog);
+
+        #[cfg(windows)]
+        {
+            assert!(listed.iter().any(|id| id == "local:cmd"));
+            assert!(listed.iter().any(|id| id == "local:wsl"));
+            assert!(!listed.iter().any(|id| id == "local:zsh"));
+            assert!(!listed.iter().any(|id| id == "local:dash"));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            for absent in [
+                "local:cmd",
+                "local:gitbash",
+                "local:vs",
+                "local:wsl",
+                "local:dash",
+            ] {
+                assert!(
+                    !listed.iter().any(|id| id == absent),
+                    "{absent} is a Windows or Linux shell, listed on macOS: {listed:?}"
+                );
+            }
+            assert!(listed.iter().any(|id| id == "local:zsh"));
+            assert!(listed.iter().any(|id| id == "local:bash"));
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            assert!(listed.iter().any(|id| id == "local:dash"));
+            assert!(listed.iter().any(|id| id == "local:bash"));
+            assert!(!listed.iter().any(|id| id == "local:cmd"));
+            assert!(!listed.iter().any(|id| id == "local:wsl"));
+        }
+
+        let rows = list_environments();
+        assert!(rows.iter().all(|env| env.platform == host_platform()));
+        let default = rows.iter().find(|env| env.id == "local").expect("local");
+        let description = default.description.as_deref().unwrap_or("");
+        assert!(
+            description.starts_with(host_platform()),
+            "the default shell must name this OS, got {description}"
+        );
+    }
+
+    #[test]
     fn ids_that_a_built_in_or_a_runtime_already_owns_are_rejected() {
         for id in [
             "pwsh",
@@ -646,6 +786,9 @@ CUDA_VISIBLE_DEVICES = "0"
             "vs",
             "wsl",
             "bash",
+            "zsh",
+            "sh",
+            "dash",
             "docker",
             "wslc",
             "apple",

@@ -26,8 +26,8 @@ use agent2ssh::store::{audit_path, compute_metrics_trend, TrendPeriod};
 use agent2ssh::{
     add_host_core, add_snippet, append_diagnostic_log, collect_health_snapshot,
     compare_exec_results, compare_ssh_configs, connect_host, disconnect_host, dry_run_playbook,
-    effective_command_risk, exec_multi_core, exec_multi_with_strategy, exec_ssh_core,
-    export_audit_csv, export_audit_jsonl, export_team_config, export_to_ssh_config,
+    effective_command_risk, exec_local_core, exec_multi_core, exec_multi_with_strategy,
+    exec_ssh_core, export_audit_csv, export_audit_jsonl, export_team_config, export_to_ssh_config,
     forward_add_core, forward_list_core, forward_remove_core, import_ssh_config_core,
     import_team_config, list_active_connections, list_audit_core, list_hosts_core,
     list_playbooks_core, load_snippets, ping_hosts_core, preview_exec, preview_exec_multi,
@@ -2379,11 +2379,11 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
             reset_algo_prefs().map_err(McpError::internal)?;
             serde_json::to_value(AlgoPrefsState::snapshot())?
         }
-        // Local-execution surfaces are daemon-only: the daemon is what can run
-        // the gate chain to an approval prompt, and a non-daemon MCP fallback
-        // would either skip approval or fail closed on every high-risk command.
-        // There is deliberately no process-local fallback arm here, unlike the
-        // PTY session tools above.
+        // One-shot local exec prefers the daemon, which can raise an approval
+        // card. When the daemon was not reached at all, the command runs in
+        // this process and a high-risk command fails closed. A send that fails
+        // after the request went out is not retried. Resident sessions stay
+        // daemon-only: their shell lives in the daemon.
         McpTool::LocalExec => {
             let host = args["host"]
                 .as_str()
@@ -2403,7 +2403,34 @@ async fn call_tool(call: ToolCall) -> std::result::Result<Value, McpError> {
                 "change_id": args["change_id"].as_str(),
                 "side_effect": args["side_effect"].as_str(),
             });
-            daemon_only_request("/local-exec", &body, "local exec").await?
+            if let DaemonAttempt::Handled(result) = daemon_request::<Value>(
+                reqwest::Method::POST,
+                &["local-exec"],
+                Some(&body),
+                "local exec",
+            )
+            .await?
+            {
+                result
+            } else {
+                let mut request = ExecRequest {
+                    host,
+                    command,
+                    force: args["force"].as_bool().unwrap_or(false),
+                    timeout_secs: args["timeout_secs"].as_u64(),
+                    stdin: None,
+                    max_output_bytes: None,
+                    reason: args["reason"].as_str().map(str::to_string),
+                    change_id: args["change_id"].as_str().map(str::to_string),
+                    side_effect: args["side_effect"].as_str().map(str::to_string),
+                    source: Some(mcp_source()),
+                };
+                let risk = authorize_local_mcp_exec_request(&mut request).await?;
+                let result = exec_local_core(request)
+                    .await
+                    .map_err(|error| exec_failure(error, risk))?;
+                serde_json::to_value(result)?
+            }
         }
         McpTool::ResidentSessionOpen => {
             let host = args["host"]

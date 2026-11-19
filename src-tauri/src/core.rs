@@ -487,6 +487,21 @@ fn classify_risk_at_depth(command: &str, depth: usize) -> RiskLevel {
     strictest
 }
 
+/// Whether `head` is one of `names`, or a `name.suffix` form such as `mkfs.ext4`.
+///
+/// An empty head means the parser could not see a command, so the caller still
+/// applies its phrase check: unparsed text fails closed. A parsed head that is
+/// some other program does not, which is what keeps `echo "drop table"` from
+/// being reviewed as if it were SQL.
+fn head_is(head: &str, names: &[&str]) -> bool {
+    if head.is_empty() {
+        return true;
+    }
+    names
+        .iter()
+        .any(|name| head == *name || head.starts_with(&format!("{name}.")))
+}
+
 /// Single-command risk classification (no chain splitting). Whole-command
 /// substring patterns (fork bombs, mkfs, dd to block devices, shutdown, ...)
 /// and the AST-derived canonical head checks all run here.
@@ -542,8 +557,9 @@ fn classify_risk_single(command: &str) -> RiskLevel {
     }
 
     // ── BLOCKED ──────────────────────────────────────────────────────────────
-    // mkfs destroys filesystems
-    if lower.contains("mkfs") {
+    // mkfs destroys filesystems. Only when mkfs is the command, not when some
+    // other program merely mentions the word.
+    if head_is(head, &["mkfs"]) && lower.contains("mkfs") {
         return RiskLevel::Blocked;
     }
     // fork bomb
@@ -559,8 +575,12 @@ fn classify_risk_single(command: &str) -> RiskLevel {
     {
         return RiskLevel::Blocked;
     }
-    // direct redirect to block device
-    if lower.contains("> /dev/sd") || lower.contains("> /dev/nvme") || lower.contains("> /dev/xvd")
+    // direct redirect to block device. A parsed command is judged from its
+    // redirects below; this catches text the parser could not structure.
+    if head.is_empty()
+        && (lower.contains("> /dev/sd")
+            || lower.contains("> /dev/nvme")
+            || lower.contains("> /dev/xvd"))
     {
         return RiskLevel::Blocked;
     }
@@ -608,18 +628,23 @@ fn classify_risk_single(command: &str) -> RiskLevel {
         return RiskLevel::High;
     }
     // dangerous kill
-    if lower.contains("kill -9 -1") || lower.contains("killall -9") || lower.contains("pkill -9") {
+    if head_is(head, &["kill"]) && lower.contains("kill -9 -1")
+        || head_is(head, &["killall"]) && lower.contains("killall -9")
+        || head_is(head, &["pkill"]) && lower.contains("pkill -9")
+    {
         return RiskLevel::High;
     }
     // firewall teardown
-    if lower.contains("iptables -f") || lower.contains("ufw disable") || lower.contains("ufw reset")
+    if head_is(head, &["iptables"]) && lower.contains("iptables -f")
+        || head_is(head, &["ufw"]) && (lower.contains("ufw disable") || lower.contains("ufw reset"))
     {
         return RiskLevel::High;
     }
     // world-writeable chmod
-    if lower.contains("chmod 777")
-        || lower.contains("chmod -r 777")
-        || lower.contains("chmod a+rwx")
+    if head_is(head, &["chmod"])
+        && (lower.contains("chmod 777")
+            || lower.contains("chmod -r 777")
+            || lower.contains("chmod a+rwx"))
     {
         return RiskLevel::High;
     }
@@ -630,26 +655,38 @@ fn classify_risk_single(command: &str) -> RiskLevel {
     ) {
         return RiskLevel::High;
     }
-    // writing to critical system paths
-    if lower.contains("> /etc/")
-        || lower.contains("> /proc/")
-        || lower.contains("> /sys/")
-        || lower.contains("> /boot/")
+    // writing to critical system paths. Parsed redirects are handled below;
+    // an unparsed command that contains the redirect text still fails closed.
+    if head.is_empty()
+        && (lower.contains("> /etc/")
+            || lower.contains("> /proc/")
+            || lower.contains("> /sys/")
+            || lower.contains("> /boot/"))
     {
         return RiskLevel::High;
     }
     // service stop
-    if lower.contains("systemctl stop") || lower.contains("systemctl kill") {
+    if head_is(head, &["systemctl"])
+        && (lower.contains("systemctl stop") || lower.contains("systemctl kill"))
+    {
         return RiskLevel::High;
     }
-    if lower.contains("service ") && lower.contains(" stop") {
+    if head_is(head, &["service"]) && lower.contains("service ") && lower.contains(" stop") {
         return RiskLevel::High;
     }
-    // SQL destructive
-    if lower.contains("drop table")
+    // SQL destructive — the shell command is a database client, or the line
+    // itself is the SQL (`drop table users`). Mentioning it from echo, git or
+    // rg is not that command.
+    if head_is(
+        head,
+        &[
+            "drop", "truncate", "mysql", "mariadb", "psql", "sqlite3", "sqlcmd", "mysqlsh",
+            "mycli", "pgcli", "duckdb",
+        ],
+    ) && (lower.contains("drop table")
         || lower.contains("drop database")
         || lower.contains("drop schema")
-        || lower.contains("truncate table")
+        || lower.contains("truncate table"))
     {
         return RiskLevel::High;
     }
@@ -683,41 +720,40 @@ fn classify_risk_single(command: &str) -> RiskLevel {
     }
 
     // ── MEDIUM ───────────────────────────────────────────────────────────────
-    let medium_contains: &[&str] = &[
-        "apt install",
-        "apt-get install",
-        "yum install",
-        "dnf install",
-        "pip install",
-        "pip3 install",
-        "npm install",
-        "brew install",
-        "systemctl restart",
-        "systemctl enable",
-        "systemctl disable",
-        "systemctl start",
-        "sed -i",
-        "git push",
-        "chmod",
-        "chown",
-        "unzip",
-        "tar -x",
-        "tar xf",
-        "tar xvf",
-        "tar xzf",
-        "curl -o ",
-        "wget -o ",
-        "truncate",
-        "mv /",
+    // Each phrase belongs to the program that would perform it. A quoted
+    // mention in another command is not that program, so it does not get a
+    // review of its own. Real redirects are already Medium via the AST above.
+    let medium_phrases: &[(&[&str], &[&str])] = &[
+        (&["apt", "apt-get"], &["apt install", "apt-get install"]),
+        (&["yum"], &["yum install"]),
+        (&["dnf"], &["dnf install"]),
+        (&["pip", "pip3"], &["pip install", "pip3 install"]),
+        (&["npm"], &["npm install"]),
+        (&["brew"], &["brew install"]),
+        (
+            &["systemctl"],
+            &[
+                "systemctl restart",
+                "systemctl enable",
+                "systemctl disable",
+                "systemctl start",
+            ],
+        ),
+        (&["sed"], &["sed -i"]),
+        (&["git"], &["git push"]),
+        (&["chmod"], &["chmod"]),
+        (&["chown"], &["chown"]),
+        (&["unzip"], &["unzip"]),
+        (&["tar"], &["tar -x", "tar xf", "tar xvf", "tar xzf"]),
+        (&["curl"], &["curl -o "]),
+        (&["wget"], &["wget -o "]),
+        (&["truncate"], &["truncate"]),
+        (&["mv"], &["mv /"]),
     ];
-    for pat in medium_contains {
-        if lower.contains(pat) {
+    for (names, phrases) in medium_phrases {
+        if head_is(head, names) && phrases.iter().any(|pat| lower.contains(pat)) {
             return RiskLevel::Medium;
         }
-    }
-    // Output redirect (overwrite), but not append
-    if lower.contains(" > ") {
-        return RiskLevel::Medium;
     }
     // Use canonical head for service command
     if head == "service" {
@@ -3878,6 +3914,23 @@ mod tests {
         assert_eq!(classify_risk("iptables -f"), RiskLevel::High);
         assert_eq!(classify_risk("systemctl stop nginx"), RiskLevel::High);
         assert_eq!(classify_risk("drop table users"), RiskLevel::High);
+        assert_eq!(
+            classify_risk("mysql -e \"drop table users\""),
+            RiskLevel::High
+        );
+        // Mentioning a dangerous phrase is not executing it.
+        assert_eq!(classify_risk("echo \"drop table users\""), RiskLevel::Low);
+        assert_eq!(
+            classify_risk("git commit -m \"drop table users\""),
+            RiskLevel::Low
+        );
+        assert_eq!(
+            classify_risk("echo \"systemctl stop nginx\""),
+            RiskLevel::Low
+        );
+        assert_eq!(classify_risk("echo \"chmod 777 /tmp\""), RiskLevel::Low);
+        assert_eq!(classify_risk("echo mkfs"), RiskLevel::Low);
+        assert_eq!(classify_risk("echo \"a > b\""), RiskLevel::Low);
     }
 
     #[test]
