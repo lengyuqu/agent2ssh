@@ -6,7 +6,7 @@ class Agent2ssh < Formula
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/lengyuqu/agent2ssh/releases/download/v#{version}/agent2ssh-aarch64-apple-darwin.tar.gz"
-      sha256 "c5a6ab3d192f5171fe8522a6c063b7737c393ebe1f92114e475dcf9f3f0c2a41"
+      sha256 "2250fa22c2a2c0c73d2ba9196f18cfd29885e1bdb55d1de06bbe4f9b263656a7"
     else
       # Intel macOS support was dropped, so no x86_64-apple-darwin archive is
       # published any more. Fail loudly here rather than handing Homebrew a URL
@@ -18,7 +18,7 @@ class Agent2ssh < Formula
 
   on_linux do
     url "https://github.com/lengyuqu/agent2ssh/releases/download/v#{version}/agent2ssh-x86_64-unknown-linux-gnu.tar.gz"
-    sha256 "e10fa4310a4dc772c967b318ab26c4fab3ba85932244563fc992bb392fe1af89"
+    sha256 "9603fc173cb1407058ccc4ce0ac125667bba4f6895315cad4764169ae73d124a"
   end
 
   def install
