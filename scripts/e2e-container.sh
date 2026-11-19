@@ -221,7 +221,11 @@ fi
 # ACLs before it ever reached the server.
 note "Registering host profile and waiting for sshd"
 "$CLI" host add e2e --host 127.0.0.1 --user tester --port "$SSH_PORT" --key "$KEY_PATH"
-"$CLI" host list --json | grep -q '"name": *"e2e"' && ok "host registered" || bad "host registered"
+# `grep -q` closes the pipe the moment it matches, and the CLI writes its output
+# with `println!`, which panics on EPIPE — a 420-call surface this script is not
+# the place to audit. Reading the whole stream keeps the check about the CLI's
+# answer instead of about who is reading it.
+"$CLI" host list --json | grep '"name": *"e2e"' > /dev/null && ok "host registered" || bad "host registered"
 
 READY=0
 for _ in $(seq 1 30); do
@@ -286,7 +290,7 @@ if cmp -s "$WORK/payload.bin" "$WORK/payload.out"; then ok "1 MiB round-trip byt
 note "SFTP mkdir + ls"
 "$CLI" sftp mkdir e2e /config/sub/dir
 "$CLI" sftp put e2e "$WORK/payload.out" /config/sub/dir/copy.bin
-"$CLI" sftp ls e2e /config/sub/dir --json | grep -q 'copy.bin' && ok "ls shows uploaded file" || bad "ls missing file"
+"$CLI" sftp ls e2e /config/sub/dir --json | grep 'copy.bin' > /dev/null && ok "ls shows uploaded file" || bad "ls missing file"
 
 # ── 4. Recursive transfer (J4): build a remote tree, pull each file back ───────
 note "Recursive directory transfer (J4)"
