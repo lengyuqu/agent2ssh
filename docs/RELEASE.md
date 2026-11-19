@@ -117,10 +117,10 @@
 ```bash
 git tag -a vX.Y.Z -m "Release vX.Y.Z"
 git push github main --tags
-git push git233 main --tags
+git push cnb main --tags
 ```
 
-> **说明**：`github` 和 `git233` 是两个远程仓库，均需推送标签以触发 CI 和备份。
+> **说明**：`github` 是 CI 与 Release 资产实际产生的地方，标签推到这里才有发布流水线；`cnb` 是私有镜像，保持 `main` 与标签一致，推送它不会触发 GitHub Actions。git233 已不再参与本仓管理。
 
 ### 2.3 CI 构建（CI Builds）
 

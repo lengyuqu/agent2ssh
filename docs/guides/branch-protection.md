@@ -48,10 +48,10 @@ cargo test --no-default-features --features daemon
 
 | 远端 | 地址 | 作用 |
 |---|---|---|
-| `origin`（Gitea） | `git233.phynews.com:18443/workbuddy/agent2ssh` | 日常推拉，本仓库唯一的 remote |
-| GitHub（`lengyuqu/agent2ssh`） | `github.com/lengyuqu/agent2ssh` | CI（`.github/workflows/ci.yml`）实际运行的地方 |
+| `github`（`lengyuqu/agent2ssh`） | `github.com/lengyuqu/agent2ssh` | CI（`.github/workflows/ci.yml`）与 Release 资产实际产生的地方 |
+| `cnb`（CNB） | `cnb.cool/zdzso/agent2ssh` | 私有镜像，保持 `main` 与标签一致 |
 
-**推 Gitea 不会触发 GitHub Actions**，两者是独立仓库。CI 是否跟上了 `main`，用这个查：
+**推 `cnb` 不会触发 GitHub Actions**，两者是独立仓库。CI 是否跟上了 `main`，用这个查：
 
 ```bash
 gh api repos/lengyuqu/agent2ssh/commits/main --jq .sha    # GitHub 上的头
