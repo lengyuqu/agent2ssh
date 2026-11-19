@@ -1,7 +1,7 @@
 openapi: "3.1.0"
 info:
   title: Agent2SSH Daemon API
-  version: "0.4.5"
+  version: "0.5.0"
   description: >
     Local HTTP API for the Agent2SSH capability layer.
 
