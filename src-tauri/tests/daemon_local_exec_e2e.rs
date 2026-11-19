@@ -239,12 +239,19 @@ fn local_exec_route_runs_a_user_defined_environment() {
     // The daemon re-reads the file when it changes: an edit is visible to the
     // next command without a restart, and so is a definition added after the
     // daemon started.
+    // `base` stays in both definitions. Without it the edit would silently
+    // change what `show` means: the base falls back to the default shell, and
+    // `echo %A2S_CUSTOM%` under PowerShell prints the name verbatim instead of
+    // failing, which reads as "the variable was lost" when the shell changed.
     std::fs::write(
         daemon
             .dir
             .join(agent2ssh::local_environments::ENVIRONMENTS_FILE),
-        "[[environment]]\nid = \"e2e-env\"\n[environment.env]\nA2S_CUSTOM = \"tampered\"\n\
-         [[environment]]\nid = \"late\"\n",
+        format!(
+            "[[environment]]\nid = \"e2e-env\"\nbase = \"{base}\"\n\
+             [environment.env]\nA2S_CUSTOM = \"tampered\"\n\
+             [[environment]]\nid = \"late\"\nbase = \"{base}\"\n"
+        ),
     )
     .expect("rewrite environments.toml");
     let again = daemon.post_local_exec(serde_json::json!({
