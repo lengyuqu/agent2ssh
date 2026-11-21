@@ -37,27 +37,31 @@ describe("module registry", () => {
     expect([...grouped].sort()).toEqual([...ids].sort());
     expect(new Set(grouped).size).toBe(grouped.length);
     // The first group carries the approvals pin and must stay titleless so the
-    // pending-count badge sits at the very top of the rail.
-    expect(SIDEBAR_GROUPS[0]).toEqual({ title: "", modules: ["approvals"] });
+    // pending-count badge sits at the very top of the rail; the dashboard (the
+    // page the console opens on) sits right under it.
+    expect(SIDEBAR_GROUPS[0]).toEqual({ title: "", modules: ["approvals", "dashboard"] });
+    // Help is pinned to the bottom of the rail.
+    expect(SIDEBAR_GROUPS[SIDEBAR_GROUPS.length - 1]).toEqual({ title: "", modules: ["help"], pinBottom: true });
     for (const group of SIDEBAR_GROUPS) {
       if (!group.title) continue;
       expect(zh[group.title], `missing zh title for ${group.title}`).toBeTruthy();
     }
   });
 
-  it("keeps the first nine modules stable for the Ctrl/⌘+1..9 shortcuts", () => {
-    // App.tsx indexes MODULES for the numeric shortcuts, so inserting a module
-    // in the middle silently repoints a shortcut. Appending is the contract.
-    expect(MODULES.slice(0, 9).map((module) => module.id)).toEqual([
+  it("maps Ctrl/⌘+1..9 to the first nine sidebar entries", () => {
+    // App.tsx indexes SIDEBAR_ORDER for the numeric shortcuts, so Ctrl/⌘+N is
+    // always the Nth item a user sees in the rail. Pinned here so a regroup
+    // that moves a shortcut is a visible, deliberate change.
+    expect(SIDEBAR_ORDER.slice(0, 9)).toEqual([
+      "approvals",
       "dashboard",
       "hosts",
       "proxies",
       "terminal",
+      "resident-sessions",
       "execute",
       "files-sessions",
       "tunnels",
-      "activity",
-      "mcp-agents",
     ]);
   });
 

@@ -30,8 +30,9 @@ import {
  * `SIDEBAR_ORDER`, which left a finished panel with no way to reach it. Every
  * invariant that ties them together is pinned in `nav.test.ts` instead.
  *
- * `MODULES` order is frozen because the Ctrl/⌘+1..9 shortcuts index into it
- * (`App.tsx`); new modules are appended, never inserted.
+ * `MODULES` order carries no meaning for the user: the sidebar renders from
+ * `SIDEBAR_GROUPS`, and the Ctrl/⌘+1..9 shortcuts index into `SIDEBAR_ORDER`
+ * so "the Nth item in the rail" and "Ctrl/⌘+N" are always the same module.
  */
 export const MODULES = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -48,8 +49,6 @@ export const MODULES = [
   { id: "playbooks", label: "Playbooks", icon: BookOpen },
   { id: "audit", label: "Audit", icon: History },
   { id: "help", label: "Help", icon: HelpCircle },
-  // V2-2/V4-3: appended (not inserted) so the existing Ctrl/⌘+1..9 module
-  // shortcuts (V2-5) keep pointing at the same modules.
   { id: "approvals", label: "Approvals", icon: ShieldCheck },
   { id: "config", label: "Config Snapshots", icon: Camera },
   { id: "topology", label: "Topology", icon: Waypoints },
@@ -61,26 +60,40 @@ export const MODULES = [
 /** A module id, derived from the registry so the two cannot drift. */
 export type ModuleId = (typeof MODULES)[number]["id"];
 
-// Sidebar display structure: approvals pinned above the groups (its
-// pending-count badge must stay the first thing in the rail), the rest in four
-// functional groups so twenty entries scan by domain instead of by position.
-// Group titles are i18n keys rendered through t() in App.tsx; the empty title
-// marks the pinned group.
-export const SIDEBAR_GROUPS: ReadonlyArray<{ title: string; modules: ModuleId[] }> = [
-  { title: "", modules: ["approvals"] },
-  { title: "Operations", modules: ["hosts", "terminal", "execute", "files-sessions", "tunnels", "playbooks"] },
-  { title: "Environments", modules: ["containers", "resident-sessions"] },
+// Sidebar display structure. The top pinned group holds approvals (its
+// pending-count badge must stay the first thing in the rail) and the dashboard
+// (the page the console opens on, so the active highlight starts at the top).
+// The rest sit in three functional groups so twenty entries scan by domain
+// instead of by position, and Help is pinned to the bottom of the rail.
+// Group titles are i18n keys rendered through t() in App.tsx; an empty title
+// marks a pinned group.
+export const SIDEBAR_GROUPS: ReadonlyArray<{
+  title: string;
+  modules: ModuleId[];
+  pinBottom?: boolean;
+}> = [
+  { title: "", modules: ["approvals", "dashboard"] },
   {
-    title: "Observability",
-    modules: ["dashboard", "topology", "activity", "audit", "recordings"],
+    title: "Operations",
+    modules: [
+      "hosts",
+      "proxies",
+      "terminal",
+      "resident-sessions",
+      "execute",
+      "files-sessions",
+      "tunnels",
+      "playbooks",
+      "containers",
+    ],
   },
-  { title: "System", modules: ["mcp-agents", "proxies", "keys", "sync", "config", "help"] },
+  { title: "Observability", modules: ["activity", "audit", "recordings", "topology"] },
+  { title: "System", modules: ["mcp-agents", "keys", "sync", "config"] },
+  { title: "", modules: ["help"], pinBottom: true },
 ];
 
-// v3 3.1: flat sidebar render order, now derived from the groups so the
-// set-equality invariants in `nav.test.ts` keep holding no matter how the
-// groups are arranged. MODULES order above is frozen by the Ctrl/⌘+1..9
-// shortcuts; only the sidebar display order changes.
+// Flat sidebar render order, derived from the groups. The Ctrl/⌘+1..9
+// shortcuts index into it (App.tsx), so they always follow what the rail shows.
 export const SIDEBAR_ORDER: ModuleId[] = SIDEBAR_GROUPS.flatMap((group) => group.modules);
 
 // V3-4: mesh navigation, not a tab trail — each module lists a handful of the

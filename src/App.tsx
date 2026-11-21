@@ -590,7 +590,8 @@ export default function App() {
   }, [ensureLocalDaemon]);
 
   // V2-5: global keyboard shortcuts. Ctrl/Cmd+K opens the command palette,
-  // Ctrl/Cmd+1..9 jumps straight to a module, Ctrl/Cmd+Shift+A surfaces the
+  // Ctrl/Cmd+1..9 jumps to the Nth module in the sidebar (SIDEBAR_ORDER, so the
+  // number always matches the rail's position), Ctrl/Cmd+Shift+A surfaces the
   // pending approval dialog (or reports there is none to act on).
   useEffect(() => {
     function handleGlobalKeyDown(e: KeyboardEvent) {
@@ -614,10 +615,10 @@ export default function App() {
 
       if (!e.shiftKey && key >= "1" && key <= "9") {
         const index = Number(key) - 1;
-        const module = MODULES[index];
-        if (module) {
+        const moduleId = SIDEBAR_ORDER[index];
+        if (moduleId) {
           e.preventDefault();
-          openModule(module.id);
+          openModule(moduleId);
         }
       }
     }
@@ -1320,8 +1321,11 @@ export default function App() {
               )}
               aria-label={t("Modules")}
             >
-              {SIDEBAR_GROUPS.map((group) => (
-                <div key={group.title || "pinned"} className="flex flex-col gap-0.5">
+              {SIDEBAR_GROUPS.map((group, groupIndex) => (
+                <div
+                  key={group.title || `pinned-${groupIndex}`}
+                  className={cn("flex flex-col gap-0.5", group.pinBottom && "mt-auto pt-2")}
+                >
                   {group.title && !sidebarCollapsed && (
                     <div className="px-2.5 pb-0.5 pt-1 text-[10px] font-bold uppercase tracking-wide text-sidebar-foreground/40">
                       {t(group.title)}

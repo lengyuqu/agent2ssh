@@ -493,7 +493,6 @@ export const zh: Record<string, string> = {
   "Remove tunnel": "删除隧道",
   "No active tunnels": "没有活跃隧道",
   "Operations": "操作",
-  "Environments": "环境",
   "Observability": "观测",
   "System": "系统",
   "Search hosts": "搜索主机",
