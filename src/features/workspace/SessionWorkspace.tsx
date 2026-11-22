@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { ChevronDown, FolderOpen, SquareTerminal } from "lucide-react";
+import { ChevronDown, SquareTerminal } from "lucide-react";
 import { useTheme, type Theme as AppTheme } from "../../theme";
 import { useI18n } from "../../i18n";
 import { api } from "../../api";
@@ -18,8 +18,6 @@ type Props = {
   tab: WorkspaceTab;
   hosts: HostProfile[];
   fileDrawerOpen: boolean;
-  /** Open the file drawer (used by the cwd chip's "open in files" action). */
-  onOpenFileDrawer: () => void;
 };
 
 function initialTerminalTheme(): TerminalThemeId {
@@ -43,14 +41,10 @@ function systemTheme(): AppTheme {
  * list so its own selector cannot drift away from the tab's connection
  * context — the pairing is the whole point of the workspace model.
  *
- * Extras layered on the pairing:
- * - a floating snippet bar (grouped quick commands, click = type + execute),
- * - an OSC 7 cwd chip: shells with integration report their directory and the
- *   chip jumps the file panel there on demand (best-effort, plain shells
- *   simply never show it),
- * - live transfer progress published to the workspace transfer center.
+ * The terminal also shows a floating snippet bar and the reported working
+ * directory when the shell supports OSC 7.
  */
-export default function SessionWorkspace({ tab, hosts, fileDrawerOpen, onOpenFileDrawer }: Props) {
+export default function SessionWorkspace({ tab, hosts, fileDrawerOpen }: Props) {
   const { t } = useI18n();
   const { theme: appThemeRaw } = useTheme();
   const terminalRef = useRef<TerminalViewHandle>(null);
@@ -86,14 +80,7 @@ export default function SessionWorkspace({ tab, hosts, fileDrawerOpen, onOpenFil
     terminalRef.current?.sendText("\r");
   }
 
-  // ── Terminal cwd → file panel jump ──
   const [cwd, setCwd] = useState<string | null>(null);
-  const [remoteJump, setRemoteJump] = useState<{ path: string; nonce: number } | null>(null);
-  function jumpFilesToCwd() {
-    if (!cwd) return;
-    onOpenFileDrawer();
-    setRemoteJump((current) => ({ path: cwd, nonce: (current?.nonce ?? 0) + 1 }));
-  }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -106,25 +93,17 @@ export default function SessionWorkspace({ tab, hosts, fileDrawerOpen, onOpenFil
           host={tab.host}
           terminalTheme={terminalTheme}
           appTheme={effectiveAppTheme}
-          onOsc7Cwd={(path) => setCwd(path)}
+          onOsc7Cwd={setCwd}
         />
 
         {/* OSC 7 cwd chip — best-effort: only shells with integration show it. */}
         {cwd && (
-          <div className="absolute bottom-2 left-2 flex items-center gap-1.5 rounded-lg border border-edge bg-popover/90 px-2 py-1 text-[11px] text-popover-foreground shadow">
-            <span className="max-w-56 truncate font-mono" title={cwd}>
-              {cwd}
-            </span>
-            <button
-              type="button"
-              className="flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              onClick={jumpFilesToCwd}
-              title={t("Open in files")}
-            >
-              <FolderOpen size={10} />
-              {t("Open in files")}
-            </button>
-          </div>
+          <span
+            className="absolute bottom-2 left-2 max-w-56 truncate rounded-lg border border-edge bg-popover/90 px-2 py-1 font-mono text-[11px] text-popover-foreground shadow"
+            title={cwd}
+          >
+            {cwd}
+          </span>
         )}
 
         {/* Floating snippet bar (FileTerm-style command templates). */}
@@ -171,12 +150,7 @@ export default function SessionWorkspace({ tab, hosts, fileDrawerOpen, onOpenFil
       {fileDrawerOpen && (
         <div className="h-[45%] shrink-0 border-t border-line">
           {host ? (
-            <SFTPPanel
-              hosts={tabHosts}
-              initialHost={tab.host}
-              transferHost={tab.host}
-              remoteJump={remoteJump ?? undefined}
-            />
+            <SFTPPanel hosts={tabHosts} initialHost={tab.host} />
           ) : (
             <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
               {t("Host no longer exists")}

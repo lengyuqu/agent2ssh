@@ -15,7 +15,6 @@ import { MODULES, RELATED_MODULES, SIDEBAR_GROUPS, SIDEBAR_ORDER, type ModuleId 
 import HostTree from "./features/workspace/HostTree";
 import WorkspaceTabBar from "./features/workspace/WorkspaceTabBar";
 import SessionWorkspace from "./features/workspace/SessionWorkspace";
-import TransferCenter from "./features/workspace/TransferCenter";
 import {
   closeTab,
   loadWorkspaceState,
@@ -1380,7 +1379,6 @@ export default function App() {
                   tab={tab}
                   hosts={hosts}
                   fileDrawerOpen={fileDrawerOpen}
-                  onOpenFileDrawer={() => setFileDrawerOpen(true)}
                 />
               </div>
             ))}
@@ -1394,7 +1392,6 @@ export default function App() {
               </div>
             )}
           </div>
-          <TransferCenter />
         </section>
       ) : (
         <section
