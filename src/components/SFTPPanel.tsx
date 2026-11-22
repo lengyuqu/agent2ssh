@@ -19,6 +19,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import { labelCls } from "../lib/ui-classes";
+import { cn } from "../lib/utils";
 import type { HostProfile, SftpDirEntry } from "../types";
 import HostSelector from "./HostSelector";
 import { Button } from "./ui/button";
@@ -91,6 +92,12 @@ type PendingTransfer = {
 type Props = {
   hosts: HostProfile[];
   initialHost?: string;
+  /**
+   * Living inside the terminal's file drawer rather than on the Files page:
+   * fill the height it is given and let the two listings scroll inside it,
+   * instead of demanding a 560px column that pushes the files below the fold.
+   */
+  embedded?: boolean;
 };
 
 function makeSide(kind: LocationKind, host: string): SideState {
@@ -235,11 +242,13 @@ function applyFilter(entries: FileEntry[], filter: LsFilter): FileEntry[] {
 
 const DRAG_MIME = "application/x-agent2ssh-sftp";
 
-function SFTPPanel({ hosts, initialHost = "" }: Props) {
+function SFTPPanel({ hosts, initialHost = "", embedded = false }: Props) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [left, setLeft] = useState<SideState>(() => makeSide("remote", initialHost));
   const [right, setRight] = useState<SideState>(() => makeSide("local", ""));
+  // Which side the embedded drawer shows when it is too narrow for both.
+  const [narrowSide, setNarrowSide] = useState<Side>("left");
   const [transfer, setTransfer] = useState<TransferProgress | null>(null);
   // K6: optional parallel transfers. Off by default (each transfer opens its own
   // SSH connection, so concurrency trades connection load for wall-clock time).
@@ -768,16 +777,32 @@ function SFTPPanel({ hosts, initialHost = "" }: Props) {
     );
   }
 
-  function renderSidePanel(side: Side) {
+  function renderSidePanel(side: Side, layoutCls?: string) {
     const s = getSide(side);
     const title = side === "left" ? t("Left") : t("Right");
     const visible = sortEntries(applyFilter(s.entries, s.filter), s.sortKey, s.sortDir);
     const fileCount = s.entries.filter((e) => !e.isDir).length;
     const canGoUp = s.kind === "remote" ? s.path !== "/" && s.path !== "." : !!s.localParent;
+    const hostPicker = (
+      <HostSelector
+        hosts={hosts}
+        value={s.host}
+        onChange={(host) => {
+          patchSide(side, { host, entries: [], loaded: false, selected: [] });
+        }}
+        label={t("Host")}
+        disabled={isTransferring}
+        shell={embedded ? "bare" : "label"}
+      />
+    );
 
     return (
       <div
-        className="flex min-h-[560px] flex-col gap-3 rounded-lg border border-border/70 bg-card/70 p-3"
+        className={cn(
+          "flex flex-col rounded-lg border border-border/70 bg-card/70",
+          embedded ? "min-h-[240px] gap-2 p-2.5" : "min-h-[560px] gap-3 p-3",
+          layoutCls,
+        )}
         onDragOver={(e) => {
           if (e.dataTransfer.types.includes(DRAG_MIME)) {
             e.preventDefault();
@@ -814,15 +839,14 @@ function SFTPPanel({ hosts, initialHost = "" }: Props) {
         </div>
 
         {s.kind === "remote" ? (
-          <HostSelector
-            hosts={hosts}
-            value={s.host}
-            onChange={(host) => {
-              patchSide(side, { host, entries: [], loaded: false, selected: [] });
-            }}
-            label={t("Host")}
-            disabled={isTransferring}
-          />
+          embedded ? (
+            <label className="grid">
+              <span className="sr-only">{t("Host")}</span>
+              {hostPicker}
+            </label>
+          ) : (
+            hostPicker
+          )
         ) : (
           <div className="flex items-center gap-2">
             <Button
@@ -862,7 +886,9 @@ function SFTPPanel({ hosts, initialHost = "" }: Props) {
 
         {/* Path input + up */}
         <label className={labelCls}>
-          {s.kind === "remote" ? t("Remote path") : t("Local path")}
+          <span className={embedded ? "sr-only" : undefined}>
+            {s.kind === "remote" ? t("Remote path") : t("Local path")}
+          </span>
           <div className="flex gap-2">
             <Button
               type="button"
@@ -900,7 +926,9 @@ function SFTPPanel({ hosts, initialHost = "" }: Props) {
           </div>
         </label>
 
-        {/* Filter + select all */}
+        {/* Filter + select all. Embedded folds the count and the new-folder
+            action into this row: three stacked rows would leave the listing
+            almost no height inside the terminal's drawer. */}
         <div className="flex flex-wrap items-center gap-1.5 text-xs">
           {(["all", "folders", "files"] as LsFilter[]).map((f) => (
             <Button
@@ -913,39 +941,78 @@ function SFTPPanel({ hosts, initialHost = "" }: Props) {
               {f === "all" ? t("All") : f === "folders" ? t("Folders") : t("Files")}
             </Button>
           ))}
+          {embedded && s.kind === "remote" && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => makeDir(side)}
+              disabled={isTransferring || !s.host}
+              className="h-7 px-2 text-xs"
+            >
+              <FolderPlus size={14} />
+              {t("New folder")}
+            </Button>
+          )}
+          {embedded && (
+            <span className="ml-auto text-muted-foreground">
+              {s.selected.length > 0
+                ? t("{count} selected", { count: s.selected.length })
+                : t("{count} items", { count: visible.length })}
+            </span>
+          )}
+          {embedded && s.selected.length > 0 && (
+            <button
+              type="button"
+              onClick={() => patchSide(side, { selected: [] })}
+              className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
+            >
+              <X size={12} />
+              {t("Clear")}
+            </button>
+          )}
           <Button
             variant="ghost"
             size="sm"
             onClick={() => selectAllFiles(side)}
             disabled={fileCount === 0}
-            className="ml-auto h-7 px-2 text-xs"
+            className={cn("h-7 px-2 text-xs", !embedded && "ml-auto")}
           >
             {t("Select files")}
           </Button>
         </div>
 
         {/* Selection summary */}
-        <div className="flex min-h-5 items-center justify-between gap-2 text-xs text-muted-foreground">
-          <span>
-            {s.selected.length > 0
-              ? t("{count} selected", { count: s.selected.length })
-              : t("{count} items", { count: visible.length })}
-          </span>
-          {s.selected.length > 0 && (
-            <button
-              type="button"
-              onClick={() => patchSide(side, { selected: [] })}
-              className="inline-flex items-center gap-1 hover:text-foreground"
-            >
-              <X size={12} />
-              {t("Clear")}
-            </button>
-          )}
-        </div>
+        {!embedded && (
+          <div className="flex min-h-5 items-center justify-between gap-2 text-xs text-muted-foreground">
+            <span>
+              {s.selected.length > 0
+                ? t("{count} selected", { count: s.selected.length })
+                : t("{count} items", { count: visible.length })}
+            </span>
+            {s.selected.length > 0 && (
+              <button
+                type="button"
+                onClick={() => patchSide(side, { selected: [] })}
+                className="inline-flex items-center gap-1 hover:text-foreground"
+              >
+                <X size={12} />
+                {t("Clear")}
+              </button>
+            )}
+          </div>
+        )}
 
-        {/* Listing */}
-        <div className="min-h-0 flex-1 overflow-hidden rounded-md border border-border bg-background/70">
-          <div className="flex flex-wrap gap-1 border-b border-border bg-card px-3 py-1.5">
+        {/* Listing. The wrapper has to be a flex column: the rows below it are
+            flex-1, so without this they size to content and the overflow is
+            clipped instead of scrolled. */}
+        <div
+          className={cn(
+            "flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-border bg-background/70",
+            // A short drawer scrolls rather than squeezing the rows to a sliver.
+            embedded && "min-h-[160px]",
+          )}
+        >
+          <div className="flex shrink-0 flex-wrap gap-1 border-b border-border bg-card px-3 py-1.5">
             {buildBreadcrumbs(s.path).map((crumb, idx) => (
               <button
                 key={`${crumb.path}-${idx}`}
@@ -960,7 +1027,7 @@ function SFTPPanel({ hosts, initialHost = "" }: Props) {
           </div>
 
           {/* Column header */}
-          <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-3 py-1 text-[11px] text-muted-foreground">
+          <div className="flex shrink-0 items-center gap-2 border-b border-border bg-muted/40 px-3 py-1 text-[11px] text-muted-foreground">
             <span className="flex-1">{renderSortButton(side, "name", t("Name"))}</span>
             <span className="w-20 text-right">{renderSortButton(side, "size", t("Size"))}</span>
             <span className="w-32 text-right">{renderSortButton(side, "time", t("Modified"))}</span>
@@ -1055,7 +1122,7 @@ function SFTPPanel({ hosts, initialHost = "" }: Props) {
           </div>
         </div>
 
-        {s.kind === "remote" && (
+        {!embedded && s.kind === "remote" && (
           <Button
             variant="secondary"
             size="sm"
@@ -1092,24 +1159,41 @@ function SFTPPanel({ hosts, initialHost = "" }: Props) {
           title={unsupported ? t("Local to local copy is not supported") : undefined}
         >
           {icon}
-          {label}
+          {embedded ? verb : label}
         </Button>
-        <div className="rounded-md border border-dashed border-border px-2 py-1 text-center text-[11px] text-muted-foreground">
-          {s.selected.length > 0 ? `${verb} · ${t("{count} selected", { count: s.selected.length })}` : t("Select source files")}
+        <div
+          className={cn(
+            "rounded-md border border-dashed border-border px-2 py-1 text-center text-[11px] text-muted-foreground",
+            embedded && "hidden xl:block",
+          )}
+        >
+          {s.selected.length > 0
+            ? embedded
+              ? t("{count} selected", { count: s.selected.length })
+              : `${verb} · ${t("{count} selected", { count: s.selected.length })}`
+            : t("Select source files")}
         </div>
       </div>
     );
   }
 
   return (
-    <Card className="space-y-4 p-4">
-      <div className="flex items-center gap-2 font-semibold">
-        <ArrowDownUp size={16} className="text-muted-foreground" />
-        {t("Files (SFTP)")}
-      </div>
+    <Card
+      className={cn(
+        embedded
+          ? "flex h-full min-h-0 flex-col gap-2.5 rounded-none border-0 bg-transparent p-3"
+          : "space-y-4 p-4",
+      )}
+    >
+      {!embedded && (
+        <div className="flex items-center gap-2 font-semibold">
+          <ArrowDownUp size={16} className="text-muted-foreground" />
+          {t("Files (SFTP)")}
+        </div>
+      )}
 
       {transfer && (
-        <div className="rounded-lg border border-primary/30 bg-primary/10 px-3 py-2.5 text-sm text-primary">
+        <div className="shrink-0 rounded-lg border border-primary/30 bg-primary/10 px-3 py-2.5 text-sm text-primary">
           <div className="flex items-center gap-2">
             <Spinner size={14} />
             {t("Transferring {done}/{total}", { done: transfer.done, total: transfer.total })}
@@ -1148,7 +1232,7 @@ function SFTPPanel({ hosts, initialHost = "" }: Props) {
       )}
 
       {lastResult && !transfer && (
-        <div className="rounded-lg border border-success/30 bg-success/10 px-3 py-2.5 text-sm text-success">
+        <div className="shrink-0 rounded-lg border border-success/30 bg-success/10 px-3 py-2.5 text-sm text-success">
           {t("Transferred {count} file(s) to {dest} in {ms}ms", {
             count: lastResult.count,
             dest: lastResult.dest,
@@ -1157,11 +1241,51 @@ function SFTPPanel({ hosts, initialHost = "" }: Props) {
         </div>
       )}
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
-        {renderSidePanel("left")}
+      <div
+        className={cn(
+          "grid gap-4 xl:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]",
+          embedded && "min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)] gap-2 xl:grid-rows-1 xl:gap-3",
+        )}
+      >
+        {renderSidePanel(
+          "left",
+          embedded
+            ? cn("row-start-2 xl:row-start-1", narrowSide === "left" ? "flex" : "hidden xl:flex")
+            : undefined,
+        )}
 
-        <div className="flex items-center">
-          <div className="grid w-full gap-3 rounded-lg border border-border/70 bg-muted/30 p-3 xl:w-44">
+        <div className={cn("flex items-center", embedded && "row-start-1")}>
+          <div
+            className={cn(
+              "grid w-full gap-3 rounded-lg border border-border/70 bg-muted/30 p-3 xl:w-44",
+              embedded && "flex flex-wrap items-center gap-2 p-2 xl:grid xl:w-40 xl:gap-3 xl:p-3",
+            )}
+          >
+            {/* Below xl the drawer shows one side at a time — two stacked
+                listings would each be a few rows tall. */}
+            {embedded && (
+              <div className="inline-flex overflow-hidden rounded-md border border-border xl:hidden">
+                {(["left", "right"] as Side[]).map((side) => {
+                  const KindIcon = getSide(side).kind === "remote" ? Server : HardDrive;
+                  return (
+                    <button
+                      key={side}
+                      type="button"
+                      onClick={() => setNarrowSide(side)}
+                      className={cn(
+                        "inline-flex items-center gap-1 px-2 py-1 text-xs",
+                        narrowSide === side
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-card text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      <KindIcon size={12} />
+                      {side === "left" ? t("Left") : t("Right")}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             {renderTransferButton("left", "right", <ArrowRight size={14} />, t("To right"))}
             {renderTransferButton("right", "left", <ArrowLeft size={14} />, t("To left"))}
             <label className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -1177,7 +1301,12 @@ function SFTPPanel({ hosts, initialHost = "" }: Props) {
           </div>
         </div>
 
-        {renderSidePanel("right")}
+        {renderSidePanel(
+          "right",
+          embedded
+            ? cn("row-start-2 xl:row-start-1", narrowSide === "right" ? "flex" : "hidden xl:flex")
+            : undefined,
+        )}
       </div>
 
       {pending && (

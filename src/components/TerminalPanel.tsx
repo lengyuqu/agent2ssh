@@ -1,23 +1,26 @@
 import {
-  BookMarked,
-  ChevronDown,
-  ChevronRight,
   Columns2,
   Copy,
   History,
   LayoutGrid,
-  Plus,
   Rows2,
-  RadioTower,
   Search,
   Square,
   TerminalSquare,
-  X,
 } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState  } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { useI18n } from "../i18n";
 import { api } from "../api";
-import type { HostProfile, TerminalBroadcastResponse } from "../types";
+import type { ModuleId } from "../nav";
+import type { ConnectionStatus, HostGroup, HostProfile, TerminalBroadcastResponse } from "../types";
 import {
   isTerminalThemeId,
   TERMINAL_THEME_OPTIONS,
@@ -28,9 +31,29 @@ import {
 import { useTheme, type Theme as AppTheme } from "../theme";
 import TerminalView, { type TerminalViewHandle } from "./TerminalView";
 import SnippetsDialog from "./SnippetsDialog";
-import HostSelector from "./HostSelector";
+import SFTPPanel from "./SFTPPanel";
+import HostTree from "../features/terminal/HostTree";
+import SessionTabs from "../features/terminal/SessionTabs";
+import {
+  activateSession,
+  assignPane,
+  closeSession,
+  focusOrOpenSession,
+  loadTerminalState,
+  moveSession,
+  openNewSession,
+  paneCount,
+  paneRect,
+  pruneMissingHosts,
+  saveTerminalState,
+  sessionLabels,
+  setLayout,
+  setFilesRatio,
+  setRatios,
+  type PaneLayout,
+  type TerminalState,
+} from "../features/terminal/sessions";
 import { Button } from "./ui/button";
-import { Card } from "./ui/card";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { Select } from "./ui/select";
@@ -42,61 +65,15 @@ import type { CommandBlockMetadata } from "../lib/terminal/block-content";
 
 type Props = {
   hosts: HostProfile[];
+  groups: HostGroup[];
+  connectionStatuses: ConnectionStatus[];
+  /** Host selected elsewhere in the console; the strip's "+" opens a session to it. */
   initialHost?: string;
+  onNavigateModule?: (id: ModuleId) => void;
 };
-
-type Tab = { id: string; host: string };
-
-// V3-2: up to 4 panes. "single" is the pre-V3-2 behavior (one tab at a time).
-type Layout = "single" | "row-2" | "col-2" | "grid-4";
 
 const PANE_HEADER_PX = 28;
 const HISTORY_MAX_ENTRIES = 200;
-
-type Rect = { top: number; left: number; width: number; height: number };
-
-function paneCount(layout: Layout): number {
-  if (layout === "single") return 1;
-  if (layout === "grid-4") return 4;
-  return 2;
-}
-
-function paneRect(layout: Layout, ratios: { col: number; row: number }, index: number): Rect {
-  const colPct = ratios.col * 100;
-  const rowPct = ratios.row * 100;
-  if (layout === "single") return { top: 0, left: 0, width: 100, height: 100 };
-  if (layout === "row-2") {
-    return index === 0
-      ? { top: 0, left: 0, width: colPct, height: 100 }
-      : { top: 0, left: colPct, width: 100 - colPct, height: 100 };
-  }
-  if (layout === "col-2") {
-    return index === 0
-      ? { top: 0, left: 0, width: 100, height: rowPct }
-      : { top: rowPct, left: 0, width: 100, height: 100 - rowPct };
-  }
-  // grid-4
-  const rects: Rect[] = [
-    { top: 0, left: 0, width: colPct, height: rowPct },
-    { top: 0, left: colPct, width: 100 - colPct, height: rowPct },
-    { top: rowPct, left: 0, width: colPct, height: 100 - rowPct },
-    { top: rowPct, left: colPct, width: 100 - colPct, height: 100 - rowPct },
-  ];
-  return rects[index];
-}
-
-type WindowWithTerminalSeq = Window & {
-  __agent2sshTerminalSeq?: number;
-};
-
-function nextId(): string {
-  if (typeof window === "undefined") {
-    return `term-${Date.now()}`;
-  }
-  const next = ((window as WindowWithTerminalSeq).__agent2sshTerminalSeq ?? 0) + 1;
-  (window as WindowWithTerminalSeq).__agent2sshTerminalSeq = next;
-  return `term-${next}-${Date.now()}`;
-}
 
 function initialTerminalTheme(): TerminalThemeId {
   try {
@@ -113,42 +90,60 @@ function systemTheme(): AppTheme {
   return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
 }
 
-function TerminalPanel({ hosts, initialHost = "" }: Props) {
+/**
+ * The terminal surface: host tree → sessions → panes, with the focused
+ * session's host owning the file drawer below. Split panes, broadcast, command
+ * blocks, Ctrl+R history, snippets and the terminal theme all act on these
+ * sessions, so every tool shares one connection model.
+ */
+function TerminalPanel({
+  hosts,
+  groups,
+  connectionStatuses,
+  initialHost = "",
+  onNavigateModule,
+}: Props) {
   const { t } = useI18n();
   const { theme: appTheme } = useTheme();
-  const [tabs, setTabs] = useState<Tab[]>([]);
-  const [newHost, setNewHost] = useState(initialHost || hosts[0]?.name || "");
+  const [state, setState] = useState<TerminalState>(() => loadTerminalState());
+  const [focusMode, setFocusMode] = useState(false);
   const [terminalTheme, setTerminalTheme] = useState<TerminalThemeId>(() => initialTerminalTheme());
   const [resolvedSystemTheme, setResolvedSystemTheme] = useState<AppTheme>(() => systemTheme());
 
-  // V3-2: split-screen layout state.
-  const [layout, setLayout] = useState<Layout>("single");
-  const [paneTabIds, setPaneTabIds] = useState<Array<string | null>>([null]);
-  const [focusedPane, setFocusedPane] = useState(0);
-  const [ratios, setRatios] = useState({ col: 0.5, row: 0.5 });
-  const containerRef = useRef<HTMLDivElement>(null);
+  const { sessions, panes, layout, focusedPane, ratios, filesOpen, filesRatio } = state;
+  const focusedSessionId = panes[focusedPane] ?? null;
+  const focusedSession = sessions.find((session) => session.id === focusedSessionId) ?? null;
 
-  // V3-2: per-tab typed-line history (Ctrl+R search) and the TerminalView
-  // handles used to inject a picked entry back into the right pane.
+  const containerRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+  // Per-session typed-line history (Ctrl+R) and the handles used to inject a
+  // picked entry back into the right pane.
   const historyRef = useRef<Map<string, string[]>>(new Map());
   const terminalRefs = useRef<Map<string, TerminalViewHandle>>(new Map());
-  const focusedTabIdRef = useRef<string | null>(null);
+  const focusedSessionIdRef = useRef<string | null>(null);
+  focusedSessionIdRef.current = focusedSessionId;
+
   const [historySearch, setHistorySearch] = useState<{ paneIndex: number; query: string } | null>(
-    null
+    null,
   );
-  const [collapsedHosts, setCollapsedHosts] = useState<Set<string>>(() => new Set());
   const [snippetsOpen, setSnippetsOpen] = useState(false);
-  const [blocksByTab, setBlocksByTab] = useState<Map<string, CommandBlockMetadata[]>>(
+  const [blocksBySession, setBlocksBySession] = useState<Map<string, CommandBlockMetadata[]>>(
     () => new Map(),
   );
   const [blockQuery, setBlockQuery] = useState("");
   const [blockMatches, setBlockMatches] = useState<CommandBlockMetadata[]>([]);
   const [selectedBlock, setSelectedBlock] = useState<{
-    tabId: string;
+    sessionId: string;
     block: CommandBlockMetadata;
   } | null>(null);
   const [blockCopyStatus, setBlockCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
-  const [terminalConnections, setTerminalConnections] = useState<Map<string, string>>(() => new Map());
+  const [terminalConnections, setTerminalConnections] = useState<Map<string, string>>(
+    () => new Map(),
+  );
+  const [cwdBySession, setCwdBySession] = useState<Map<string, string>>(() => new Map());
+  // Sessions whose file drawer has been opened stay mounted (hidden) so their
+  // browse paths and selection survive switching panes.
+  const [drawerSessions, setDrawerSessions] = useState<string[]>([]);
   const [broadcastOpen, setBroadcastOpen] = useState(false);
   const [broadcastTargets, setBroadcastTargets] = useState<Set<string>>(() => new Set());
   const [broadcastCommand, setBroadcastCommand] = useState("");
@@ -157,17 +152,40 @@ function TerminalPanel({ hosts, initialHost = "" }: Props) {
   const [broadcastBusy, setBroadcastBusy] = useState(false);
   const [broadcastError, setBroadcastError] = useState<string | null>(null);
 
-  focusedTabIdRef.current = paneTabIds[focusedPane] ?? null;
+  const labels = useMemo(() => sessionLabels(sessions), [sessions]);
+  const sessionCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const session of sessions) counts.set(session.host, (counts.get(session.host) ?? 0) + 1);
+    return counts;
+  }, [sessions]);
+  const connectedHosts = useMemo(
+    () => new Set(connectionStatuses.filter((status) => status.connected).map((status) => status.host)),
+    [connectionStatuses],
+  );
 
-  const insertSnippet = useCallback((command: string) => {
-    const tabId = focusedTabIdRef.current;
-    if (!tabId) return;
-    const terminal = terminalRefs.current.get(tabId);
-    if (!terminal) return;
-    terminal.sendText(command);
-    terminal.focus();
-    setSnippetsOpen(false);
-  }, []);
+  useEffect(() => {
+    saveTerminalState(state);
+  }, [state]);
+
+  // A host removed from the configuration takes its sessions and panes with it.
+  useEffect(() => {
+    const names = new Set(hosts.map((host) => host.name));
+    setState((current) => pruneMissingHosts(current, names));
+  }, [hosts]);
+
+  useEffect(() => {
+    setDrawerSessions((previous) => {
+      const alive = previous.filter((id) => sessions.some((session) => session.id === id));
+      return alive.length === previous.length ? previous : alive;
+    });
+  }, [sessions]);
+
+  useEffect(() => {
+    if (!filesOpen || !focusedSessionId) return;
+    setDrawerSessions((previous) =>
+      previous.includes(focusedSessionId) ? previous : [...previous, focusedSessionId],
+    );
+  }, [filesOpen, focusedSessionId]);
 
   useEffect(() => {
     try {
@@ -188,35 +206,28 @@ function TerminalPanel({ hosts, initialHost = "" }: Props) {
   const effectiveAppTheme = appTheme === "system" ? resolvedSystemTheme : appTheme;
   const terminalBackground = useMemo(
     () => terminalThemeBackground(terminalTheme, effectiveAppTheme),
-    [effectiveAppTheme, terminalTheme]
+    [effectiveAppTheme, terminalTheme],
   );
 
-  function changeLayout(next: Layout) {
-    setLayout(next);
-    const count = paneCount(next);
-    setPaneTabIds((prev) => {
-      const resized = prev.slice(0, count);
-      while (resized.length < count) resized.push(null);
-      return resized;
-    });
-    setFocusedPane((prev) => Math.min(prev, count - 1));
+  const insertSnippet = useCallback((command: string) => {
+    const sessionId = focusedSessionIdRef.current;
+    if (!sessionId) return;
+    const terminal = terminalRefs.current.get(sessionId);
+    if (!terminal) return;
+    terminal.sendText(command);
+    terminal.focus();
+    setSnippetsOpen(false);
+  }, []);
+
+  function openHost(host: string) {
+    setState((current) => focusOrOpenSession(current, host));
   }
 
-  function assignPane(paneIndex: number, tabId: string | null) {
-    setPaneTabIds((prev) => prev.map((id, i) => (i === paneIndex ? tabId : id)));
-    setFocusedPane(paneIndex);
+  function newSession(host: string) {
+    setState((current) => openNewSession(current, host));
   }
 
-  function openTab(host: string) {
-    if (!host) return;
-    const id = nextId();
-    setTabs((prev) => [...prev, { id, host }]);
-    assignPane(focusedPane, id);
-  }
-
-  function closeTab(id: string) {
-    setTabs((prev) => prev.filter((tab) => tab.id !== id));
-    setPaneTabIds((prev) => prev.map((tabId) => (tabId === id ? null : tabId)));
+  function close(id: string) {
     historyRef.current.delete(id);
     terminalRefs.current.delete(id);
     setTerminalConnections((previous) => {
@@ -229,18 +240,30 @@ function TerminalPanel({ hosts, initialHost = "" }: Props) {
       next.delete(id);
       return next;
     });
-    setBlocksByTab((previous) => {
+    setBlocksBySession((previous) => {
       const next = new Map(previous);
       next.delete(id);
       return next;
     });
-    setSelectedBlock((previous) => (previous?.tabId === id ? null : previous));
+    setSelectedBlock((previous) => (previous?.sessionId === id ? null : previous));
+    setCwdBySession((previous) => {
+      const next = new Map(previous);
+      next.delete(id);
+      return next;
+    });
+    setState((current) => closeSession(current, id));
+  }
+
+  function toggleFiles() {
+    setState((current) => ({ ...current, filesOpen: !current.filesOpen }));
   }
 
   function openBroadcast() {
-    const connected = tabs.filter((tab) => terminalConnections.has(tab.id));
-    setBroadcastTargets(new Set(connected.map((tab) => tab.id)));
-    const selection = focusedTabId ? terminalRefs.current.get(focusedTabId)?.getSelection().trim() : "";
+    const connected = sessions.filter((session) => terminalConnections.has(session.id));
+    setBroadcastTargets(new Set(connected.map((session) => session.id)));
+    const selection = focusedSessionId
+      ? terminalRefs.current.get(focusedSessionId)?.getSelection().trim()
+      : "";
     setBroadcastCommand(selection && !selection.includes("\n") ? selection : "");
     setBroadcastForce(false);
     setBroadcastPreview(null);
@@ -249,11 +272,11 @@ function TerminalPanel({ hosts, initialHost = "" }: Props) {
   }
 
   const broadcastRequest = () => ({
-    targets: tabs
-      .filter((tab) => broadcastTargets.has(tab.id))
-      .flatMap((tab) => {
-        const terminalId = terminalConnections.get(tab.id);
-        return terminalId ? [{ terminal_id: terminalId, host: tab.host }] : [];
+    targets: sessions
+      .filter((session) => broadcastTargets.has(session.id))
+      .flatMap((session) => {
+        const terminalId = terminalConnections.get(session.id);
+        return terminalId ? [{ terminal_id: terminalId, host: session.host }] : [];
       }),
     command: broadcastCommand.trim(),
     force: broadcastForce,
@@ -291,53 +314,44 @@ function TerminalPanel({ hosts, initialHost = "" }: Props) {
     }
   }
 
-  function updateBlockSearch(tabId: string | null, query: string) {
-    if (!tabId) {
+  function updateBlockSearch(sessionId: string | null, query: string) {
+    if (!sessionId) {
       setBlockMatches([]);
       return;
     }
-    const handle = terminalRefs.current.get(tabId);
-    setBlockMatches(handle ? handle.searchBlocks(query) : (blocksByTab.get(tabId) ?? []));
+    const handle = terminalRefs.current.get(sessionId);
+    setBlockMatches(handle ? handle.searchBlocks(query) : (blocksBySession.get(sessionId) ?? []));
   }
 
-  function selectCommandBlock(tabId: string, block: CommandBlockMetadata) {
-    if (!terminalRefs.current.get(tabId)?.selectBlock(block.id)) return;
-    setSelectedBlock({ tabId, block });
+  function selectCommandBlock(sessionId: string, block: CommandBlockMetadata) {
+    if (!terminalRefs.current.get(sessionId)?.selectBlock(block.id)) return;
+    setSelectedBlock({ sessionId, block });
     setBlockCopyStatus("idle");
   }
 
   async function copySelectedCommandBlock() {
     if (!selectedBlock) return;
     const result = await terminalRefs.current
-      .get(selectedBlock.tabId)
+      .get(selectedBlock.sessionId)
       ?.copyBlock(selectedBlock.block.id);
     setBlockCopyStatus(result?.ok ? "copied" : "failed");
   }
 
-  function recordLine(tabId: string, line: string) {
-    const list = historyRef.current.get(tabId) ?? [];
+  function recordLine(sessionId: string, line: string) {
+    const list = historyRef.current.get(sessionId) ?? [];
     const deduped = list.filter((entry) => entry !== line);
     deduped.unshift(line);
-    historyRef.current.set(tabId, deduped.slice(0, HISTORY_MAX_ENTRIES));
+    historyRef.current.set(sessionId, deduped.slice(0, HISTORY_MAX_ENTRIES));
   }
 
-  function pickHistoryEntry(paneIndex: number, tabId: string, text: string) {
-    terminalRefs.current.get(tabId)?.sendText(text);
+  function pickHistoryEntry(paneIndex: number, sessionId: string, text: string) {
+    terminalRefs.current.get(sessionId)?.sendText(text);
     setHistorySearch(null);
-    terminalRefs.current.get(tabId)?.focus();
-    setFocusedPane(paneIndex);
+    terminalRefs.current.get(sessionId)?.focus();
+    setState((current) => ({ ...current, focusedPane: paneIndex }));
   }
 
-  function toggleHostGroup(host: string) {
-    setCollapsedHosts((prev) => {
-      const next = new Set(prev);
-      if (next.has(host)) next.delete(host);
-      else next.add(host);
-      return next;
-    });
-  }
-
-  function startDrag(axis: "col" | "row", event: React.PointerEvent) {
+  function startDrag(axis: "col" | "row", event: ReactPointerEvent) {
     event.preventDefault();
     const container = containerRef.current;
     if (!container) return;
@@ -348,7 +362,14 @@ function TerminalPanel({ hosts, initialHost = "" }: Props) {
           ? (moveEvent.clientX - rect.left) / rect.width
           : (moveEvent.clientY - rect.top) / rect.height;
       const clamped = Math.min(0.85, Math.max(0.15, fraction));
-      setRatios((prev) => ({ ...prev, [axis]: clamped }));
+      setState((current) =>
+        setRatios(
+          current,
+          axis === "col"
+            ? { ...current.ratios, col: clamped }
+            : { ...current.ratios, row: clamped },
+        ),
+      );
     }
     function onUp() {
       window.removeEventListener("pointermove", onMove);
@@ -358,477 +379,549 @@ function TerminalPanel({ hosts, initialHost = "" }: Props) {
     window.addEventListener("pointerup", onUp);
   }
 
-  const tabsByHost = useMemo(() => {
-    const map = new Map<string, Tab[]>();
-    for (const tab of tabs) {
-      const list = map.get(tab.host) ?? [];
-      list.push(tab);
-      map.set(tab.host, list);
+  /** The drawer is measured from the bottom of the stage, not the top. */
+  function startFilesDrag(event: ReactPointerEvent) {
+    event.preventDefault();
+    const stage = stageRef.current;
+    if (!stage) return;
+    const rect = stage.getBoundingClientRect();
+    function onMove(moveEvent: PointerEvent) {
+      // A stage hidden mid-drag measures zero; keep the last usable ratio.
+      if (rect.height <= 0) return;
+      setState((current) => setFilesRatio(current, (rect.bottom - moveEvent.clientY) / rect.height));
     }
-    return map;
-  }, [tabs]);
+    function onUp() {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
 
-  const visiblePanes = Array.from({ length: paneCount(layout) }, (_, i) => i);
-  const searchTabId = historySearch ? paneTabIds[historySearch.paneIndex] : null;
+  const visiblePanes = Array.from({ length: paneCount(layout) }, (_, index) => index);
+  const searchSessionId = historySearch ? panes[historySearch.paneIndex] : null;
+  const searchRect = historySearch ? paneRect(layout, ratios, historySearch.paneIndex) : null;
   const searchResults = useMemo(() => {
-    if (!historySearch || !searchTabId) return [];
-    const all = historyRef.current.get(searchTabId) ?? [];
+    if (!historySearch || !searchSessionId) return [];
+    const all = historyRef.current.get(searchSessionId) ?? [];
     const needle = historySearch.query.trim().toLowerCase();
     return needle ? all.filter((line) => line.toLowerCase().includes(needle)) : all;
-  }, [historySearch, searchTabId]);
-  const focusedTabId = paneTabIds[focusedPane] ?? null;
+  }, [historySearch, searchSessionId]);
   const visibleBlocks = blockQuery.trim()
     ? blockMatches
-    : focusedTabId
-      ? (blocksByTab.get(focusedTabId) ?? [])
+    : focusedSessionId
+      ? (blocksBySession.get(focusedSessionId) ?? [])
       : [];
+  const mountedDrawers = drawerSessions.filter((id) =>
+    sessions.some((session) => session.id === id),
+  );
 
   useEffect(() => {
-    updateBlockSearch(focusedTabId, blockQuery);
-  }, [focusedTabId]);
+    updateBlockSearch(focusedSessionId, blockQuery);
+  }, [focusedSessionId]);
 
   return (
-    <Card className="flex h-[72vh] overflow-hidden p-0">
-      {/* V3-2: session tree grouped by host, plus layout controls. */}
-      <div className="flex w-[220px] shrink-0 flex-col gap-3 overflow-y-auto border-r border-border bg-muted/30 p-2.5">
-        <div className="grid gap-1.5">
-          <div className="px-1 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
-            {t("Split view")}
-          </div>
-          <div className="grid grid-cols-4 gap-1">
-            <IconButton
-              size="sm"
-              variant={layout === "single" ? "default" : "ghost"}
-              title={t("Single pane")}
-              onClick={() => changeLayout("single")}
-              className={layout === "single" ? "border-primary/40 bg-primary/10 text-primary" : ""}
-            >
-              <Square size={14} />
-            </IconButton>
-            <IconButton
-              size="sm"
-              variant={layout === "row-2" ? "default" : "ghost"}
-              title={t("Split horizontally")}
-              onClick={() => changeLayout("row-2")}
-              className={layout === "row-2" ? "border-primary/40 bg-primary/10 text-primary" : ""}
-            >
-              <Columns2 size={14} />
-            </IconButton>
-            <IconButton
-              size="sm"
-              variant={layout === "col-2" ? "default" : "ghost"}
-              title={t("Split vertically")}
-              onClick={() => changeLayout("col-2")}
-              className={layout === "col-2" ? "border-primary/40 bg-primary/10 text-primary" : ""}
-            >
-              <Rows2 size={14} />
-            </IconButton>
-            <IconButton
-              size="sm"
-              variant={layout === "grid-4" ? "default" : "ghost"}
-              title={t("Split into 4")}
-              onClick={() => changeLayout("grid-4")}
-              className={layout === "grid-4" ? "border-primary/40 bg-primary/10 text-primary" : ""}
-            >
-              <LayoutGrid size={14} />
-            </IconButton>
-          </div>
-        </div>
-
-        <div className="grid gap-1.5">
-          <div className="px-1 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
-            {t("New terminal")}
-          </div>
-          <HostSelector
+    <div className="flex h-full min-h-0 min-w-0 flex-1 overflow-hidden">
+      {!focusMode && (
+        <div className="flex w-[240px] shrink-0 flex-col gap-3 overflow-y-auto border-r border-line bg-muted/30 p-2.5 max-lg:w-[190px]">
+          <HostTree
             hosts={hosts}
-            value={newHost}
-            onChange={setNewHost}
-            allowEmpty
-            optionLabel={(host) => host.name}
-            shell="bare"
-            selectClassName="h-8 text-xs"
+            groups={groups}
+            connectionStatuses={connectionStatuses}
+            sessionCounts={sessionCounts}
+            onOpenHost={openHost}
+            onNewSession={newSession}
           />
-          <Button size="sm" onClick={() => openTab(newHost)} disabled={!newHost} className="h-8">
-            <Plus size={13} />
-            {t("New terminal")}
-          </Button>
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={() => setSnippetsOpen(true)}
-            className="h-8"
-          >
-            <BookMarked size={13} />
-            {t("Command snippets")}
-          </Button>
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={openBroadcast}
-            disabled={terminalConnections.size < 2}
-            className="h-8"
-          >
-            <RadioTower size={13} />
-            {t("Broadcast command")}
-          </Button>
-        </div>
 
-        <div className="grid min-h-0 flex-1 gap-1 overflow-y-auto">
-          <div className="px-1 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
-            {t("Sessions")}
-          </div>
-          {tabs.length === 0 && (
-            <div className="px-1 text-xs text-muted-foreground">{t("No active sessions")}</div>
-          )}
-          {[...tabsByHost.entries()].map(([host, hostTabs]) => {
-            const collapsed = collapsedHosts.has(host);
-            return (
-              <div key={host} className="grid gap-0.5">
-                <button
-                  type="button"
-                  onClick={() => toggleHostGroup(host)}
-                  className="flex items-center gap-1 rounded px-1 py-1 text-left text-xs font-semibold text-foreground/85 hover:bg-muted"
-                >
-                  {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-                  <span className="truncate">{host}</span>
-                  <span className="ml-auto text-[10px] font-normal text-muted-foreground">
-                    {hostTabs.length}
-                  </span>
-                </button>
-                {!collapsed &&
-                  hostTabs.map((tab) => {
-                    const paneIndex = paneTabIds.indexOf(tab.id);
-                    return (
-                      <div
-                        key={tab.id}
-                        onClick={() => assignPane(focusedPane, tab.id)}
-                        className={cn(
-                          "group flex cursor-pointer items-center gap-1.5 rounded px-2 py-1 pl-5 text-xs transition-colors hover:bg-muted",
-                          paneIndex >= 0 ? "text-primary" : "text-muted-foreground"
-                        )}
-                      >
-                        <TerminalSquare size={11} className="shrink-0" />
-                        <span className="flex-1 truncate">{tab.id.split("-")[1] ?? tab.id}</span>
-                        {paneIndex >= 0 && (
-                          <span className="rounded bg-primary/15 px-1 text-[10px] font-bold text-primary">
-                            {paneIndex + 1}
-                          </span>
-                        )}
-                        <span
-                          role="button"
-                          tabIndex={-1}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            closeTab(tab.id);
-                          }}
-                          className="rounded p-0.5 opacity-0 hover:bg-foreground/10 group-hover:opacity-100"
-                          aria-label={t("Close")}
-                        >
-                          <X size={11} />
-                        </span>
-                      </div>
-                    );
-                  })}
-              </div>
-            );
-          })}
-        </div>
-
-        <div className="grid max-h-[210px] shrink-0 gap-1.5 border-t border-border pt-2">
-          <div className="px-1 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
-            {t("Command blocks")}
-          </div>
-          <div className="relative">
-            <Search
-              size={12}
-              className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground"
-            />
-            <Input
-              value={blockQuery}
-              onChange={(event) => {
-                const query = event.target.value;
-                setBlockQuery(query);
-                updateBlockSearch(focusedTabId, query);
-              }}
-              placeholder={t("Search blocks")}
-              disabled={!focusedTabId}
-              className="h-7 pl-7 text-xs"
-            />
-          </div>
-          <div className="max-h-[92px] overflow-y-auto rounded border border-border/70">
-            {visibleBlocks.length === 0 ? (
-              <div className="px-2 py-3 text-center text-[11px] text-muted-foreground">
-                {t(focusedTabId ? "No command blocks" : "Select a session")}
-              </div>
-            ) : (
-              visibleBlocks
-                .slice()
-                .reverse()
-                .slice(0, 50)
-                .map((block) => (
-                  <button
-                    key={block.id}
-                    type="button"
-                    onClick={() => focusedTabId && selectCommandBlock(focusedTabId, block)}
-                    className={cn(
-                      "flex w-full items-center gap-1.5 border-b border-border/50 px-2 py-1 text-left text-[11px] last:border-b-0 hover:bg-muted",
-                      selectedBlock?.tabId === focusedTabId && selectedBlock.block.id === block.id
-                        ? "bg-primary/10 text-primary"
-                        : "",
-                    )}
-                    title={block.command ?? t("Command unavailable")}
-                  >
-                    <span
-                      className="h-3 w-1 shrink-0 rounded-full"
-                      style={{ backgroundColor: block.color }}
-                    />
-                    <span className="truncate font-mono">
-                      {block.command ?? t("Command unavailable")}
-                    </span>
-                    <span className="ml-auto shrink-0 text-[9px] text-muted-foreground">
-                      {block.startLine + 1}-{block.endLine + 1}
-                    </span>
-                  </button>
-                ))
-            )}
-          </div>
-          {selectedBlock && selectedBlock.tabId === focusedTabId ? (
-            <div className="flex items-center gap-1.5 px-1 text-[10px] text-muted-foreground">
-              <span className="min-w-0 flex-1 truncate" title={selectedBlock.block.startedAt}>
-                {selectedBlock.block.active ? t("Running") : t("Completed")} · {selectedBlock.block.host}
-              </span>
-              <Button
-                size="sm"
-                variant="secondary"
-                className="h-6 px-2 text-[10px]"
-                onClick={() => void copySelectedCommandBlock()}
-              >
-                <Copy size={11} />
-                {t(blockCopyStatus === "copied" ? "Copied" : blockCopyStatus === "failed" ? "Copy failed" : "Copy")}
-              </Button>
+          <div className="grid shrink-0 gap-1.5 border-t border-line pt-2">
+            <div className="px-1 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
+              {t("Split view")}
             </div>
-          ) : null}
-        </div>
-
-        <label className="grid gap-1 text-xs font-medium text-muted-foreground">
-          <span>{t("Terminal theme")}</span>
-          <Select
-            value={terminalTheme}
-            onChange={(e) => {
-              const next = e.target.value;
-              if (isTerminalThemeId(next)) setTerminalTheme(next);
-            }}
-            className="h-8 text-xs"
-          >
-            {TERMINAL_THEME_OPTIONS.map((option) => (
-              <option key={option.id} value={option.id}>
-                {t(option.label)}
-              </option>
-            ))}
-          </Select>
-        </label>
-      </div>
-
-      {/* Pane grid */}
-      <div ref={containerRef} className="relative min-w-0 flex-1" style={{ backgroundColor: terminalBackground }}>
-        {tabs.length === 0 && (
-          <div className="absolute inset-0 flex items-center justify-center text-sm text-white/60">
-            {t("Open a terminal to a host to get started.")}
-          </div>
-        )}
-
-        {/* Pane chrome: header + border + focus ring, one per visible pane slot. */}
-        {visiblePanes.map((paneIndex) => {
-          const rect = paneRect(layout, ratios, paneIndex);
-          const tabId = paneTabIds[paneIndex];
-          const tab = tabs.find((candidate) => candidate.id === tabId);
-          return (
-            <div
-              key={`chrome-${paneIndex}`}
-              className={cn(
-                "pointer-events-none absolute z-[2] border",
-                paneIndex === focusedPane ? "border-primary/60" : "border-white/10"
-              )}
-              style={{
-                top: `${rect.top}%`,
-                left: `${rect.left}%`,
-                width: `${rect.width}%`,
-                height: `${rect.height}%`,
-              }}
-            >
-              <div
-                className="pointer-events-auto flex items-center gap-1.5 bg-black/30 px-2 text-[11px] text-white/70"
-                style={{ height: PANE_HEADER_PX }}
-                onClick={() => setFocusedPane(paneIndex)}
+            <div className="grid grid-cols-4 gap-1">
+              <IconButton
+                size="sm"
+                variant={layout === "single" ? "default" : "ghost"}
+                title={t("Single pane")}
+                onClick={() => setState((current) => setLayout(current, "single"))}
+                className={layout === "single" ? "border-primary/40 bg-primary/10 text-primary" : ""}
               >
-                <TerminalSquare size={11} className="shrink-0" />
-                <Select
-                  value={tabId ?? ""}
-                  onChange={(e) => assignPane(paneIndex, e.target.value || null)}
-                  className="h-6 max-w-[140px] border-white/15 bg-transparent px-1 text-[11px] text-white/80"
+                <Square size={14} />
+              </IconButton>
+              <IconButton
+                size="sm"
+                variant={layout === "row-2" ? "default" : "ghost"}
+                title={t("Split horizontally")}
+                onClick={() => setState((current) => setLayout(current, "row-2"))}
+                className={layout === "row-2" ? "border-primary/40 bg-primary/10 text-primary" : ""}
+              >
+                <Columns2 size={14} />
+              </IconButton>
+              <IconButton
+                size="sm"
+                variant={layout === "col-2" ? "default" : "ghost"}
+                title={t("Split vertically")}
+                onClick={() => setState((current) => setLayout(current, "col-2"))}
+                className={layout === "col-2" ? "border-primary/40 bg-primary/10 text-primary" : ""}
+              >
+                <Rows2 size={14} />
+              </IconButton>
+              <IconButton
+                size="sm"
+                variant={layout === "grid-4" ? "default" : "ghost"}
+                title={t("Split into 4")}
+                onClick={() => setState((current) => setLayout(current, "grid-4"))}
+                className={layout === "grid-4" ? "border-primary/40 bg-primary/10 text-primary" : ""}
+              >
+                <LayoutGrid size={14} />
+              </IconButton>
+            </div>
+          </div>
+
+          <div className="grid max-h-[210px] shrink-0 gap-1.5 border-t border-line pt-2">
+            <div className="px-1 text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
+              {t("Command blocks")}
+            </div>
+            <div className="relative">
+              <Search
+                size={12}
+                className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground"
+              />
+              <Input
+                value={blockQuery}
+                onChange={(event) => {
+                  const query = event.target.value;
+                  setBlockQuery(query);
+                  updateBlockSearch(focusedSessionId, query);
+                }}
+                placeholder={t("Search blocks")}
+                disabled={!focusedSessionId}
+                className="h-7 pl-7 text-xs"
+              />
+            </div>
+            <div className="max-h-[92px] overflow-y-auto rounded border border-border/70">
+              {visibleBlocks.length === 0 ? (
+                <div className="px-2 py-3 text-center text-[11px] text-muted-foreground">
+                  {t(focusedSessionId ? "No command blocks" : "Select a session")}
+                </div>
+              ) : (
+                visibleBlocks
+                  .slice()
+                  .reverse()
+                  .slice(0, 50)
+                  .map((block) => (
+                    <button
+                      key={block.id}
+                      type="button"
+                      onClick={() => focusedSessionId && selectCommandBlock(focusedSessionId, block)}
+                      className={cn(
+                        "flex w-full items-center gap-1.5 border-b border-border/50 px-2 py-1 text-left text-[11px] last:border-b-0 hover:bg-muted",
+                        selectedBlock?.sessionId === focusedSessionId &&
+                          selectedBlock.block.id === block.id
+                          ? "bg-primary/10 text-primary"
+                          : "",
+                      )}
+                      title={block.command ?? t("Command unavailable")}
+                    >
+                      <span
+                        className="h-3 w-1 shrink-0 rounded-full"
+                        style={{ backgroundColor: block.color }}
+                      />
+                      <span className="truncate font-mono">
+                        {block.command ?? t("Command unavailable")}
+                      </span>
+                      <span className="ml-auto shrink-0 text-[9px] text-muted-foreground">
+                        {block.startLine + 1}-{block.endLine + 1}
+                      </span>
+                    </button>
+                  ))
+              )}
+            </div>
+            {selectedBlock && selectedBlock.sessionId === focusedSessionId ? (
+              <div className="flex items-center gap-1.5 px-1 text-[10px] text-muted-foreground">
+                <span className="min-w-0 flex-1 truncate" title={selectedBlock.block.startedAt}>
+                  {selectedBlock.block.active ? t("Running") : t("Completed")} ·{" "}
+                  {selectedBlock.block.host}
+                </span>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  className="h-6 px-2 text-[10px]"
+                  onClick={() => void copySelectedCommandBlock()}
                 >
-                  <option value="">{t("Select a session")}</option>
-                  {tabs.map((candidate) => (
-                    <option key={candidate.id} value={candidate.id}>
-                      {candidate.host}
-                    </option>
-                  ))}
-                </Select>
-                {paneCount(layout) > 1 && (
+                  <Copy size={11} />
+                  {t(
+                    blockCopyStatus === "copied"
+                      ? "Copied"
+                      : blockCopyStatus === "failed"
+                        ? "Copy failed"
+                        : "Copy",
+                  )}
+                </Button>
+              </div>
+            ) : null}
+          </div>
+
+          <label className="grid shrink-0 gap-1 text-xs font-medium text-muted-foreground">
+            <span>{t("Terminal theme")}</span>
+            <Select
+              value={terminalTheme}
+              onChange={(event) => {
+                const next = event.target.value;
+                if (isTerminalThemeId(next)) setTerminalTheme(next);
+              }}
+              className="h-8 text-xs"
+            >
+              {TERMINAL_THEME_OPTIONS.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {t(option.label)}
+                </option>
+              ))}
+            </Select>
+          </label>
+
+          {/* Keeps the tools packed under the tree instead of stranded at the
+              bottom of a tall, mostly empty column. */}
+          <div className="min-h-0 flex-1" />
+        </div>
+      )}
+
+      <div ref={stageRef} className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <SessionTabs
+          sessions={sessions}
+          panes={panes}
+          connectedHosts={connectedHosts}
+          focusMode={focusMode}
+          filesOpen={filesOpen}
+          canBroadcast={terminalConnections.size >= 2}
+          onActivate={(id) => setState((current) => activateSession(current, id))}
+          onClose={close}
+          onReorder={(dragId, overId) => setState((current) => moveSession(current, dragId, overId))}
+          onNewSession={() => newSession(initialHost || hosts[0]?.name || "")}
+          onOpenSnippets={() => setSnippetsOpen(true)}
+          onOpenBroadcast={openBroadcast}
+          onToggleFiles={toggleFiles}
+          onToggleFocusMode={() => setFocusMode((mode) => !mode)}
+        />
+
+        {/* Pane grid */}
+        <div
+          ref={containerRef}
+          className="relative min-h-0 min-w-0 flex-1"
+          style={{ backgroundColor: terminalBackground }}
+        >
+          {sessions.length === 0 && (
+            <div className="absolute inset-0 flex items-center justify-center p-6">
+              <div className="grid w-full max-w-lg gap-4 rounded-2xl border border-white/10 bg-black/25 p-6">
+                <div className="flex items-center gap-3">
+                  <span className="grid size-9 shrink-0 place-items-center rounded-lg border border-primary/40 bg-primary/15 text-primary">
+                    <TerminalSquare size={18} />
+                  </span>
+                  <div className="grid gap-0.5">
+                    <div className="text-sm font-semibold text-white/90">{t("Terminal")}</div>
+                    <div className="text-xs text-white/55">
+                      {hosts.length === 0
+                        ? t("Add a host to start issuing SSH commands")
+                        : t("Pick a host on the left to open its terminal and files.")}
+                    </div>
+                  </div>
+                </div>
+                {hosts.length === 0
+                  ? onNavigateModule && (
+                      <Button size="sm" variant="secondary" onClick={() => onNavigateModule("hosts")}>
+                        {t("New host")}
+                      </Button>
+                    )
+                  : (
+                    <div className="grid gap-1.5">
+                      <div className="text-[11px] font-bold uppercase tracking-wide text-white/45">
+                        {t("Open a session")}
+                      </div>
+                      <div className="grid gap-1 sm:grid-cols-2">
+                        {hosts.slice(0, 6).map((host) => (
+                          <button
+                            key={host.name}
+                            type="button"
+                            onClick={() => openHost(host.name)}
+                            className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-2.5 py-2 text-left text-xs text-white/85 transition-colors hover:border-primary/50 hover:bg-primary/15 hover:text-white"
+                          >
+                            <span
+                              className={cn(
+                                "size-1.5 shrink-0 rounded-full",
+                                connectedHosts.has(host.name) ? "bg-success" : "bg-risk-medium/70",
+                              )}
+                            />
+                            <span className="min-w-0 truncate">{host.name}</span>
+                            <span className="ml-auto shrink-0 font-mono text-[10px] text-white/40">
+                              {host.host}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                <div className="text-[11px] text-white/40">
+                  {t("Split panes, broadcast and the file drawer all act on these sessions.")}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Pane chrome: header + border + focus ring, one per visible pane slot. */}
+          {sessions.length > 0 && visiblePanes.map((paneIndex) => {
+            const rect = paneRect(layout, ratios, paneIndex);
+            const sessionId = panes[paneIndex];
+            const session = sessions.find((candidate) => candidate.id === sessionId);
+            return (
+              <div
+                key={`chrome-${paneIndex}`}
+                className={cn(
+                  "pointer-events-none absolute z-[2] border",
+                  paneIndex === focusedPane ? "border-primary/60" : "border-white/10",
+                )}
+                style={{
+                  top: `${rect.top}%`,
+                  left: `${rect.left}%`,
+                  width: `${rect.width}%`,
+                  height: `${rect.height}%`,
+                }}
+              >
+                <div
+                  className="pointer-events-auto flex items-center gap-1.5 bg-black/30 px-2 text-[11px] text-white/70"
+                  style={{ height: PANE_HEADER_PX }}
+                  onClick={() => setState((current) => ({ ...current, focusedPane: paneIndex }))}
+                >
+                  <TerminalSquare size={11} className="shrink-0" />
+                  <Select
+                    value={sessionId ?? ""}
+                    aria-label={t("Pane {index} session", { index: paneIndex + 1 })}
+                    onChange={(event) =>
+                      setState((current) => assignPane(current, paneIndex, event.target.value || null))
+                    }
+                    className="h-6 max-w-[160px] border-white/15 bg-transparent px-1 text-[11px] text-white/80"
+                  >
+                    <option value="">{t("Select a session")}</option>
+                    {sessions.map((candidate) => (
+                      <option key={candidate.id} value={candidate.id}>
+                        {labels.get(candidate.id) ?? candidate.host}
+                      </option>
+                    ))}
+                  </Select>
                   <IconButton
                     size="sm"
                     title={t("Search command history")}
                     onClick={() => setHistorySearch({ paneIndex, query: "" })}
-                    disabled={!tabId}
+                    disabled={!sessionId}
                     className="ml-auto h-6 w-6 border-white/15 bg-transparent text-white/70 hover:text-white"
                   >
                     <History size={12} />
                   </IconButton>
+                </div>
+                {!session && (
+                  <div className="pointer-events-none flex h-[calc(100%-28px)] items-center justify-center text-xs text-white/40">
+                    {t("Pick a session above")}
+                  </div>
                 )}
               </div>
-              {!tab && (
-                <div className="pointer-events-none flex h-[calc(100%-28px)] items-center justify-center text-xs text-white/40">
-                  {t("Pick a session above")}
-                </div>
-              )}
-            </div>
-          );
-        })}
+            );
+          })}
 
-        {/* Resize handles. */}
-        {(layout === "row-2" || layout === "grid-4") && (
-          <div
-            className="absolute inset-y-0 z-10 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/40"
-            style={{ left: `${ratios.col * 100}%` }}
-            onPointerDown={(e) => startDrag("col", e)}
-          />
-        )}
-        {(layout === "col-2" || layout === "grid-4") && (
-          <div
-            className="absolute inset-x-0 z-10 h-1.5 -translate-y-1/2 cursor-row-resize hover:bg-primary/40"
-            style={{ top: `${ratios.row * 100}%` }}
-            onPointerDown={(e) => startDrag("row", e)}
-          />
-        )}
-
-        {/* Live terminals: every open tab stays mounted (background sessions keep
-            running) but only positioned into view when assigned to a pane. */}
-        {tabs.map((tab) => {
-          const paneIndex = paneTabIds.indexOf(tab.id);
-          const assigned = paneIndex >= 0;
-          const rect = assigned ? paneRect(layout, ratios, paneIndex) : null;
-          return (
+          {/* Resize handles. */}
+          {sessions.length > 0 && (layout === "row-2" || layout === "grid-4") && (
             <div
-              key={tab.id}
-              className="absolute"
-              style={
-                assigned && rect
-                  ? {
-                      visibility: "visible",
-                      top: `calc(${rect.top}% + ${PANE_HEADER_PX}px)`,
-                      left: `${rect.left}%`,
-                      width: `${rect.width}%`,
-                      height: `calc(${rect.height}% - ${PANE_HEADER_PX}px)`,
-                      zIndex: 1,
-                    }
-                  : { visibility: "hidden", top: 0, left: 0, width: "100%", height: "100%", zIndex: 0 }
-              }
-            >
-              <TerminalView
-                ref={(handle) => {
-                  if (handle) terminalRefs.current.set(tab.id, handle);
-                  else terminalRefs.current.delete(tab.id);
-                }}
-                host={tab.host}
-                terminalTheme={terminalTheme}
-                appTheme={effectiveAppTheme}
-                onLineTyped={(line) => recordLine(tab.id, line)}
-                onHistoryRequest={
-                  assigned ? () => setHistorySearch({ paneIndex, query: "" }) : undefined
-                }
-                onBlocksChange={(blocks) => {
-                  setBlocksByTab((previous) => {
-                    const next = new Map(previous);
-                    next.set(tab.id, blocks);
-                    return next;
-                  });
-                  if (focusedTabIdRef.current === tab.id && blockQuery.trim()) {
-                    queueMicrotask(() => updateBlockSearch(tab.id, blockQuery));
-                  }
-                  setSelectedBlock((previous) => {
-                    if (previous?.tabId !== tab.id) return previous;
-                    const updated = blocks.find((block) => block.id === previous.block.id);
-                    return updated ? { tabId: tab.id, block: updated } : null;
-                  });
-                }}
-                onBlockSelected={(block) => {
-                  setSelectedBlock(block ? { tabId: tab.id, block } : null);
-                  setBlockCopyStatus("idle");
-                }}
-                onConnectionChange={(connection) => {
-                  setTerminalConnections((previous) => {
-                    const next = new Map(previous);
-                    if (connection) next.set(tab.id, connection.terminalId);
-                    else next.delete(tab.id);
-                    return next;
-                  });
-                }}
-              />
-            </div>
-          );
-        })}
+              className="absolute inset-y-0 z-10 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/40"
+              style={{ left: `${ratios.col * 100}%` }}
+              onPointerDown={(event) => startDrag("col", event)}
+            />
+          )}
+          {sessions.length > 0 && (layout === "col-2" || layout === "grid-4") && (
+            <div
+              className="absolute inset-x-0 z-10 h-1.5 -translate-y-1/2 cursor-row-resize hover:bg-primary/40"
+              style={{ top: `${ratios.row * 100}%` }}
+              onPointerDown={(event) => startDrag("row", event)}
+            />
+          )}
 
-        {historySearch && searchTabId && (
-          <div
-            className="absolute inset-x-0 top-2 z-20 mx-auto w-[min(420px,90%)] rounded-lg border border-edge bg-popover text-popover-foreground"
-            style={{
-              left: `${paneRect(layout, ratios, historySearch.paneIndex).left}%`,
-              width: `min(420px, ${paneRect(layout, ratios, historySearch.paneIndex).width}% - 16px)`,
-            }}
-          >
-            <div className="flex items-center gap-2 border-b border-border px-3 py-2">
-              <History size={14} className="shrink-0 text-muted-foreground" />
-              <Input
-                autoFocus
-                value={historySearch.query}
-                onChange={(e) => setHistorySearch({ ...historySearch, query: e.target.value })}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") {
-                    e.preventDefault();
-                    setHistorySearch(null);
-                  } else if (e.key === "Enter" && searchResults[0]) {
-                    e.preventDefault();
-                    pickHistoryEntry(historySearch.paneIndex, searchTabId, searchResults[0]);
+          {/* Live terminals: every open session stays mounted (background
+              sessions keep running) but only positioned into view when assigned
+              to a pane. */}
+          {sessions.map((session) => {
+            const paneIndex = panes.indexOf(session.id);
+            const assigned = paneIndex >= 0;
+            const rect = assigned ? paneRect(layout, ratios, paneIndex) : null;
+            const cwd = cwdBySession.get(session.id);
+            return (
+              <div
+                key={session.id}
+                className="absolute"
+                style={
+                  assigned && rect
+                    ? {
+                        visibility: "visible",
+                        top: `calc(${rect.top}% + ${PANE_HEADER_PX}px)`,
+                        left: `${rect.left}%`,
+                        width: `${rect.width}%`,
+                        height: `calc(${rect.height}% - ${PANE_HEADER_PX}px)`,
+                        zIndex: 1,
+                      }
+                    : { visibility: "hidden", top: 0, left: 0, width: "100%", height: "100%", zIndex: 0 }
+                }
+              >
+                <TerminalView
+                  ref={(handle) => {
+                    if (handle) terminalRefs.current.set(session.id, handle);
+                    else terminalRefs.current.delete(session.id);
+                  }}
+                  host={session.host}
+                  terminalTheme={terminalTheme}
+                  appTheme={effectiveAppTheme}
+                  onLineTyped={(line) => recordLine(session.id, line)}
+                  onHistoryRequest={
+                    assigned ? () => setHistorySearch({ paneIndex, query: "" }) : undefined
                   }
-                }}
-                placeholder={t("Search command history")}
-                className="h-7 border-none bg-transparent px-0 shadow-none focus-visible:ring-0"
-              />
-              <kbd className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                Esc
-              </kbd>
+                  onOsc7Cwd={(next) =>
+                    setCwdBySession((previous) => {
+                      const map = new Map(previous);
+                      map.set(session.id, next);
+                      return map;
+                    })
+                  }
+                  onBlocksChange={(blocks) => {
+                    setBlocksBySession((previous) => {
+                      const next = new Map(previous);
+                      next.set(session.id, blocks);
+                      return next;
+                    });
+                    if (focusedSessionIdRef.current === session.id && blockQuery.trim()) {
+                      queueMicrotask(() => updateBlockSearch(session.id, blockQuery));
+                    }
+                    setSelectedBlock((previous) => {
+                      if (previous?.sessionId !== session.id) return previous;
+                      const updated = blocks.find((block) => block.id === previous.block.id);
+                      return updated ? { sessionId: session.id, block: updated } : null;
+                    });
+                  }}
+                  onBlockSelected={(block) => {
+                    setSelectedBlock(block ? { sessionId: session.id, block } : null);
+                    setBlockCopyStatus("idle");
+                  }}
+                  onConnectionChange={(connection) => {
+                    setTerminalConnections((previous) => {
+                      const next = new Map(previous);
+                      if (connection) next.set(session.id, connection.terminalId);
+                      else next.delete(session.id);
+                      return next;
+                    });
+                  }}
+                />
+                {/* OSC 7 cwd chip — best-effort: only shells with integration report it. */}
+                {cwd && (
+                  <span
+                    className="absolute bottom-2 left-2 z-[4] max-w-56 truncate rounded-lg border border-edge bg-popover/90 px-2 py-1 font-mono text-[11px] text-popover-foreground shadow"
+                    title={cwd}
+                  >
+                    {cwd}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+
+          {historySearch && searchSessionId && searchRect && (
+            <div
+              className="absolute z-20 rounded-lg border border-edge bg-popover text-popover-foreground"
+              style={{
+                top: `calc(${searchRect.top}% + ${PANE_HEADER_PX + 6}px)`,
+                left: `calc(${searchRect.left}% + 8px)`,
+                width: `min(420px, ${searchRect.width}% - 16px)`,
+              }}
+            >
+              <div className="flex items-center gap-2 border-b border-border px-3 py-2">
+                <History size={14} className="shrink-0 text-muted-foreground" />
+                <Input
+                  autoFocus
+                  value={historySearch.query}
+                  onChange={(event) => setHistorySearch({ ...historySearch, query: event.target.value })}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      event.preventDefault();
+                      setHistorySearch(null);
+                    } else if (event.key === "Enter" && searchResults[0]) {
+                      event.preventDefault();
+                      pickHistoryEntry(historySearch.paneIndex, searchSessionId, searchResults[0]);
+                    }
+                  }}
+                  placeholder={t("Search command history")}
+                  className="h-7 border-none bg-transparent px-0 shadow-none focus-visible:ring-0"
+                />
+                <kbd className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                  Esc
+                </kbd>
+              </div>
+              <div className="max-h-[240px] overflow-y-auto py-1">
+                {searchResults.length === 0 && (
+                  <div className="px-3 py-4 text-center text-xs text-muted-foreground">
+                    {t("No matches")}
+                  </div>
+                )}
+                {searchResults.slice(0, 30).map((line, index) => (
+                  <button
+                    key={`${line}-${index}`}
+                    type="button"
+                    onClick={() => pickHistoryEntry(historySearch.paneIndex, searchSessionId, line)}
+                    className="block w-full truncate px-3 py-1.5 text-left font-mono text-xs hover:bg-muted"
+                    title={line}
+                  >
+                    {line}
+                  </button>
+                ))}
+              </div>
             </div>
-            <div className="max-h-[240px] overflow-y-auto py-1">
-              {searchResults.length === 0 && (
-                <div className="px-3 py-4 text-center text-xs text-muted-foreground">
-                  {t("No matches")}
-                </div>
-              )}
-              {searchResults.slice(0, 30).map((line, index) => (
-                <button
-                  key={`${line}-${index}`}
-                  type="button"
-                  onClick={() => pickHistoryEntry(historySearch.paneIndex, searchTabId, line)}
-                  className="block w-full truncate px-3 py-1.5 text-left font-mono text-xs hover:bg-muted"
-                  title={line}
-                >
-                  {line}
-                </button>
-              ))}
+          )}
+        </div>
+
+        {/* The focused session's host owns the file drawer: a one-host SFTP
+            panel, so its selector cannot drift away from the terminal above. */}
+        {filesOpen && focusedSession && (
+          <>
+            <div
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label={t("Resize file drawer")}
+              title={t("Resize file drawer")}
+              className="group flex h-2 shrink-0 cursor-row-resize items-center justify-center border-t border-line bg-muted/60 transition-colors hover:bg-primary/40"
+              onPointerDown={startFilesDrag}
+            >
+              <span className="h-0.5 w-8 rounded-full bg-foreground/25 group-hover:bg-primary-foreground/70" />
             </div>
-          </div>
+            <div
+              className="shrink-0 overflow-y-auto"
+              style={{ height: `${filesRatio * 100}%` }}
+            >
+              {mountedDrawers.map((id) => {
+                const session = sessions.find((candidate) => candidate.id === id);
+                if (!session) return null;
+                const drawerHosts = hosts.filter((host) => host.name === session.host);
+                return (
+                  <div
+                    key={id}
+                    className="h-full"
+                    style={{ display: id === focusedSessionId ? "block" : "none" }}
+                  >
+                    {drawerHosts.length > 0 ? (
+                      <SFTPPanel hosts={drawerHosts} initialHost={session.host} embedded />
+                    ) : (
+                      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                        {t("Host no longer exists")}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </>
         )}
       </div>
+
       {broadcastOpen && (
         <Dialog onClose={() => !broadcastBusy && setBroadcastOpen(false)} className="max-w-2xl">
           <div className="grid gap-4">
@@ -839,23 +932,29 @@ function TerminalPanel({ hosts, initialHost = "" }: Props) {
               </p>
             </div>
             <div className="grid max-h-36 grid-cols-2 gap-2 overflow-y-auto rounded border border-border p-2">
-              {tabs.filter((tab) => terminalConnections.has(tab.id)).map((tab) => (
-                <label key={tab.id} className="flex items-center gap-2 rounded px-2 py-1 text-sm hover:bg-muted">
-                  <input
-                    type="checkbox"
-                    checked={broadcastTargets.has(tab.id)}
-                    onChange={() => {
-                      setBroadcastTargets((previous) => {
-                        const next = new Set(previous);
-                        if (next.has(tab.id)) next.delete(tab.id); else next.add(tab.id);
-                        return next;
-                      });
-                      setBroadcastPreview(null);
-                    }}
-                  />
-                  <span className="truncate">{tab.host}</span>
-                </label>
-              ))}
+              {sessions
+                .filter((session) => terminalConnections.has(session.id))
+                .map((session) => (
+                  <label
+                    key={session.id}
+                    className="flex items-center gap-2 rounded px-2 py-1 text-sm hover:bg-muted"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={broadcastTargets.has(session.id)}
+                      onChange={() => {
+                        setBroadcastTargets((previous) => {
+                          const next = new Set(previous);
+                          if (next.has(session.id)) next.delete(session.id);
+                          else next.add(session.id);
+                          return next;
+                        });
+                        setBroadcastPreview(null);
+                      }}
+                    />
+                    <span className="truncate">{labels.get(session.id) ?? session.host}</span>
+                  </label>
+                ))}
             </div>
             <Textarea
               autoFocus
@@ -885,7 +984,11 @@ function TerminalPanel({ hosts, initialHost = "" }: Props) {
                     <span className="min-w-0 flex-1 truncate">{target.host}</span>
                     <RiskBadge level={target.risk_level} />
                     <span className={target.authorized ? "text-success" : "text-destructive"}>
-                      {target.error ? target.error : target.requires_approval ? t("Approval required") : t("Ready")}
+                      {target.error
+                        ? target.error
+                        : target.requires_approval
+                          ? t("Approval required")
+                          : t("Ready")}
                     </span>
                   </div>
                 ))}
@@ -893,7 +996,11 @@ function TerminalPanel({ hosts, initialHost = "" }: Props) {
             )}
             {broadcastError && <div className="text-sm text-destructive">{broadcastError}</div>}
             <div className="flex justify-end gap-2">
-              <Button variant="secondary" onClick={() => setBroadcastOpen(false)} disabled={broadcastBusy}>
+              <Button
+                variant="secondary"
+                onClick={() => setBroadcastOpen(false)}
+                disabled={broadcastBusy}
+              >
                 {t("Cancel")}
               </Button>
               <Button
@@ -912,7 +1019,6 @@ function TerminalPanel({ hosts, initialHost = "" }: Props) {
                   broadcastPreview.targets.some((target) => !target.authorized)
                 }
               >
-                <RadioTower size={14} />
                 {t("Broadcast and run on {count} terminals", { count: broadcastTargets.size })}
               </Button>
             </div>
@@ -921,11 +1027,11 @@ function TerminalPanel({ hosts, initialHost = "" }: Props) {
       )}
       <SnippetsDialog
         open={snippetsOpen}
-        canInsert={Boolean(paneTabIds[focusedPane])}
+        canInsert={Boolean(focusedSessionId)}
         onClose={() => setSnippetsOpen(false)}
         onInsert={insertSnippet}
       />
-    </Card>
+    </div>
   );
 }
 

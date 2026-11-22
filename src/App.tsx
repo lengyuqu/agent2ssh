@@ -1,29 +1,15 @@
 import {
-  ArrowLeft,
   KeyRound,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
   RefreshCw,
-  SquareTerminal,
   X,
 } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, reportError } from "./api";
 import { isAlreadyDecided } from "./lib/approval-decision";
 import { MODULES, RELATED_MODULES, SIDEBAR_GROUPS, SIDEBAR_ORDER, type ModuleId } from "./nav";
-import HostTree from "./features/workspace/HostTree";
-import WorkspaceTabBar from "./features/workspace/WorkspaceTabBar";
-import SessionWorkspace from "./features/workspace/SessionWorkspace";
-import {
-  closeTab,
-  loadWorkspaceState,
-  moveTab,
-  openHostTab,
-  pruneMissingHosts,
-  saveWorkspaceState,
-  type WorkspaceTab,
-} from "./features/workspace/types";
 import AddHostForm from "./components/AddHostForm";
 import ApprovalWorkbench from "./components/approval/ApprovalWorkbench";
 import AuditCharts from "./components/AuditCharts";
@@ -120,6 +106,7 @@ const SidebarItem = memo(function SidebarItem({
     <button
       type="button"
       title={collapsed ? t(label) : undefined}
+      aria-current={active ? "page" : undefined}
       className={cn(
         "relative flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] font-medium transition-colors",
         collapsed && "justify-center px-2",
@@ -212,64 +199,6 @@ export default function App() {
   // never published), so it is derived from the existing 5s poll instead.
   const prevConnectedRef = useRef<Map<string, boolean> | null>(null);
 
-  // ── Workspace (connection-first) state ──
-  // The shell has two surfaces: the console (grouped module nav + module
-  // pages — the human's home: configure, review, monitor) and the workspace
-  // (host tree → session tabs with paired terminal + files — where the agent
-  // operates). `workspaceMode` selects which one the stage shows; it defaults
-  // to the console because the product's identity is agent SSH governance,
-  // not a plain SSH client.
-  const [workspaceMode, setWorkspaceMode] = useState(false);
-  const [workspace, setWorkspace] = useState<{ tabs: WorkspaceTab[]; activeTabId: string | null }>(
-    () => loadWorkspaceState()
-  );
-  const [fileDrawerOpen, setFileDrawerOpen] = useState(true);
-  const [focusMode, setFocusMode] = useState(false);
-
-  const connectedHostNames = useMemo(
-    () => new Set(connectionStatuses.filter((c) => c.connected).map((c) => c.host)),
-    [connectionStatuses],
-  );
-
-  useEffect(() => {
-    saveWorkspaceState(workspace.tabs, workspace.activeTabId);
-  }, [workspace]);
-
-  // A host removed from the configuration takes its tab with it.
-  useEffect(() => {
-    const names = new Set(hosts.map((host) => host.name));
-    setWorkspace((current) => {
-      const pruned = pruneMissingHosts(current.tabs, names);
-      if (pruned.length === current.tabs.length) return current;
-      const activeTabId =
-        pruned.some((tab) => tab.id === current.activeTabId)
-          ? current.activeTabId
-          : (pruned[pruned.length - 1]?.id ?? null);
-      return { tabs: pruned, activeTabId };
-    });
-  }, [hosts]);
-
-  const openHostSession = useCallback((name: string) => {
-    setWorkspaceMode(true);
-    setWorkspace((current) => {
-      const next = openHostTab(current.tabs, current.activeTabId, name);
-      return { tabs: next.tabs, activeTabId: next.activeTabId };
-    });
-  }, []);
-
-  const closeWorkspaceTab = useCallback((tabId: string) => {
-    setWorkspace((current) => closeTab(current.tabs, current.activeTabId, tabId));
-  }, []);
-
-  const toggleFocusMode = useCallback(() => {
-    setFocusMode((mode) => {
-      const next = !mode;
-      setSidebarCollapsed(next);
-      if (next) setFileDrawerOpen(false);
-      return next;
-    });
-  }, []);
-
   const currentHost = useMemo(
     () => hosts.find((h) => h.name === selectedHost),
     [hosts, selectedHost]
@@ -281,21 +210,7 @@ export default function App() {
   );
 
   const openModule = useCallback((id: (typeof MODULES)[number]["id"]) => {
-    // Opening a module leaves the workspace stage and renders the management
-    // page; "Back to workspace" flips `workspaceMode` back.
     setActiveModule(id);
-    setWorkspaceMode(false);
-  }, []);
-
-  const backToWorkspace = useCallback(() => {
-    setWorkspaceMode(true);
-  }, []);
-
-  // Leave the workspace and land on the console home (dashboard) — the
-  // "Back to console" entry in the workspace sidebar.
-  const openConsole = useCallback(() => {
-    setActiveModule("dashboard");
-    setWorkspaceMode(false);
   }, []);
 
   // v3 §1.3: jump to the approval workbench and focus the first pending card
@@ -1276,295 +1191,217 @@ export default function App() {
           </IconButton>
         </div>
 
-        {/* Two sidebar shapes for the two surfaces. Console mode (default):
-            the grouped module nav — the human's jobs are configure, review,
-            monitor, and the feature points must be visible on entry.
-            Workspace mode: the host tree feeds session tabs. */}
-        {workspaceMode ? (
-          <HostTree
-            hosts={hosts}
-            groups={groups}
-            connectionStatuses={connectionStatuses}
-            openTabs={new Set(workspace.tabs.map((tab) => tab.host))}
-            collapsed={sidebarCollapsed}
-            onOpenHost={openHostSession}
-            onOpenConsole={openConsole}
-          />
-        ) : (
-          <>
-            <button
-              type="button"
-              onClick={() => setWorkspaceMode(true)}
-              title={t("Workspace")}
-              className={cn(
-                "flex shrink-0 items-center gap-2 rounded-lg border border-edge bg-white/5 text-[13px] font-medium text-sidebar-foreground transition-colors hover:bg-white/10",
-                sidebarCollapsed ? "justify-center p-2" : "px-2.5 py-1.5"
-              )}
+        {/* The grouped module nav — the human's jobs are configure, review and
+            monitor, and the feature points must be visible on entry. The host
+            tree lives inside the Terminal module, which is the connection
+            surface. */}
+        <nav
+          className={cn(
+            "flex min-h-0 flex-1 flex-col overflow-y-auto",
+            sidebarCollapsed ? "gap-0.5" : "gap-1.5"
+          )}
+          aria-label={t("Modules")}
+        >
+          {SIDEBAR_GROUPS.map((group, groupIndex) => (
+            <div
+              key={group.title || `pinned-${groupIndex}`}
+              className={cn("flex flex-col gap-0.5", group.pinBottom && "mt-auto pt-2")}
             >
-              <SquareTerminal size={14} className="shrink-0" />
-              {!sidebarCollapsed && (
-                <>
-                  <span>{t("Workspace")}</span>
-                  {workspace.tabs.length > 0 && (
-                    <span className="ml-auto rounded-full border border-line px-1.5 font-mono text-[10px] font-bold leading-4 text-muted-foreground">
-                      {workspace.tabs.length}
-                    </span>
-                  )}
-                </>
-              )}
-            </button>
-            <nav
-              className={cn(
-                "flex min-h-0 flex-1 flex-col overflow-y-auto",
-                sidebarCollapsed ? "gap-0.5" : "gap-1.5"
-              )}
-              aria-label={t("Modules")}
-            >
-              {SIDEBAR_GROUPS.map((group, groupIndex) => (
-                <div
-                  key={group.title || `pinned-${groupIndex}`}
-                  className={cn("flex flex-col gap-0.5", group.pinBottom && "mt-auto pt-2")}
-                >
-                  {group.title && !sidebarCollapsed && (
-                    <div className="px-2.5 pb-0.5 pt-1 text-[10px] font-bold uppercase tracking-wide text-sidebar-foreground/40">
-                      {t(group.title)}
-                    </div>
-                  )}
-                  {group.modules.map((id) => (
-                    <SidebarItem
-                      key={id}
-                      id={id}
-                      active={activeModule === id && !workspaceMode}
-                      collapsed={sidebarCollapsed}
-                      pendingCount={pendingApprovals.length}
-                      onOpen={openModule}
-                    />
-                  ))}
+              {group.title && !sidebarCollapsed && (
+                <div className="px-2.5 pb-0.5 pt-1 text-[10px] font-bold uppercase tracking-wide text-sidebar-foreground/40">
+                  {t(group.title)}
                 </div>
+              )}
+              {group.modules.map((id) => (
+                <SidebarItem
+                  key={id}
+                  id={id}
+                  active={activeModule === id}
+                  collapsed={sidebarCollapsed}
+                  pendingCount={pendingApprovals.length}
+                  onOpen={openModule}
+                />
               ))}
-            </nav>
-          </>
-        )}
+            </div>
+          ))}
+        </nav>
       </aside>
 
-      {workspaceMode ? (
-        <section className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <WorkspaceTabBar
-            tabs={workspace.tabs}
-            activeTabId={workspace.activeTabId}
-            connectedHosts={connectedHostNames}
-            focusMode={focusMode}
-            fileDrawerOpen={fileDrawerOpen}
-            onActivate={(id) =>
-              setWorkspace((current) => ({ ...current, activeTabId: id }))
-            }
-            onClose={closeWorkspaceTab}
-            onReorder={(dragId, overId) =>
-              setWorkspace((current) => ({
-                ...current,
-                tabs: moveTab(current.tabs, dragId, overId),
-              }))
-            }
-            onToggleFocusMode={toggleFocusMode}
-            onToggleFileDrawer={() => setFileDrawerOpen((open) => !open)}
-          />
-          <div className="relative min-h-0 flex-1">
-            {workspace.tabs.map((tab) => (
-              <div
-                key={tab.id}
-                className="absolute inset-0 flex flex-col"
-                style={{ display: tab.id === workspace.activeTabId ? "flex" : "none" }}
-              >
-                <SessionWorkspace
-                  tab={tab}
-                  hosts={hosts}
-                  fileDrawerOpen={fileDrawerOpen}
-                />
-              </div>
-            ))}
-            {workspace.tabs.length === 0 && (
-              <div className="absolute inset-0 flex items-center justify-center overflow-y-auto p-6">
-                <div className="max-w-md rounded-xl border border-dashed border-line bg-muted/20 p-6 text-center text-sm text-muted-foreground">
-                  {t(
-                    "Pick a host on the left to open its terminal and files as one workspace tab."
-                  )}
-                </div>
-              </div>
-            )}
+      {/* The terminal is the connection surface: full-bleed, and kept mounted
+          while another module is on screen so its sessions keep running. */}
+      <section
+        className={cn(
+          "min-h-0 min-w-0 flex-1 flex-col",
+          activeModule === "terminal" ? "flex" : "hidden",
+          !sidebarCollapsed && "max-lg:h-[78vh] max-lg:flex-none"
+        )}
+      >
+        <TerminalPanel
+          hosts={hosts}
+          groups={groups}
+          connectionStatuses={connectionStatuses}
+          initialHost={selectedHost}
+          onNavigateModule={navigateModule}
+        />
+      </section>
+
+      <section
+        className={cn(
+          "flex min-h-0 min-w-0 flex-1 flex-col gap-5 overflow-y-auto p-6",
+          activeModule === "terminal" && "hidden",
+          !sidebarCollapsed && "max-lg:overflow-visible"
+        )}
+      >
+        <header className="flex items-start justify-between gap-4 max-md:flex-col">
+          <div className="min-w-0">
+            <h2 className="flex items-center gap-2 text-xl font-bold">
+              <ActiveModuleIcon size={20} className="text-muted-foreground" />
+              {t(activeModuleMeta.label)}
+            </h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {activeModule === "hosts" && currentHost
+                ? `${currentHost.user ? `${currentHost.user}@` : ""}${currentHost.host}:${currentHost.port ?? 22}${currentHost.jump_host ? ` via ${currentHost.jump_host}` : ""}${currentHostProxy ? ` · ${t("proxy")} ${currentHostProxy.name}` : ""}`
+                : hosts.length > 0
+                  ? t("{count} hosts configured", { count: hosts.length })
+                  : t("Add a host to start issuing SSH commands")}
+            </p>
           </div>
-        </section>
-      ) : (
-        <section
-          className={cn(
-            "flex min-h-0 min-w-0 flex-1 flex-col gap-5 overflow-y-auto p-6",
-            !sidebarCollapsed && "max-lg:overflow-visible"
-          )}
-        >
-          <header className="flex items-start justify-between gap-4 max-md:flex-col">
-            <div className="flex min-w-0 items-center gap-3">
-              <button
-                type="button"
-                onClick={backToWorkspace}
-                title={t("Back to workspace")}
-                className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-border text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              >
-                <ArrowLeft size={15} />
-              </button>
-              <div className="min-w-0">
-                <h2 className="flex items-center gap-2 text-xl font-bold">
-                  <ActiveModuleIcon size={20} className="text-muted-foreground" />
-                  {t(activeModuleMeta.label)}
-                </h2>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  {activeModule === "hosts" && currentHost
-                    ? `${currentHost.user ? `${currentHost.user}@` : ""}${currentHost.host}:${currentHost.port ?? 22}${currentHost.jump_host ? ` via ${currentHost.jump_host}` : ""}${currentHostProxy ? ` · ${t("proxy")} ${currentHostProxy.name}` : ""}`
-                    : hosts.length > 0
-                      ? t("{count} hosts configured", { count: hosts.length })
-                      : t("Add a host to start issuing SSH commands")}
-                </p>
-              </div>
-            </div>
-          </header>
+        </header>
 
-          {relatedModules.length > 0 && (
-            <Breadcrumb
-              current={activeModuleMeta}
-              related={relatedModules}
-              onNavigate={navigateModule}
-            />
-          )}
+        {relatedModules.length > 0 && (
+          <Breadcrumb
+            current={activeModuleMeta}
+            related={relatedModules}
+            onNavigate={navigateModule}
+          />
+        )}
 
-          <section className="module-page">
-          {activeModule === "dashboard" && (
-            <Dashboard
+        <section className="module-page">
+        {activeModule === "dashboard" && (
+          <Dashboard
+            hosts={hosts}
+            connectionStatuses={connectionStatuses}
+            pendingApprovalsCount={pendingApprovals.length}
+            secretsLocked={secretsLocked}
+            daemonHealth={daemonHealth}
+            onNavigateModule={navigateModule}
+          />
+        )}
+
+        {activeModule === "hosts" && (
+          <div className="space-y-4">
+          <LocalEnvironmentsCard />
+          <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(340px,0.6fr)] items-start gap-[18px] max-lg:grid-cols-1">
+            <HostList
               hosts={hosts}
-              connectionStatuses={connectionStatuses}
-              pendingApprovalsCount={pendingApprovals.length}
-              secretsLocked={secretsLocked}
-              daemonHealth={daemonHealth}
-              onNavigateModule={navigateModule}
-            />
-          )}
-
-          {activeModule === "hosts" && (
-            <div className="space-y-4">
-            <LocalEnvironmentsCard />
-            <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(340px,0.6fr)] items-start gap-[18px] max-lg:grid-cols-1">
-              <HostList
-                hosts={hosts}
-                groups={groups}
-                proxies={proxies}
-                selectedHost={selectedHost}
-                selectedGroup={selectedGroup}
-                connectionStatuses={connectionStatuses}
-                onSelect={setSelectedHost}
-                onGroupSelect={setSelectedGroup}
-                onCreateGroup={handleCreateGroup}
-                onRenameGroup={handleRenameGroup}
-                onDeleteGroup={handleDeleteGroup}
-                onEdit={setEditingHost}
-                onRemove={handleRemoveHost}
-                onBatchRemove={handleBatchRemoveHosts}
-                onRefresh={refresh}
-                onConnect={handleConnect}
-                onDisconnect={handleDisconnect}
-                onImportOpensshTrust={handleImportOpensshTrust}
-                onForgetOpenssh={handleForgetOpenssh}
-                onImportNetcatty={openNetcattyImport}
-              />
-              <AddHostForm
-                hosts={hosts}
-                groups={groups}
-                proxies={proxies}
-                initialGroup={selectedGroup}
-                editingHost={editingHost}
-                onCancelEdit={cancelHostEdit}
-                onSaved={handleHostSaved}
-                onImportNetcatty={openNetcattyImport}
-              />
-            </div>
-            </div>
-          )}
-
-          {activeModule === "proxies" && (
-            <ProxyPanel proxies={proxies} hosts={hosts} onChanged={handleProxyChanged} />
-          )}
-
-          {activeModule === "terminal" && (
-            <TerminalPanel hosts={hosts} initialHost={selectedHost} />
-          )}
-
-          {activeModule === "recordings" && <RecordingsPanel />}
-
-          {activeModule === "execute" && (
-            <div className="grid gap-[18px]">
-              <ExecPanel hosts={hosts} initialHost={selectedHost} onExecComplete={refreshAudit} />
-              <MultiExecPanel hosts={hosts} onExecComplete={refreshAudit} />
-            </div>
-          )}
-
-          {activeModule === "files-sessions" && (
-            <SFTPPanel hosts={hosts} initialHost={selectedHost} />
-          )}
-
-          {activeModule === "tunnels" && (
-            <ForwardPanel
-              hosts={hosts}
-              initialHost={selectedHost}
-              onChanged={handleForwardChanged}
-            />
-          )}
-
-          {activeModule === "activity" && <LiveActivityPanel />}
-
-          {activeModule === "mcp-agents" && <McpAgentsPanel />}
-
-          {activeModule === "sync" && <SyncPanel onRestored={refresh} />}
-
-          {activeModule === "keys" && <KeysPanel onChanged={handleKeyChanged} />}
-
-          {activeModule === "playbooks" && <PlaybooksPanel hosts={hosts} />}
-
-          {activeModule === "audit" && (
-            <div className="grid gap-[18px]">
-              <AuditCharts />
-              <AuditPanel
-                audit={audit}
-                onRefresh={refreshAudit}
-                onReplay={replayAuditEntry}
-              />
-            </div>
-          )}
-
-          {activeModule === "help" && <HelpPanel />}
-
-          {activeModule === "approvals" && (
-            <ApprovalWorkbench
-              pending={pendingApprovals}
-              onApprove={handleApprove}
-              onReject={handleReject}
-              onGoExecute={goToExecuteForApproval}
-            />
-          )}
-
-          {activeModule === "config" && <ConfigSnapshotsPanel />}
-
-          {activeModule === "containers" && <ContainersPanel />}
-          {activeModule === "resident-sessions" && <ResidentSessionsPanel />}
-
-          {activeModule === "topology" && (
-            <ConnectionTopology
-              hosts={hosts}
+              groups={groups}
               proxies={proxies}
+              selectedHost={selectedHost}
+              selectedGroup={selectedGroup}
               connectionStatuses={connectionStatuses}
-              daemonHealth={daemonHealth}
-              onSelectHost={setSelectedHost}
-              onNavigateModule={navigateModule}
+              onSelect={setSelectedHost}
+              onGroupSelect={setSelectedGroup}
+              onCreateGroup={handleCreateGroup}
+              onRenameGroup={handleRenameGroup}
+              onDeleteGroup={handleDeleteGroup}
+              onEdit={setEditingHost}
+              onRemove={handleRemoveHost}
+              onBatchRemove={handleBatchRemoveHosts}
+              onRefresh={refresh}
+              onConnect={handleConnect}
+              onDisconnect={handleDisconnect}
+              onImportOpensshTrust={handleImportOpensshTrust}
+              onForgetOpenssh={handleForgetOpenssh}
+              onImportNetcatty={openNetcattyImport}
             />
-          )}
-        </section>
-        </section>
-      )}
+            <AddHostForm
+              hosts={hosts}
+              groups={groups}
+              proxies={proxies}
+              initialGroup={selectedGroup}
+              editingHost={editingHost}
+              onCancelEdit={cancelHostEdit}
+              onSaved={handleHostSaved}
+              onImportNetcatty={openNetcattyImport}
+            />
+          </div>
+          </div>
+        )}
+
+        {activeModule === "proxies" && (
+          <ProxyPanel proxies={proxies} hosts={hosts} onChanged={handleProxyChanged} />
+        )}
+
+        {activeModule === "recordings" && <RecordingsPanel />}
+
+        {activeModule === "execute" && (
+          <div className="grid gap-[18px]">
+            <ExecPanel hosts={hosts} initialHost={selectedHost} onExecComplete={refreshAudit} />
+            <MultiExecPanel hosts={hosts} onExecComplete={refreshAudit} />
+          </div>
+        )}
+
+        {activeModule === "files-sessions" && (
+          <SFTPPanel hosts={hosts} initialHost={selectedHost} />
+        )}
+
+        {activeModule === "tunnels" && (
+          <ForwardPanel
+            hosts={hosts}
+            initialHost={selectedHost}
+            onChanged={handleForwardChanged}
+          />
+        )}
+
+        {activeModule === "activity" && <LiveActivityPanel />}
+
+        {activeModule === "mcp-agents" && <McpAgentsPanel />}
+
+        {activeModule === "sync" && <SyncPanel onRestored={refresh} />}
+
+        {activeModule === "keys" && <KeysPanel onChanged={handleKeyChanged} />}
+
+        {activeModule === "playbooks" && <PlaybooksPanel hosts={hosts} />}
+
+        {activeModule === "audit" && (
+          <div className="grid gap-[18px]">
+            <AuditCharts />
+            <AuditPanel
+              audit={audit}
+              onRefresh={refreshAudit}
+              onReplay={replayAuditEntry}
+            />
+          </div>
+        )}
+
+        {activeModule === "help" && <HelpPanel />}
+
+        {activeModule === "approvals" && (
+          <ApprovalWorkbench
+            pending={pendingApprovals}
+            onApprove={handleApprove}
+            onReject={handleReject}
+            onGoExecute={goToExecuteForApproval}
+          />
+        )}
+
+        {activeModule === "config" && <ConfigSnapshotsPanel />}
+
+        {activeModule === "containers" && <ContainersPanel />}
+        {activeModule === "resident-sessions" && <ResidentSessionsPanel />}
+
+        {activeModule === "topology" && (
+          <ConnectionTopology
+            hosts={hosts}
+            proxies={proxies}
+            connectionStatuses={connectionStatuses}
+            daemonHealth={daemonHealth}
+            onSelectHost={setSelectedHost}
+            onNavigateModule={navigateModule}
+          />
+        )}
+      </section>
+      </section>
       </main>
 
       {/* v3 §3.4: terminal drawer — approvals + audit replay viewport */}

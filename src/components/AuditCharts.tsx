@@ -234,7 +234,7 @@ function AuditCharts() {
             </div>
             <div className="h-[220px]">
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={trend} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
+                <AreaChart data={trend} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
                   <CartesianGrid vertical={false} stroke="var(--border)" strokeDasharray="0" />
                   <XAxis
                     dataKey="label"
@@ -271,7 +271,7 @@ function AuditCharts() {
             </div>
             <div className="h-[220px]">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={riskDistribution} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
+                <BarChart data={riskDistribution} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
                   <CartesianGrid vertical={false} stroke="var(--border)" />
                   <XAxis
                     dataKey="level"

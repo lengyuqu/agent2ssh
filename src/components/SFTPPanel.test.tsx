@@ -369,3 +369,50 @@ describe("SFTP transfer outcomes", () => {
     expect(screen.queryByText(/^Transfer cancelled/)).toBeNull();
   });
 });
+
+describe("embedded in the terminal's file drawer", () => {
+  function renderEmbedded() {
+    return render(
+      <I18nProvider>
+        <ToastProvider>
+          <SFTPPanel hosts={[host]} initialHost={host.name} embedded />
+        </ToastProvider>
+      </I18nProvider>,
+    );
+  }
+
+  function sidePanel(title: "Left" | "Right") {
+    const heading = screen.getByText(title, { selector: "div" });
+    return heading.parentElement?.parentElement as HTMLElement;
+  }
+
+  it("names transfers by direction and keeps the folder tools in one toolbar", () => {
+    renderEmbedded();
+    expect(screen.queryByText("Files (SFTP)")).toBeNull();
+    // "To right" means nothing when the drawer is narrow enough to show one side.
+    expect(screen.queryByRole("button", { name: "To right" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Download" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Upload" })).toBeTruthy();
+    const toolbar = screen.getByRole("button", { name: "New folder" }).parentElement as HTMLElement;
+    expect(within(toolbar).getByRole("button", { name: "All" })).toBeTruthy();
+    expect(within(toolbar).getByText("0 items")).toBeTruthy();
+  });
+
+  it("shows one side at a time and still transfers between them", async () => {
+    vi.mocked(api.sftpReadDir).mockResolvedValue([entry("payload.bin")]);
+    renderEmbedded();
+    expect(sidePanel("Left").classList.contains("hidden")).toBe(false);
+    expect(sidePanel("Right").classList.contains("hidden")).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Right" }));
+    expect(sidePanel("Left").classList.contains("hidden")).toBe(true);
+    expect(sidePanel("Right").classList.contains("hidden")).toBe(false);
+
+    // The hidden side keeps its selection, so a transfer started from the
+    // visible side still has a source.
+    await openFolders();
+    selectRemoteFiles();
+    fireEvent.click(screen.getByRole("button", { name: "Download" }));
+    await screen.findByText(/Transferred 1 file\(s\)/);
+    expect(api.sftpDownload).toHaveBeenCalledTimes(1);
+  });
+});

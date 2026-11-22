@@ -151,7 +151,12 @@ type HostProfileLike = {
 // v3 §3.5: pin at most this many pending rows in the palette; the count in the
 // section header always shows the real queue depth.
 const PENDING_RENDER_CAP = 5;
-const MAX_RESULTS = 30;
+// Every group keeps a slice of the budget. A single global cap let the twenty
+// modules plus the unfiltered MCP list spend all of it, so "Connect host" — the
+// palette's main job for an SSH tool — disappeared until something was typed.
+const MCP_RENDER_CAP = 5;
+const HOST_RENDER_CAP = 8;
+const MAX_RESULTS = 40;
 
 /** v3 §3.5 ⌘K palette: five groups — pending approvals (top, N>0 only) →
  *  navigate → quick actions → MCP tools (`>` prefix narrows to this group) →
@@ -187,9 +192,17 @@ function CommandPalette({
     const mcpOnly = raw.startsWith(">");
     const q = (mcpOnly ? raw.slice(1) : raw).trim().toLowerCase();
 
+    // Pinned approvals answer the query like every other group: an unrelated
+    // card sitting above the only match would take ↵ away from what was typed.
     const approvalItems: PaletteItem[] =
       !mcpOnly && onOpenApprovals && pending.length > 0
         ? pending
+            .filter(
+              (approval) =>
+                !q ||
+                approval.host.toLowerCase().includes(q) ||
+                approval.command.toLowerCase().includes(q)
+            )
             .slice(0, PENDING_RENDER_CAP)
             .map((approval) => ({ kind: "approval" as const, approval }))
         : [];
@@ -211,7 +224,9 @@ function CommandPalette({
 
     const mcpItems: PaletteItem[] = MCP_TOOLS.filter(
       (tool) => !q || tool.name.includes(q)
-    ).map((tool) => ({ kind: "mcp-tool" as const, name: tool.name, moduleId: tool.moduleId }));
+    )
+      .slice(0, mcpOnly ? MAX_RESULTS : MCP_RENDER_CAP)
+      .map((tool) => ({ kind: "mcp-tool" as const, name: tool.name, moduleId: tool.moduleId }));
 
     const hostItems: PaletteItem[] = mcpOnly
       ? []
@@ -231,6 +246,7 @@ function CommandPalette({
               .toLowerCase();
             return haystack.includes(q);
           })
+          .slice(0, HOST_RENDER_CAP)
           .map((h) => ({
             kind: "host" as const,
             name: h.name,

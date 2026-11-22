@@ -119,7 +119,9 @@
   --popover-foreground: var(--text-1);
   --primary: var(--action);
   --primary-foreground: var(--action-ink);
-  --secondary: var(--canvas-2);
+  /* Raised one step above the card: aliased to --card this was the same paint
+     as the surface it sits on, so every secondary button read as a label. */
+  --secondary: var(--canvas-3);
   --secondary-foreground: var(--text-1);
   --muted: var(--canvas-2);
   --muted-foreground: var(--text-2);
@@ -300,6 +302,26 @@
   textarea,
   select {
     font: inherit;
+  }
+  /* Every surface here is built from tokens, so a control is expected to start
+     invisible: without this the UA paints its own chrome (2px outset border +
+     ButtonFace grey) on any button that does not set a border and a background
+     of its own — the module rail, the host tree and the sort headers all wore
+     it. Scoped to buttons so native selects, checkboxes and text fields keep
+     the platform affordances the panels rely on. */
+  button,
+  input:where([type="button"], [type="reset"], [type="submit"]) {
+    appearance: none;
+    padding: 0;
+    border: 0 solid;
+    border-radius: 0;
+    background-color: transparent;
+    background-image: none;
+    color: inherit;
+  }
+  button:not(:disabled),
+  input:where([type="button"], [type="reset"], [type="submit"]):not(:disabled) {
+    cursor: pointer;
   }
 }
 
