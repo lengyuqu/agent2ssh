@@ -376,8 +376,65 @@ pub fn split_completed_session_commands(pending: &str, input: &str) -> (Vec<Stri
 mod tests {
     use super::split_completed_session_commands;
 
+    /// A read with nothing buffered waits out its full timeout, so cancellation
+    /// is the only thing that can end it early.
     #[tokio::test]
-    async fn shutdown_interrupts_blocking_session_read_and_preserves_output() {
+    async fn shutdown_interrupts_a_blocking_session_read() {
+        use std::sync::{mpsc, Arc, Mutex};
+        let (command_tx, _command_rx) = mpsc::channel();
+        // The sender stays alive: dropping it would end the read as Disconnected.
+        let (_event_tx, event_rx) = mpsc::channel();
+        let id = uuid::Uuid::new_v4();
+        let handle = Arc::new(Mutex::new(super::SessionHandle {
+            id,
+            host: "test".into(),
+            tx: command_tx,
+            rx: event_rx,
+            pending_output: Vec::new(),
+            connected: true,
+            closed: false,
+        }));
+        let shutdown = crate::ws_drain::ShutdownToken::new();
+        let worker_token = shutdown.clone();
+        let worker_handle = handle.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            super::read_session_handle(id, worker_handle, 120_000, Some(worker_token))
+        });
+
+        // The read holds the handle lock for its whole duration, so a refused
+        // try_lock is the handshake that the worker is inside the read. Waiting
+        // on a fixed sleep instead races the loop's own cadence: under load the
+        // sleep overshoots and the read finishes before the cancel lands.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let inside = handle.try_lock().is_err();
+            if inside {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker never entered the read"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+
+        shutdown.cancel().await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), worker)
+            .await
+            .expect("worker did not stop")
+            .unwrap();
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled during daemon shutdown"));
+        assert!(handle.lock().unwrap().pending_output.is_empty());
+    }
+
+    /// Output the read had already taken is put back when it is cancelled.
+    /// Cancelling before the read starts pins the restore path without racing
+    /// the 200 ms quiet period that a read with buffered output uses.
+    #[tokio::test]
+    async fn shutdown_restores_output_a_cancelled_read_had_taken() {
         use std::sync::{mpsc, Arc, Mutex};
         let (command_tx, _command_rx) = mpsc::channel();
         let (_event_tx, event_rx) = mpsc::channel();
@@ -392,20 +449,14 @@ mod tests {
             closed: false,
         }));
         let shutdown = crate::ws_drain::ShutdownToken::new();
+        shutdown.cancel().await;
         let worker_token = shutdown.clone();
         let worker_handle = handle.clone();
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-        let worker = tokio::task::spawn_blocking(move || {
-            let _ = ready_tx.send(());
+        let result = tokio::task::spawn_blocking(move || {
             super::read_session_handle(id, worker_handle, 120_000, Some(worker_token))
-        });
-        ready_rx.await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        shutdown.cancel().await;
-        let result = tokio::time::timeout(std::time::Duration::from_secs(2), worker)
-            .await
-            .expect("worker did not stop")
-            .unwrap();
+        })
+        .await
+        .unwrap();
         assert!(result
             .unwrap_err()
             .to_string()
