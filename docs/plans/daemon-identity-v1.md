@@ -16,9 +16,11 @@
 | 桌面退出 | 不停止 daemon，只写一条诊断日志（`tauri_commands::stop_owned_daemon` 的 macOS 版） | 停止本应用自己启动的 daemon，走上一行的旧路径 |
 | HTTP `/shutdown` | 默认 403，含空 body；仅 daemon 启动环境 `AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN=1` 时开放 | 默认开放，没有这个开关 |
 | 显式未绑定兼容 | `daemon stop --allow-unbound-graceful` 与桌面 `daemon_stop_unbound_graceful`：单次 HTTP，不等待、不发信号、不清理记录，CLI 收到接受回执也以非零退出 | CLI 报 `--allow-unbound-graceful is available only on macOS` |
-| 记录 | 数字 `daemon.pid` + `daemon.instance.json` + `.daemon-ipc/s`，由 daemon 发布并在正常退出时自行清理 | 只有数字 `daemon.pid`，没有实例记录和本机控制端点 |
+| 记录 | 数字 `daemon.pid` + `daemon.instance.json` + `.daemon-ipc/s`，由 daemon 发布并在正常退出时自行清理 | 只有数字 `daemon.pid`，没有实例记录和本机控制端点（**现状 2026-11-23**：Windows 已发布 `daemon.instance.json` + `daemon.config-id`，见下方注记；Linux 仍只有 PID 文件） |
 | 强制终止 | 无。任何路径都不按 PID 发信号 | 有，见上 |
 | 第 4.1 节的长度前缀 socket 协议 | 只实现了无密钥的 `hello` / `hello_ok`，用于发现。daemon 端不认识 `authorize` 和 `stop`：收到即关闭连接，不读取令牌，不触发关闭。生产客户端只在显式兼容路径里用它做一致性检查（`macos_client::inspect_unbound`） | 未实现 |
+
+**Windows #24 现状注记（2026-11-23，阶段二）**：上表是 `88856f6` 基线快照，Windows 此后已落地两步。阶段一：`stop_daemon_process` 在发 `/shutdown` 之前按 `GetProcessTimes` 创建时间与镜像名白名单绑定进程句柄，宽限等待与强杀都作用于该对象，绑定失败拒绝而不回退按 PID 重开。阶段二：daemon 在 `.daemon-pid.lock` 下发布版本化实例记录 `daemon.instance.json`（version、instance_id、pid、config_id、原始 100 ns `creation_ticks`；**没有 endpoint 字段**——Windows 仍无可证明的本机控制端点，§4.2 保持 `Unbound`），停止路径按 ticks 精度绑定与复核强杀，同整秒的 daemon 命名镜像复用不再绑得上；无记录的旧 daemon 保持秒级比较，记录存在但损坏或冲突时拒绝停止、不降级。启动拒绝覆盖已有记录，崩溃残留由 `daemon clear-stale --expect-pid N --expect-instance <id>`（已放开到 Windows）显式恢复。这不新增第二条停止协议，也不改变上表的 D2/D3 现状：HTTP `/shutdown` 默认仍开放、强杀仍存在，变的是它作用对象的绑定精度与失败时的拒绝。真机回归（Win11 26300）：`daemon_stop_e2e` 34 项通过、库单元 903 项通过；同整秒边界测试已按设计显式翻转（`a_same_second_daemon_image_reuse_is_refused_by_the_tick_record`）。
 
 **macOS Mach 路径的实际时序**（`macos_mach.rs`、`macos_mach_control.c`）：
 

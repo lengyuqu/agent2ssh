@@ -1091,8 +1091,8 @@ enum DaemonCommands {
     ClearStale {
         #[arg(long)]
         expect_pid: u32,
-        /// Instance ID from daemon.instance.json, required when IPC records exist
-        #[cfg(target_os = "macos")]
+        /// Instance ID from daemon.instance.json, required when an instance record exists
+        #[cfg(any(target_os = "macos", windows))]
         #[arg(long)]
         expect_instance: Option<String>,
     },
@@ -3369,7 +3369,7 @@ async fn async_main() -> Result<()> {
                 }
                 DaemonCommands::ClearStale {
                     expect_pid,
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "macos", windows))]
                     expect_instance,
                 } => {
                     #[cfg(target_os = "macos")]
@@ -3382,7 +3382,13 @@ async fn async_main() -> Result<()> {
                     } else {
                         agent2ssh::daemon_control::clear_stale_daemon_pid(expect_pid)?;
                     }
-                    #[cfg(not(target_os = "macos"))]
+                    #[cfg(windows)]
+                    if let Some(instance) = expect_instance {
+                        agent2ssh::daemon_control::recover_instance_records(expect_pid, &instance)?;
+                    } else {
+                        agent2ssh::daemon_control::clear_stale_daemon_pid(expect_pid)?;
+                    }
+                    #[cfg(all(not(target_os = "macos"), not(windows)))]
                     agent2ssh::daemon_control::clear_stale_daemon_pid(expect_pid)?;
                     println!("Removed the checked stale records for PID {expect_pid}; no process was stopped. Older processes that ignore the lock can still race this cleanup.");
                 }

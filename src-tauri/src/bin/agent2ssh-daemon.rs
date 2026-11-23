@@ -6021,7 +6021,10 @@ async fn main() -> anyhow::Result<()> {
         let _ = identity_publication.cleanup();
         return Err(error.context("Mach control channel failed to start"));
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    let identity_publication =
+        agent2ssh::daemon_control::publish_daemon_identity(std::process::id())?;
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     agent2ssh::daemon_control::write_daemon_pid(std::process::id())?;
 
     let limits = load_execution_limits()?;
@@ -6245,7 +6248,9 @@ async fn main() -> anyhow::Result<()> {
         let _ = identity_task.await;
         identity_publication.cleanup()?
     };
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    let pid_removed = identity_publication.cleanup()?;
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     let pid_removed = agent2ssh::daemon_control::remove_daemon_pid_file_if(std::process::id())?;
     let _ = append_diagnostic_log(
         "info",
