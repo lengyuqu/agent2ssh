@@ -284,7 +284,13 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             src-tauri/target/
-          key: ${{ runner.os }}-cargo-v2-${{ hashFiles('src-tauri/Cargo.lock') }}
+          # v3, not v2: the dev-profile override above changed every artifact's
+          # fingerprint, and `actions/cache` skips the save on a primary-key hit
+          # ("Cache hit occurred on the primary key ... not saving cache", run
+          # 45151118354). Left at v2 the leg restores full-debuginfo artifacts,
+          # rebuilds all 384 crates on every run, and never replaces them. Only
+          # this job's key moves; the other four caches carry no profile override.
+          key: ${{ runner.os }}-cargo-v3-${{ hashFiles('src-tauri/Cargo.lock') }}
 
       - name: Install npm deps
         run: npm install
