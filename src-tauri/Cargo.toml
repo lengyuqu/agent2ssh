@@ -244,6 +244,14 @@ windows-sys = { version = "0.48", features = [
     # shrinks the test socket's receive buffer to create real backpressure;
     # WinSock is where `setsockopt`/`SOL_SOCKET`/`SO_RCVBUF` live.
     "Win32_Networking_WinSock",
+    # `tests/pipe_identity_probe.rs` (#24 Windows 命名管道原型) needs the
+    # named-pipe API and the SDDL security-descriptor converter. Both are
+    # FFI declarations only; nothing in the shipped binaries calls them.
+    "Win32_System_Pipes",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
 ] }
 # Pageant's transport, for the SSH agent. `russh` already pulls this in on
 # Windows, so naming it here adds no crate to the build — but it does make
