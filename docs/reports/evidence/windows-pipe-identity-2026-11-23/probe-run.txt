@@ -1,0 +1,63 @@
+   Compiling agent2ssh-app v0.5.0 (D:\vibercodeing\agent2ssh\src-tauri)
+warning: function `decode_key` is never used
+    --> src\secrets.rs:1097:4
+     |
+1097 | fn decode_key(hexkey: &str) -> Option<[u8; 32]> {
+     |    ^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `agent2ssh-app` (lib) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.24s
+     Running tests\pipe_identity_probe.rs (src-tauri\target\debug\build\agent2ssh-app/a0123b560e1f1ca0\out\pipe_identity_probe-a0123b560e1f1ca0.exe)
+
+running 9 tests
+test m0_createprocess_sanity ... [m0] cmd/0: ok=1 err=0 pid=21572
+[m0] cmd/no_window: ok=1 err=0 pid=20756
+[m0] self/0: ok=1 err=0 pid=29040
+m0_createprocess_sanity: test
+m1_first_instance_and_multi_instance: test
+m2_dacl_denies_creating_an_instance_to_the_client: test
+m3_remote_rejection_flag: test
+m4_server_pid_sampling_and_broken_handle: test
+m5_delegation_is_invisible_to_server_pid: test
+m6_inheritance_and_same_user_dup_handle: test
+m7_reuse_window_and_tick_detection: test
+probe_role_entry: test
+
+9 tests, 0 benchmarks
+[m0] self/no_window: ok=1 err=0 pid=37464
+ok
+test m1_first_instance_and_multi_instance ... [m1] second FIRST_PIPE_INSTANCE create: invalid=true err=231 (PIPE_BUSY=231, ACCESS_DENIED=5)
+[m1] without FIRST flag, second instance allowed: true
+ok
+test m2_dacl_denies_creating_an_instance_to_the_client ... [m2] second instance under restrictive DACL: denied=true err=5 (ACCESS_DENIED=5)
+[m2] client requesting 0x4 (full GENERIC_RW): connected=true err=0 mask=0x12019b
+[m2] control: second instance under full DACL allowed: true
+ok
+test m3_remote_rejection_flag ... [m3] local connect with REJECT_REMOTE: connected=true
+[m3] connect via \\MACHENIKER9\: connected=false err=231
+[m3] connect via \\127.0.0.1\: connected=false err=231
+ok
+test m4_server_pid_sampling_and_broken_handle ... [m4] GetNamedPipeClientProcessId: ok=1 reported=13300 self=13300 equal=true
+[m4] server PID reported=42096 actual=42096 equal=true
+[m4] after server exit, GetNamedPipeServerProcessId on broken client: Ok(42096)
+[m4] ReadFile on broken client: ok=0 read=0 err=109
+ok
+test m5_delegation_is_invisible_to_server_pid ... [m5] creator PID=13300 proxy PID=34888 reported=13300
+[m5] roundtrip responder PID=Some(34888) (proxy=34888, creator=13300)
+[m5] creation_ticks(reported creator)=Some(134399191695275601) — tick check PASSES while a proxy answers
+ok
+test m6_inheritance_and_same_user_dup_handle ... [m6a] inheritable + TRUE: responder=Some(29960) child=29960 self=13300
+[m6b] FALSE: child exited on invalid handle=true (expected true)
+[m6c] OpenProcess(self, PROCESS_DUP_HANDLE) same user: ok=true err=6
+[m6c] DuplicateHandle via PROCESS_DUP_HANDLE: ok=1 err=0
+[m6c] duplicated-handle responder=Some(25612) target=25612 creator=13300
+ok
+test m7_reuse_window_and_tick_detection ... [m7] recorded pid=26676 ticks=134399191709269011
+[m7] no PID reuse within 500 spawns; reuse window documented by API shape (numeric PID -> OpenProcess), not forced here
+ok
+test probe_role_entry ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.99s
+

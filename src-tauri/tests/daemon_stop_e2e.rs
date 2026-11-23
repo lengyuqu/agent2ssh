@@ -1529,6 +1529,195 @@ fn the_shutdown_route_stops_the_daemon_gracefully() {
     assert!(!daemon.pid_file().exists(), "and removes its pid file");
 }
 
+/// The raw 100 ns creation ticks of a live process, read the same way the
+/// stop path reads them, so a test can compare the record against the kernel.
+#[cfg(windows)]
+fn creation_ticks_of(pid: u32) -> Option<u64> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle == 0 {
+            return None;
+        }
+        let mut creation: FILETIME = std::mem::zeroed();
+        let mut exit: FILETIME = std::mem::zeroed();
+        let mut kernel: FILETIME = std::mem::zeroed();
+        let mut user: FILETIME = std::mem::zeroed();
+        let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user);
+        CloseHandle(handle);
+        if ok == 0 {
+            return None;
+        }
+        Some(((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64)
+    }
+}
+
+/// #24 phase 2: the real daemon publishes the versioned instance record with
+/// its own 100 ns creation time, and a normal stop removes both files.
+#[cfg(windows)]
+#[test]
+#[serial_test::serial]
+fn the_instance_record_names_the_daemon_and_a_normal_stop_removes_both_files() {
+    let daemon = RunningDaemon::start("instance-record", &[]);
+    let pid = daemon.child.id();
+    let record_path = daemon.dir.join("daemon.instance.json");
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record_path).expect("instance record published"))
+            .expect("valid JSON");
+    assert_eq!(record["version"], serde_json::json!(1));
+    assert_eq!(record["pid"], serde_json::json!(pid));
+    let instance_id = record["instance_id"].as_str().expect("instance id");
+    assert_eq!(instance_id.len(), 32);
+    assert!(instance_id
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+    let config_id =
+        std::fs::read_to_string(daemon.dir.join("daemon.config-id")).expect("config id file");
+    assert_eq!(record["config_id"], serde_json::json!(config_id));
+    assert_eq!(
+        record["creation_ticks"].as_u64(),
+        creation_ticks_of(pid),
+        "the record carries the kernel's own creation time for this process"
+    );
+    stop_daemon_process(pid).expect("stop the recorded daemon");
+    assert!(!record_path.exists(), "a normal stop removes the record");
+    assert!(!daemon.pid_file().exists(), "and the PID file");
+}
+
+/// A force-killed daemon leaves both files; a new daemon refuses to publish
+/// over them, and only the explicit named recovery clears the way.
+#[cfg(windows)]
+#[test]
+#[serial_test::serial]
+fn a_crashed_publication_refuses_a_new_daemon_until_explicit_recovery() {
+    let mut daemon = RunningDaemon::start("crashed-publication", &[]);
+    let pid = daemon.child.id();
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(daemon.dir.join("daemon.instance.json")).unwrap())
+            .unwrap();
+    let instance_id = record["instance_id"].as_str().unwrap().to_string();
+    let _ = daemon.child.kill();
+    let _ = daemon.child.wait();
+    assert!(daemon.dir.join("daemon.instance.json").exists());
+    assert!(daemon.pid_file().exists());
+
+    // A competing daemon on a free port still refuses: the record, not the
+    // bind, is what blocks the publication.
+    let binary = std::path::Path::new(env!("CARGO_BIN_EXE_agent2ssh-daemon"));
+    std::env::set_var(ADDR_ENV, free_address());
+    let mut competing = RunningDaemon::spawn(binary, &daemon.dir);
+    wait_until("competing daemon refusal", STARTUP_BUDGET, || {
+        competing.try_wait().unwrap().is_some()
+    });
+    assert!(!competing.wait().unwrap().success());
+    let stderr = std::fs::read_to_string(daemon.dir.join("daemon.stderr")).unwrap();
+    assert!(stderr.contains("instance record exists"), "{stderr}");
+
+    let cli = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_agent2ssh"))
+            .arg("daemon")
+            .args(args)
+            .env(CONFIG_DIR_ENV, &daemon.dir)
+            .output()
+            .expect("run CLI")
+    };
+    // Without the instance id the cleanup refuses while a record exists.
+    let plain = cli(&["clear-stale", "--expect-pid", &pid.to_string()]);
+    assert!(!plain.status.success());
+    assert!(
+        String::from_utf8_lossy(&plain.stderr).contains("identity records exist"),
+        "{}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
+    // A wrong instance id is refused and changes nothing.
+    let wrong = cli(&[
+        "clear-stale",
+        "--expect-pid",
+        &pid.to_string(),
+        "--expect-instance",
+        "ffffffffffffffffffffffffffffffff",
+    ]);
+    assert!(!wrong.status.success());
+    assert!(daemon.dir.join("daemon.instance.json").exists());
+    assert!(daemon.pid_file().exists());
+    // The named recovery removes both files.
+    let recovered = cli(&[
+        "clear-stale",
+        "--expect-pid",
+        &pid.to_string(),
+        "--expect-instance",
+        &instance_id,
+    ]);
+    assert!(
+        recovered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    assert!(!daemon.dir.join("daemon.instance.json").exists());
+    assert!(!daemon.pid_file().exists());
+
+    // The same config now starts a fresh daemon with a fresh record.
+    std::env::set_var(ADDR_ENV, free_address());
+    let mut restarted = RunningDaemon::spawn(binary, &daemon.dir);
+    let restarted_pid = restarted.id();
+    wait_until("restarted daemon to serve", STARTUP_BUDGET, || {
+        local_daemon_request("GET", "/health", None, Duration::from_millis(500))
+            .ok()
+            .and_then(|r| serde_json::from_str::<serde_json::Value>(&r.body).ok())
+            .and_then(|b| b["pid"].as_u64())
+            == Some(u64::from(restarted_pid))
+    });
+    let fresh: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(daemon.dir.join("daemon.instance.json")).unwrap())
+            .unwrap();
+    assert_eq!(fresh["pid"], serde_json::json!(restarted_pid));
+    assert_ne!(fresh["instance_id"], serde_json::json!(instance_id));
+    stop_daemon_process(restarted_pid).expect("stop the restarted daemon");
+    let _ = restarted.wait();
+    assert!(!daemon.dir.join("daemon.instance.json").exists());
+    assert!(!daemon.pid_file().exists());
+}
+
+/// A present but unreadable record is a refusal, never a downgrade to the
+/// seconds comparison: the stop sends nothing and retains both files.
+#[cfg(windows)]
+#[test]
+#[serial_test::serial]
+fn a_corrupt_instance_record_refuses_the_stop_and_is_retained() {
+    let mut daemon = RunningDaemon::start("corrupt-record", &[]);
+    let pid = daemon.child.id();
+    let record_path = daemon.dir.join("daemon.instance.json");
+    let original = std::fs::read(&record_path).unwrap();
+    std::fs::write(&record_path, b"partial").unwrap();
+    let message = stop_daemon_process(pid)
+        .expect_err("a corrupt record must refuse the stop")
+        .to_string();
+    assert!(message.contains("cannot be verified"), "{message}");
+    assert!(message.contains("clear-stale"), "{message}");
+    assert!(
+        daemon.child.try_wait().unwrap().is_none(),
+        "daemon untouched"
+    );
+    assert_eq!(std::fs::read(&record_path).unwrap(), b"partial");
+    assert!(daemon.pid_file().exists());
+    // A record naming another PID is the same kind of refusal.
+    let mut other: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    other["pid"] = serde_json::json!(pid.wrapping_add(1));
+    std::fs::write(&record_path, serde_json::to_vec(&other).unwrap()).unwrap();
+    let message = stop_daemon_process(pid)
+        .expect_err("a conflicting record must refuse the stop")
+        .to_string();
+    assert!(message.contains("cannot be verified"), "{message}");
+    assert!(
+        daemon.child.try_wait().unwrap().is_none(),
+        "daemon untouched"
+    );
+    assert!(daemon.pid_file().exists());
+}
+
 #[cfg(not(target_os = "macos"))]
 #[test]
 #[serial_test::serial]
@@ -2406,7 +2595,7 @@ fn a_stop_that_reached_the_wrong_daemon_stops_nothing() {
     // A is the daemon the client finds through the proxy.
     let mut a = start_listener_at(&dir, &first_addr);
     let a_pid = a.id();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     let a_instance: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.join("daemon.instance.json")).unwrap()).unwrap();
     let destination = Arc::new(std::sync::Mutex::new(first_addr.clone()));
@@ -2426,6 +2615,14 @@ fn a_stop_that_reached_the_wrong_daemon_stops_nothing() {
     #[cfg(target_os = "macos")]
     agent2ssh::daemon_identity::macos::recover(
         &dir,
+        a_pid,
+        a_instance["instance_id"].as_str().unwrap(),
+    )
+    .expect("explicitly recover A's exited identity records");
+    // Windows refuses to publish over A's crashed record too (#24 phase 2):
+    // the restart goes through the same explicit, named recovery.
+    #[cfg(windows)]
+    agent2ssh::daemon_control::recover_instance_records(
         a_pid,
         a_instance["instance_id"].as_str().unwrap(),
     )

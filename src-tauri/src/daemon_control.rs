@@ -80,7 +80,7 @@ pub fn read_daemon_pid() -> Result<Option<u32>> {
 }
 
 #[cfg(not(target_os = "macos"))]
-const DAEMON_PID_LOCK: &str = ".daemon-pid.lock";
+pub(crate) const DAEMON_PID_LOCK: &str = ".daemon-pid.lock";
 
 #[cfg(target_os = "macos")]
 fn daemon_pid_lock() -> Result<File> {
@@ -104,6 +104,10 @@ pub fn write_daemon_pid(pid: u32) -> Result<()> {
             return Err(anyhow!("daemon PID file names process {previous}, which is live or cannot be verified; file retained"));
         }
     }
+    // A crashed publication is recovered explicitly, never overwritten by a
+    // legacy PID write (#24 phase 2).
+    #[cfg(windows)]
+    crate::daemon_identity::windows::refuse_existing_record(&config_dir_absolute()?)?;
     #[cfg(target_os = "macos")]
     {
         // The existence check above cannot constrain a legacy writer that
@@ -221,6 +225,8 @@ fn write_daemon_pid_if_absent(pid: u32) -> Result<()> {
     let _guard = daemon_pid_lock()?;
     #[cfg(target_os = "macos")]
     refuse_ipc_artifacts()?;
+    #[cfg(windows)]
+    crate::daemon_identity::windows::refuse_existing_record(&config_dir_absolute()?)?;
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -238,7 +244,11 @@ pub fn remove_daemon_pid_file_if(pid: u32) -> Result<bool> {
         refuse_ipc_artifacts()?;
         crate::daemon_identity::macos::remove_pid_record_if(&config_dir_absolute()?, pid, None)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        crate::daemon_identity::windows::remove_if_named(&config_dir_absolute()?, pid)
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         let path = daemon_pid_path()?;
         let raw = match std::fs::read_to_string(&path) {
@@ -274,6 +284,63 @@ fn refuse_ipc_artifacts() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// A published Windows instance record with the means to clean it up (#24
+/// phase 2). Cleanup is conditional: both files must still byte-match what
+/// this daemon published, so a replacement is preserved, not removed.
+#[cfg(windows)]
+pub struct DaemonIdentityPublication {
+    inner: crate::daemon_identity::windows::Publication,
+    dir: std::path::PathBuf,
+}
+
+#[cfg(windows)]
+impl DaemonIdentityPublication {
+    pub fn instance(&self) -> &crate::daemon_identity::windows::Instance {
+        &self.inner.instance
+    }
+
+    pub fn cleanup(self) -> Result<bool> {
+        let _guard = daemon_pid_lock()?;
+        self.inner.cleanup_locked(&self.dir)
+    }
+}
+
+/// Publish `daemon.pid` and the versioned instance record under the shared
+/// lock. Refuses a live or unverifiable previous PID and any existing record:
+/// a crashed publication is recovered explicitly, never replaced.
+#[cfg(windows)]
+pub fn publish_daemon_identity(pid: u32) -> Result<DaemonIdentityPublication> {
+    let _guard = daemon_pid_lock()?;
+    if let Some(previous) = read_daemon_pid()? {
+        if !pid_definitely_missing(previous) {
+            return Err(anyhow!(
+                "daemon PID file names process {previous}, which is live or cannot be verified; file retained"
+            ));
+        }
+    }
+    let dir = config_dir_absolute()?;
+    let inner = crate::daemon_identity::windows::publish(&dir, pid)?;
+    Ok(DaemonIdentityPublication { inner, dir })
+}
+
+/// Explicit, operator-directed recovery of a crashed publication. Refuses
+/// unless the OS reports the expected PID definitely absent, and both files
+/// must match the named instance — see `daemon clear-stale --expect-instance`.
+#[cfg(windows)]
+pub fn recover_instance_records(expected_pid: u32, expected_instance: &str) -> Result<()> {
+    let _guard = daemon_pid_lock()?;
+    if !pid_definitely_missing(expected_pid) {
+        anyhow::bail!(
+            "daemon PID {expected_pid} exists or cannot be observed; identity records retained"
+        );
+    }
+    crate::daemon_identity::windows::recover(
+        &config_dir_absolute()?,
+        expected_pid,
+        expected_instance,
+    )
 }
 
 pub fn process_is_alive(pid: u32) -> bool {
@@ -1542,6 +1609,29 @@ fn process_handle_is_signaled(_pid: u32) -> bool {
     false
 }
 
+/// Seconds between the FILETIME epoch (1601-01-01) and the Unix epoch.
+#[cfg(windows)]
+const FILETIME_TO_UNIX_SECS: u64 = 11_644_473_600;
+
+/// Raw `GetProcessTimes().ftCreationTime`: 100 ns ticks since 1601-01-01.
+/// This is the resolution the instance record stores (#24 phase 2); truncating
+/// to seconds here is exactly what lets a same-second PID reuse slip through.
+#[cfg(windows)]
+fn creation_time_ticks(handle: isize) -> Option<u64> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+    unsafe {
+        let mut creation: FILETIME = std::mem::zeroed();
+        let mut exit: FILETIME = std::mem::zeroed();
+        let mut kernel: FILETIME = std::mem::zeroed();
+        let mut user: FILETIME = std::mem::zeroed();
+        if GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) == 0 {
+            return None;
+        }
+        Some(((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64)
+    }
+}
+
 /// `GetProcessTimes().ftCreationTime` as Unix seconds.
 ///
 /// Measured against `sysinfo::Process::start_time` on Windows 11 26300: equal
@@ -1551,33 +1641,57 @@ fn process_handle_is_signaled(_pid: u32) -> bool {
 /// `docs/reports/CNB-ISSUE-24-WINDOWS-PRIMITIVES-2026-11-12.md`.
 #[cfg(windows)]
 fn creation_time_secs(handle: isize) -> Option<u64> {
-    use windows_sys::Win32::Foundation::FILETIME;
-    use windows_sys::Win32::System::Threading::GetProcessTimes;
-    /// Seconds between the FILETIME epoch (1601-01-01) and the Unix epoch.
-    const FILETIME_TO_UNIX_SECS: u64 = 11_644_473_600;
-    unsafe {
-        let mut creation: FILETIME = std::mem::zeroed();
-        let mut exit: FILETIME = std::mem::zeroed();
-        let mut kernel: FILETIME = std::mem::zeroed();
-        let mut user: FILETIME = std::mem::zeroed();
-        if GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) == 0 {
-            return None;
+    creation_time_ticks(handle).map(|ticks| ticks / 10_000_000 - FILETIME_TO_UNIX_SECS)
+}
+
+/// The creation time a binding is checked against, at the resolution the
+/// evidence actually has.
+///
+/// `Ticks` comes from the versioned instance record (#24 phase 2): raw 100 ns
+/// FILETIME ticks, which distinguish two processes created inside the same
+/// whole second. `Seconds` is the legacy comparison for a daemon that published
+/// no record — `sysinfo` truncates to whole seconds on every platform, so that
+/// path keeps its documented same-second boundary. The variant is carried
+/// through the binding so termination re-checks at the same precision; mixing
+/// resolutions would silently downgrade the check.
+#[cfg(not(target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExpectedCreation {
+    Seconds(u64),
+    #[cfg(windows)]
+    Ticks(u64),
+}
+
+#[cfg(windows)]
+impl ExpectedCreation {
+    /// The value the handle's creation time must equal, read at this
+    /// expectation's own resolution.
+    fn observed(self, handle: isize) -> Option<u64> {
+        match self {
+            Self::Seconds(_) => creation_time_secs(handle),
+            Self::Ticks(_) => creation_time_ticks(handle),
         }
-        let ticks = ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64;
-        Some(ticks / 10_000_000 - FILETIME_TO_UNIX_SECS)
+    }
+
+    fn value(self) -> u64 {
+        match self {
+            Self::Seconds(v) | Self::Ticks(v) => v,
+        }
     }
 }
 
 /// Whether an opened handle may be trusted as the process a stop verified.
 ///
 /// Both inputs come from the same handle, taken after `OpenProcess` succeeded:
-/// the `GetProcessTimes` creation time (in whole seconds, the record's
-/// resolution) and whether the image file behind the handle is named like a
-/// daemon. A reused PID fails this in two independent ways — a different
-/// creation time, or an image that is not a daemon — so a reuse that lands in
-/// the same whole second as the recorded start time is still refused when the
-/// replacement is not a daemon image. Pure so the refusal rules are testable
-/// on every platform; the Windows handle probes feed it in [`BoundProcess`].
+/// the `GetProcessTimes` creation time and whether the image file behind the
+/// handle is named like a daemon. The comparison is pure equality at whatever
+/// resolution the caller supplies — whole seconds for a legacy daemon, raw
+/// 100 ns ticks when the instance record carries them ([`ExpectedCreation`]) —
+/// so the same-second reuse boundary closes exactly when the finer evidence
+/// exists. A reused PID fails this in two independent ways: a different
+/// creation time, or an image that is not a daemon. Pure so the refusal rules
+/// are testable on every platform; the Windows handle probes feed it in
+/// [`BoundProcess`].
 #[cfg(any(windows, test))]
 fn bound_identity_matches(
     creation_time: Option<u64>,
@@ -1618,23 +1732,24 @@ fn handle_image_is_daemon(handle: isize) -> bool {
 /// *that* process ended, not that whoever took the PID next is alive.
 ///
 /// The handle is only trusted after its own creation time matches the record
-/// *and* the image behind it is named like a daemon. The creation time is
-/// seconds, not the 100 ns `GetProcessTimes` returns, because the record
-/// stores whole seconds — and two processes created within the same second are
-/// indistinguishable at that precision (measured, 4/4 runs; report §3.3). The
-/// image check is what a same-second reuse by a non-daemon binary trips over.
-/// So this is strictly stronger than re-opening per poll, not omniscient: it
-/// narrows the reuse window to the instant of `open` and removes it for the
-/// 8 s that follow; a same-second reuse by another daemon image remains
-/// indistinguishable until #22's versioned instance record carries a finer
-/// creation time.
+/// *and* the image behind it is named like a daemon. The comparison runs at
+/// the resolution the evidence has ([`ExpectedCreation`]): raw 100 ns ticks
+/// when the versioned instance record carries them (#24 phase 2), whole
+/// seconds for a legacy daemon that published no record. On the seconds path
+/// two processes created within the same second are indistinguishable
+/// (measured, 4/4 runs; report §3.3) and the image check is what a same-second
+/// reuse by a non-daemon binary trips over; the tick path refuses even a
+/// same-second reuse by another daemon image. So this is strictly stronger
+/// than re-opening per poll, not omniscient: it narrows the reuse window to
+/// the instant of `open` and removes it for the 8 s that follow.
 #[cfg(windows)]
 struct BoundProcess {
     handle: isize,
     pid: u32,
-    /// The creation time this binding was accepted for. Kept so termination can
-    /// refuse a handle opened for a different process.
-    start_time: u64,
+    /// The creation time this binding was accepted for, at its original
+    /// resolution. Kept so termination can refuse a handle opened for a
+    /// different process without downgrading the check.
+    expected: ExpectedCreation,
 }
 
 #[cfg(windows)]
@@ -1643,21 +1758,21 @@ impl BoundProcess {
     ///
     /// `None` means "not bound": the process is gone, the access was denied, or
     /// the object behind the PID is not the one the record named. The last case
-    /// is the `OpenProcess`-window itself: between the process-table snapshot
-    /// that produced `expected_start` and this `OpenProcess`, the process can
-    /// exit and the OS can hand the PID to someone else. The handle's creation
-    /// time catches a reuse with a different start time; the image name behind
-    /// the same handle catches one that lands in the same whole second but is
-    /// not a daemon. None of those outcomes is evidence of exit, so every
-    /// caller falls back to the existing observation path rather than treating
-    /// it as one. The name is not re-checked against the process table because
-    /// `expected_start` was read from a process that already passed it
+    /// is the `OpenProcess`-window itself: between the observation that
+    /// produced `expected` and this `OpenProcess`, the process can exit and the
+    /// OS can hand the PID to someone else. The handle's creation time catches
+    /// a reuse at the expectation's resolution; the image name behind the same
+    /// handle catches one that lands in the same whole second but is not a
+    /// daemon. None of those outcomes is evidence of exit, so every caller
+    /// falls back to the existing observation path rather than treating it as
+    /// one. The name is not re-checked against the process table because the
+    /// expectation was read from a process that already passed it
     /// ([`daemon_process_start_time`]).
     ///
     /// Only the rights needed to *observe* are requested here. A caller that may
     /// not terminate the process can still bind and wait; [`terminate`] asks for
     /// the extra right when a forced stop is actually requested.
-    fn open(pid: u32, expected_start: u64) -> Option<Self> {
+    fn open(pid: u32, expected: ExpectedCreation) -> Option<Self> {
         use windows_sys::Win32::System::Threading::{
             OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
         };
@@ -1671,13 +1786,13 @@ impl BoundProcess {
         if handle == 0 {
             return None;
         }
-        let creation_time = creation_time_secs(handle);
+        let creation_time = expected.observed(handle);
         let image_is_daemon = handle_image_is_daemon(handle);
-        if bound_identity_matches(creation_time, expected_start, image_is_daemon) {
+        if bound_identity_matches(creation_time, expected.value(), image_is_daemon) {
             Some(Self {
                 handle,
                 pid,
-                start_time: expected_start,
+                expected,
             })
         } else {
             unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
@@ -1724,7 +1839,9 @@ impl BoundProcess {
                 std::io::Error::last_os_error()
             ));
         }
-        if creation_time_secs(handle) != Some(self.start_time) || !handle_image_is_daemon(handle) {
+        if self.expected.observed(handle) != Some(self.expected.value())
+            || !handle_image_is_daemon(handle)
+        {
             unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
             return Err(anyhow!(
                 "daemon PID {} was reused before it could be terminated; no signal was sent",
@@ -1760,7 +1877,7 @@ struct BoundProcess;
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
 impl BoundProcess {
-    fn open(_pid: u32, _expected_start: u64) -> Option<Self> {
+    fn open(_pid: u32, _expected: ExpectedCreation) -> Option<Self> {
         None
     }
 }
@@ -2211,13 +2328,49 @@ pub fn stop_daemon_process_detailed(
         // replacement process; a stale marker is safer than removing it.
         return Ok(DaemonStopOutcome::AlreadyExited);
     };
+    // The instance record (#24 phase 2) upgrades the binding to the 100 ns
+    // creation time it carries. A present but invalid or conflicting record is
+    // a refusal, never a downgrade to the seconds comparison: the record exists
+    // precisely because seconds cannot tell two objects apart. No record means
+    // a legacy daemon, whose stop keeps the documented same-second boundary.
+    #[cfg(windows)]
+    let expected_creation = {
+        let dir = config_dir_absolute().map_err(DaemonStopError::Other)?;
+        let record = crate::daemon_identity::windows::read(&dir, pid).map_err(|error| {
+            Refused::UnverifiedIdentity(format!(
+                "the daemon instance record for PID {pid} cannot be verified ({error:#}); \
+                 no signal was sent and the files are retained. Inspect the record, then \
+                 use 'agent2ssh daemon clear-stale --expect-pid {pid} --expect-instance \
+                 <instance_id>' only if the process has exited"
+            ))
+        })?;
+        match record {
+            Some(instance) => {
+                // The record's ticks and the process-table observation must
+                // agree at the observation's own resolution; a disagreement
+                // means the PID changed hands between the two reads.
+                let recorded_secs = instance.creation_ticks / 10_000_000 - FILETIME_TO_UNIX_SECS;
+                if recorded_secs != start_time {
+                    return Err(Refused::UnverifiedIdentity(format!(
+                        "the daemon instance record for PID {pid} disagrees with the \
+                         observed process start time, so the PID may have been reused; \
+                         no signal was sent and the files are retained"
+                    )));
+                }
+                ExpectedCreation::Ticks(instance.creation_ticks)
+            }
+            None => ExpectedCreation::Seconds(start_time),
+        }
+    };
+    #[cfg(not(windows))]
+    let expected_creation = ExpectedCreation::Seconds(start_time);
     // Bind the process object before asking for a shutdown, so the grace period
     // and any forced termination both address the object that was verified here
     // — not whatever holds the PID eight seconds later. `None` (denied, gone, or
     // already reused) is not evidence that the process exited: the observers
     // below still decide whether it is running, and a forced stop refuses
     // rather than re-opening the PID (see [`terminate_for_stop`]).
-    let bound = BoundProcess::open(pid, start_time);
+    let bound = BoundProcess::open(pid, expected_creation);
     // A matching executable name is not proof that this is our daemon: an
     // unrelated process can reuse the PID or spoof argv[0]. Require the health
     // PID to match, the daemon to serve *this* config directory, and this
@@ -2816,22 +2969,45 @@ mod tests {
         secs
     }
 
+    /// The raw 100 ns creation ticks, the resolution the instance record
+    /// stores, so a test can name the value a tick binding must accept.
+    #[cfg(windows)]
+    fn creation_ticks_of(pid: u32) -> Option<u64> {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle == 0 {
+            return None;
+        }
+        let ticks = creation_time_ticks(handle);
+        unsafe { CloseHandle(handle) };
+        ticks
+    }
+
     #[cfg(windows)]
     fn spawn_sleeper() -> std::process::Child {
         // `BoundProcess::open` verifies the image name behind the handle, so
         // the child must be named like a daemon. A copy of a system binary
         // under that name is the same stand-in the e2e suite uses (a symlink
-        // needs a privilege the test account may not hold).
-        let dir = std::env::temp_dir().join(format!("a2s-bind-{}", std::process::id()));
+        // needs a privilege the test account may not hold). Each call gets its
+        // own directory: tests run in parallel, and copying over an image a
+        // sibling test is still executing fails with a sharing violation.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "a2s-bind-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&dir).expect("temp dir for the stand-in binary");
         let named = dir.join("agent2ssh-daemon.exe");
-        if !named.exists() {
-            let system_root = std::env::var_os("SystemRoot")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
-            std::fs::copy(system_root.join("System32").join("ping.exe"), &named)
-                .expect("copy a stand-in process");
-        }
+        let system_root = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        std::fs::copy(system_root.join("System32").join("ping.exe"), &named)
+            .expect("copy a stand-in process");
         Command::new(&named)
             .args(["-n", "20", "127.0.0.1"])
             .stdout(Stdio::null())
@@ -2850,13 +3026,13 @@ mod tests {
         let child = spawn_sleeper();
         let pid = child.id();
         let start = creation_time_of(pid).expect("read creation time");
-        let bound = BoundProcess::open(pid, start);
+        let bound = BoundProcess::open(pid, ExpectedCreation::Seconds(start));
         assert!(
             bound.is_some(),
             "the recorded second opened this process, so it must bind"
         );
         assert!(
-            BoundProcess::open(pid, start + 1).is_none(),
+            BoundProcess::open(pid, ExpectedCreation::Seconds(start + 1)).is_none(),
             "a different second names a different object, and must not bind"
         );
         drop(bound);
@@ -2873,7 +3049,8 @@ mod tests {
         let mut child = spawn_sleeper();
         let pid = child.id();
         let start = creation_time_of(pid).expect("read creation time");
-        let bound = BoundProcess::open(pid, start).expect("bind live child");
+        let bound =
+            BoundProcess::open(pid, ExpectedCreation::Seconds(start)).expect("bind live child");
         assert!(!bound.is_signaled(), "a live child is not signaled");
         assert_eq!(
             wait_for_bound_exit(Some(&bound), pid, start, Duration::ZERO),
@@ -2905,7 +3082,7 @@ mod tests {
         let bystander = spawn_sleeper();
         let pid = target.id();
         let start = creation_time_of(pid).expect("read creation time");
-        let bound = BoundProcess::open(pid, start).expect("bind");
+        let bound = BoundProcess::open(pid, ExpectedCreation::Seconds(start)).expect("bind");
         terminate_for_stop(Some(&bound), pid, start).expect("terminate bound object");
         let status = target.wait().expect("reap terminated child");
         assert!(
@@ -3090,11 +3267,11 @@ mod tests {
         let pid = child.id();
         let start = creation_time_of(pid).expect("read creation time");
         assert!(
-            BoundProcess::open(pid, start).is_some(),
+            BoundProcess::open(pid, ExpectedCreation::Seconds(start)).is_some(),
             "the recorded second opened this process, so it must bind"
         );
         assert!(
-            BoundProcess::open(pid, start + 1).is_none(),
+            BoundProcess::open(pid, ExpectedCreation::Seconds(start + 1)).is_none(),
             "a different second names a different object, and must not bind"
         );
         let _ = child.kill();
@@ -3117,37 +3294,41 @@ mod tests {
         let pid = child.id();
         let start = creation_time_of(pid).expect("read creation time");
         assert!(
-            BoundProcess::open(pid, start).is_none(),
+            BoundProcess::open(pid, ExpectedCreation::Seconds(start)).is_none(),
             "the right creation time on the wrong image must not bind"
         );
         let _ = child.kill();
         let _ = child.wait();
     }
 
-    /// The remaining half of the reuse window, pinned as it stands today: a
-    /// PID replaced by **another daemon-named image** inside the same whole
-    /// second as the recorded start still binds, because the seconds-resolution
-    /// start time cannot tell the two objects apart (`sysinfo` truncates on
-    /// every platform while `GetProcessTimes` has 100 ns resolution). This is
-    /// #24's documented boundary, not a defect to fix here: when #22's
-    /// versioned instance record carries the 100 ns creation time, the
-    /// comparison inside `bound_identity_matches` must start failing for two
-    /// distinct processes — and this test is the one that should turn red
-    /// then, so the migration flips it deliberately rather than silently.
+    /// #24 phase 2 flipped this test deliberately. It used to be
+    /// `a_same_second_daemon_image_reuse_still_binds_the_replacement`, pinning
+    /// the seconds-resolution boundary: a PID replaced by **another
+    /// daemon-named image** inside the same whole second bound, because the
+    /// truncated start time could not tell the two objects apart. The versioned
+    /// instance record now carries the raw 100 ns creation ticks, and at that
+    /// resolution the replacement is refused. The legacy `Seconds` expectation
+    /// still binds the replacement — that is the old-daemon boundary, kept
+    /// visible here rather than silently dropped.
     #[cfg(windows)]
     #[test]
-    fn a_same_second_daemon_image_reuse_still_binds_the_replacement() {
+    fn a_same_second_daemon_image_reuse_is_refused_by_the_tick_record() {
         // Two back-to-back stand-ins almost always share the whole second;
         // retry across a second boundary instead of assuming the race outcome.
+        // Their 100 ns ticks differ with certainty: one process object has one
+        // creation time, and these are two objects.
         let mut first;
         let mut second;
-        let recorded = loop {
+        let (first_ticks, second_ticks) = loop {
             first = spawn_sleeper();
             second = spawn_sleeper();
-            let starts = (creation_time_of(first.id()), creation_time_of(second.id()));
-            if let (Some(a), Some(b)) = starts {
-                if a == b {
-                    break a;
+            let ticks = (
+                creation_ticks_of(first.id()),
+                creation_ticks_of(second.id()),
+            );
+            if let (Some(a), Some(b)) = ticks {
+                if a / 10_000_000 == b / 10_000_000 && a != b {
+                    break (a, b);
                 }
             }
             for child in [&mut first, &mut second] {
@@ -3156,19 +3337,52 @@ mod tests {
             }
         };
         assert_eq!(
+            creation_time_of(first.id()),
             creation_time_of(second.id()),
-            Some(recorded),
             "the retry loop guarantees a same-second pair"
         );
         assert!(
-            BoundProcess::open(second.id(), recorded).is_some(),
-            "a same-second daemon-named replacement binds today: the seconds-resolution \
-             record cannot distinguish it, and #22's 100 ns creation time is the fix"
+            BoundProcess::open(second.id(), ExpectedCreation::Ticks(first_ticks)).is_none(),
+            "the record's 100 ns creation time names the first object, so the \
+             same-second replacement must not bind"
+        );
+        assert!(
+            BoundProcess::open(second.id(), ExpectedCreation::Ticks(second_ticks)).is_some(),
+            "the replacement's own ticks bind it"
+        );
+        let recorded_secs = first_ticks / 10_000_000 - FILETIME_TO_UNIX_SECS;
+        assert!(
+            BoundProcess::open(second.id(), ExpectedCreation::Seconds(recorded_secs)).is_some(),
+            "a legacy daemon published no record, so its stop keeps the documented \
+             same-second boundary"
         );
         let _ = first.kill();
         let _ = second.kill();
         let _ = first.wait();
         let _ = second.wait();
+    }
+
+    /// A tick binding is only valid for the ticks it was opened for, and
+    /// termination re-checks at that same resolution.
+    #[cfg(windows)]
+    #[test]
+    fn a_tick_binding_refuses_other_ticks_and_terminates_its_own_object() {
+        let mut child = spawn_sleeper();
+        let pid = child.id();
+        let ticks = creation_ticks_of(pid).expect("read creation ticks");
+        assert!(
+            BoundProcess::open(pid, ExpectedCreation::Ticks(ticks)).is_some(),
+            "the recorded ticks opened this process, so they must bind"
+        );
+        assert!(
+            BoundProcess::open(pid, ExpectedCreation::Ticks(ticks + 1)).is_none(),
+            "100 ns apart is a different object, even inside the same second"
+        );
+        let bound = BoundProcess::open(pid, ExpectedCreation::Ticks(ticks)).expect("bind");
+        terminate_for_stop(Some(&bound), pid, 0).expect("terminate bound object");
+        let status = child.wait().expect("reap terminated child");
+        assert!(!status.success());
+        assert!(bound.is_signaled());
     }
 
     /// The acceptance rules themselves, stated without an OS: the refusal

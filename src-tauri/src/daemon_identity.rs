@@ -198,6 +198,11 @@ mod tests {
 #[cfg(target_os = "macos")]
 pub mod macos;
 
+/// Windows versioned instance record: the 100 ns creation time the stop path
+/// binds against (#24 phase 2). Discovery evidence, not a credential.
+#[cfg(windows)]
+pub mod windows;
+
 #[cfg(target_os = "macos")]
 pub mod macos_client;
 
