@@ -4,7 +4,7 @@
 - 机器：MACHENIKER9，Windows 11 10.0.26300（x64），Administrator，rustc/cargo 1.100.0
 - 分支：`feat/windows-daemon-identity-phase2`
 - 探针：`src-tauri/tests/pipe_identity_probe.rs`（Windows-only，全部 `#[ignore]`，仿 `container_terminal_manual`）
-- 原始输出：本目录 `probe-run.log`
+- 原始输出：本目录 `probe-run.txt`
 - 复现：
   ```text
   cargo test --manifest-path src-tauri/Cargo.toml --no-default-features \
