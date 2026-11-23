@@ -247,6 +247,15 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_DEV_INCREMENTAL: "false"
+      # Same annotation, other half of the cost: peak memory scales with how many
+      # rustc and link processes run at once, and this job links a dozen test
+      # binaries against the same rlib. Windows only — the macOS and Linux legs
+      # of those three runs passed. `default`, not an empty string: cargo rejects
+      # "" with "Number of parallel jobs should be `default` or a number", and an
+      # unset-to-empty expression would fail every non-Windows leg. Measured not
+      # to change artifact fingerprints (4 -> 2 recompiles nothing), so the v3
+      # cache key below stays valid.
+      CARGO_BUILD_JOBS: ${{ matrix.os == 'windows-latest' && '2' || 'default' }}
     strategy:
       matrix:
         include:
