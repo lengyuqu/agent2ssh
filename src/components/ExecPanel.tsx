@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronUp, Play, ShieldAlert } from "lucide-react";
-import { memo, useEffect, useState  } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState  } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import { labelCls } from "../lib/ui-classes";
@@ -16,14 +16,33 @@ import { useToast } from "./ui/toast";
 type Props = {
   hosts: HostProfile[];
   initialHost?: string;
+  /** Command carried in from outside (an approval jump). Empty values are ignored. */
+  initialCommand?: string;
+  /**
+   * Bumps when the same `initialCommand` is sent again. A draft already in the
+   * field is replaced — the incoming command wins, with no confirm dialog.
+   */
+  carryEpoch?: number;
   onExecComplete: () => void;
 };
 
-function ExecPanel({ hosts, initialHost = "", onExecComplete }: Props) {
+function growCommandField(el: HTMLTextAreaElement) {
+  el.style.height = "auto";
+  const next = el.scrollHeight;
+  if (next > 0) el.style.height = `${next}px`;
+}
+
+function ExecPanel({ hosts, initialHost = "", initialCommand, carryEpoch = 0, onExecComplete }: Props) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [targetHost, setTargetHost] = useState(initialHost);
-  const [command, setCommand] = useState("uname -a");
+  const [command, setCommand] = useState(() =>
+    initialCommand?.trim() ? initialCommand : "uname -a",
+  );
+  const commandRef = useRef<HTMLTextAreaElement>(null);
+  const appliedCarry = useRef<string | undefined>(undefined);
+  const focusValue = useRef<string | null>(null);
+  const pendingToast = useRef<string | null>(null);
   const [force, setForce] = useState(false);
   const [result, setResult] = useState<ExecResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -37,6 +56,41 @@ function ExecPanel({ hosts, initialHost = "", onExecComplete }: Props) {
 
   // Pre-flight risk check
   const [previewRisk, setPreviewRisk] = useState<RiskLevel | null>(null);
+
+  useLayoutEffect(() => {
+    if (initialHost) setTargetHost(initialHost);
+  }, [initialHost]);
+
+  // Incoming approval/host jump replaces any unexecuted draft. No confirm —
+  // the carried command wins, then the debounced risk preview below runs.
+  useLayoutEffect(() => {
+    if (!initialCommand?.trim()) return;
+    const signature = `${carryEpoch}\0${initialCommand}`;
+    if (appliedCarry.current === signature) return;
+    appliedCarry.current = signature;
+    focusValue.current = initialCommand;
+    pendingToast.current = initialCommand;
+    setCommand(initialCommand);
+  }, [initialCommand, carryEpoch]);
+
+  useLayoutEffect(() => {
+    const el = commandRef.current;
+    if (!el) return;
+    growCommandField(el);
+    const wanted = focusValue.current;
+    if (wanted == null || el.value !== wanted) return;
+    focusValue.current = null;
+    el.focus();
+    const end = el.value.length;
+    el.setSelectionRange(end, end);
+  }, [command]);
+
+  useEffect(() => {
+    const message = pendingToast.current;
+    if (!message) return;
+    pendingToast.current = null;
+    showToast("success", t("Loaded pending command: {command}", { command: message }));
+  }, [command, showToast, t]);
 
   useEffect(() => {
     // Reset result when target host changes
@@ -119,7 +173,7 @@ function ExecPanel({ hosts, initialHost = "", onExecComplete }: Props) {
   }
 
   return (
-    <Card className="space-y-3.5 p-4">
+    <Card className="flex min-h-0 flex-1 flex-col gap-3.5 overflow-hidden p-4">
       <div className="flex items-center gap-2 font-semibold">
         <Play size={16} className="text-muted-foreground" />
         {t("Execute")}
@@ -129,6 +183,8 @@ function ExecPanel({ hosts, initialHost = "", onExecComplete }: Props) {
       <label className={labelCls}>
         {t("Command")}
         <Textarea
+          ref={commandRef}
+          rows={Math.max(2, command.split("\n").length)}
           value={command}
           onChange={(e) => setCommand(e.target.value)}
           spellCheck={false}
@@ -201,7 +257,7 @@ function ExecPanel({ hosts, initialHost = "", onExecComplete }: Props) {
         {busy ? t("Running") : t("Run over SSH")}
       </Button>
 
-      <div className="min-h-[250px] overflow-auto rounded-md bg-canvas-0 text-foreground">
+      <div className="min-h-[45vh] flex-1 overflow-auto rounded-md bg-canvas-0 text-foreground">
         {result ? (
           <>
             <div className="flex flex-wrap items-center gap-2.5 border-b border-line px-3.5 py-2.5 text-muted-foreground">

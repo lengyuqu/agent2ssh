@@ -26,12 +26,10 @@ type Props = {
   /** `command` approves that text instead of the requested one. */
   onApprove: (approval: ApprovalRequest, command?: string) => void | Promise<void>;
   onReject: (approval: ApprovalRequest) => void | Promise<void>;
-  /** Fallback for requests that cannot be rewritten: open the Execution module
-   *  with this approval's host selected. The command is **not** carried over --
-   *  `App.tsx`'s handler only sets the host and switches module, and the
-   *  Execution panel still starts from its own default command. The copy half
-   *  happens in `ApprovalDetail` before this fires. */
-  onGoExecute: (approval: ApprovalRequest) => void;
+  /** Open Execution with this approval's host and command. `command` is the
+   *  detail draft when the operator edited one, otherwise the requested text.
+   *  The copy-to-clipboard half happens in `ApprovalDetail` before this fires. */
+  onGoExecute: (approval: ApprovalRequest, command?: string) => void;
 };
 
 const STATUS_BADGE: Record<Exclude<ApprovalStatus, "pending">, "success" | "destructive" | "secondary"> = {
@@ -314,7 +312,7 @@ function ApprovalWorkbench({ pending, onApprove, onReject, onGoExecute }: Props)
             busy={busy}
             onApprove={(command) => selected && requestApprove(selected, command)}
             onReject={handleReject}
-            onCopyAndExecute={() => selected && onGoExecute(selected)}
+            onCopyAndExecute={(command) => selected && onGoExecute(selected, command)}
           />
         </div>
       </div>

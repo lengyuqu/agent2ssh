@@ -40,6 +40,7 @@ function renderHostList(overrides: Partial<HostListProps> = {}) {
     onRenameGroup: vi.fn(),
     onDeleteGroup: vi.fn(),
     onEdit: vi.fn(),
+    onOpenAddHost: vi.fn(),
     onRemove: vi.fn(),
     onBatchRemove: vi.fn(),
     onRefresh: vi.fn(),
@@ -138,6 +139,49 @@ describe("HostList", () => {
     expect(screen.getByText("web-01")).toBeTruthy();
     expect(screen.queryByText("web-02")).toBeNull();
     expect(screen.getByText("1 of 2 hosts")).toBeTruthy();
+  });
+
+  it("opens add host from the toolbar and still edits from the row", () => {
+    const { props } = renderHostList();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Host" }));
+    expect(props.onOpenAddHost).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTitle("Edit web-01"));
+    expect(props.onEdit).toHaveBeenCalledWith(expect.objectContaining({ name: "web-01" }));
+  });
+
+  it("highlights and scrolls the saved host into view", () => {
+    const scroll = vi.fn();
+    HTMLElement.prototype.scrollIntoView = scroll;
+    renderHostList({
+      hosts: [makeHost({ name: "web-01" }), makeHost({ name: "web-02", host: "10.0.0.2" })],
+      highlightHost: "web-02",
+    });
+    const row = screen.getByText("web-02").closest("tr")!;
+    expect(row.getAttribute("data-host")).toBe("web-02");
+    expect(row.className).toContain("ring-primary");
+    expect(scroll).toHaveBeenCalled();
+  });
+
+  it("shows connection progress only on the matching host row", () => {
+    renderHostList({
+      hosts: [makeHost({ name: "web-01" }), makeHost({ name: "web-02", host: "10.0.0.2" })],
+      connectionProgress: {
+        host: "web-01",
+        message: "Opening SSH connection...",
+        percent: 60,
+        busy: true,
+      },
+    });
+
+    const row = screen.getByText("web-01").closest("tr")!;
+    expect(within(row).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("60");
+    expect(within(row).getByText("Opening SSH connection...")).toBeTruthy();
+    expect(within(row).getByText("60%")).toBeTruthy();
+
+    const other = screen.getByText("web-02").closest("tr")!;
+    expect(within(other).queryByRole("progressbar")).toBeNull();
   });
 
   it("removes a host after confirming in the dialog", () => {

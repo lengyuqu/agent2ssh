@@ -9,12 +9,14 @@ import {
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, reportError } from "./api";
 import { isAlreadyDecided } from "./lib/approval-decision";
-import { MODULES, RELATED_MODULES, SIDEBAR_GROUPS, SIDEBAR_ORDER, type ModuleId } from "./nav";
+import { MODULES, RELATED_MODULES, SHORTCUT_MODULES, SIDEBAR_GROUPS, type ModuleId } from "./nav";
+import { DockedView, TerminalDock } from "./features/terminal/dock";
+import LiveTerminal from "./features/terminal/LiveTerminal";
 import AddHostForm from "./components/AddHostForm";
 import ApprovalWorkbench from "./components/approval/ApprovalWorkbench";
 import AuditCharts from "./components/AuditCharts";
 import AuditPanel from "./components/AuditPanel";
-import Breadcrumb from "./components/Breadcrumb";
+import RelatedActionsBar from "./components/RelatedActionsBar";
 import ConfigSnapshotsPanel from "./components/ConfigSnapshotsPanel";
 import ContainersPanel from "./components/ContainersPanel";
 import ResidentSessionsPanel from "./components/ResidentSessionsPanel";
@@ -25,17 +27,17 @@ import CommandPalette, {
 } from "./components/CommandPalette";
 import Dashboard from "./components/Dashboard";
 import LocalEnvironmentsCard from "./components/LocalEnvironmentsCard";
-import ExecPanel from "./components/ExecPanel";
+import ExecutionWorkbench from "./components/ExecutionWorkbench";
 import ForwardPanel from "./components/ForwardPanel";
 import HelpPanel from "./components/HelpPanel";
-import HostList from "./components/HostList";
+import HostDrawer from "./components/HostDrawer";
+import HostList, { type HostConnectionProgress } from "./components/HostList";
 import NetcattyImportDialog from "./components/NetcattyImportDialog";
 import KeysPanel from "./components/KeysPanel";
 import LiveActivityPanel from "./components/LiveActivityPanel";
 import McpAgentsPanel from "./components/McpAgentsPanel";
-import MultiExecPanel from "./components/MultiExecPanel";
 import NotificationCenter from "./components/NotificationCenter";
-import PlaybooksPanel from "./components/PlaybooksPanel";import ProxyPanel from "./components/ProxyPanel";
+import ProxyPanel from "./components/ProxyPanel";
 import RecordingsPanel from "./components/RecordingsPanel";
 import SFTPPanel from "./components/SFTPPanel";
 import TerminalDrawer from "./components/TerminalDrawer";
@@ -73,15 +75,6 @@ function keepIfEqual<T>(prev: T, next: T): T {
   return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
 }
 
-type ConnectionProgress = {
-  host: string;
-  title: string;
-  message: string;
-  percent: number;
-  busy: boolean;
-  variant?: "active" | "success" | "error";
-};
-
 // One console-mode sidebar entry. Memoized: a module switch flips `active` on
 // exactly two items, so per-item memo keeps the rail from rebuilding on every
 // click.
@@ -108,7 +101,7 @@ const SidebarItem = memo(function SidebarItem({
       title={collapsed ? t(label) : undefined}
       aria-current={active ? "page" : undefined}
       className={cn(
-        "relative flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] font-medium transition-colors",
+        "relative flex items-center gap-2 rounded-lg px-2.5 py-1 text-left text-[13px] font-medium transition-colors",
         collapsed && "justify-center px-2",
         active
           ? "bg-sidebar-accent text-primary-foreground"
@@ -143,8 +136,18 @@ export default function App() {
   const [groups, setGroups] = useState<HostGroup[]>([{ id: "default", name: "Default", color: "#4A6CF7", sort_order: 0 }]);
   const [proxies, setProxies] = useState<ProxyProfile[]>([]);
   const [selectedHost, setSelectedHost] = useState("");
+  const [execInitialCommand, setExecInitialCommand] = useState<string | undefined>();
+  // Bumps on every approval jump so the same command replaces an unexecuted draft.
+  const [execCarryEpoch, setExecCarryEpoch] = useState(0);
+  // One-shot. ExecutionWorkbench applies it and clears it, so the next visit
+  // restores `agent2ssh.execMode` instead of sticking on single.
+  const [execPreferredMode, setExecPreferredMode] = useState<
+    "single" | "multi" | "playbooks" | undefined
+  >(undefined);
   const [selectedGroup, setSelectedGroup] = useState("default");
   const [editingHost, setEditingHost] = useState<HostProfile | null>(null);
+  const [isHostDrawerOpen, setIsHostDrawerOpen] = useState(false);
+  const [highlightedHost, setHighlightedHost] = useState<string | null>(null);
   const [netcattyOpen, setNetcattyOpen] = useState(false);
   const [activeModule, setActiveModule] = useState<(typeof MODULES)[number]["id"]>("dashboard");
   const [audit, setAudit] = useState<AuditEntry[]>([]);
@@ -169,14 +172,29 @@ export default function App() {
     status: HostFingerprintStatus;
   } | null>(null);
   const [fingerprintBusy, setFingerprintBusy] = useState(false);
-  const [connectionProgress, setConnectionProgress] = useState<ConnectionProgress | null>(null);
+  const [connectionProgress, setConnectionProgress] = useState<HostConnectionProgress | null>(null);
   // v3 T05: right-side terminal drawer. Raised by the approval workbench
   // ("approve and execute" — command=null, the daemon executes the approved
   // command itself) and by audit rows ("replay" — the historical command is
   // typed into a fresh PTY once the session connects).
   const [terminalDrawer, setTerminalDrawer] = useState<{
+    id: string;
     host: string;
     command: string | null;
+  } | null>(null);
+  // PTYs opened from the drawer. `sessionId` is null while the view sits in
+  // the drawer, then the id of the main-terminal tab that adopted it.
+  const [dockedPtys, setDockedPtys] = useState<
+    Array<{ id: string; host: string; command: string | null; sessionId: string | null }>
+  >([]);
+  const [drawerConnected, setDrawerConnected] = useState(false);
+  const dockSeq = useRef(0);
+  // Bumped on each "Open in Terminal" so a repeat click to the same host
+  // still focuses its tab. `dockId` is the PTY that moves with the view.
+  const [terminalFocusRequest, setTerminalFocusRequest] = useState<{
+    host: string;
+    dockId: string | null;
+    nonce: number;
   } | null>(null);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   // V4-5: icon-only sidebar, independent of the existing max-lg full-stack
@@ -270,10 +288,20 @@ export default function App() {
     }
   }, []);
 
-  const handleHostSaved = useCallback(async () => {
+  const handleHostSaved = useCallback(async (name: string) => {
     await refresh();
     void runAutoWebDavSync("host_saved");
+    setIsHostDrawerOpen(false);
+    setEditingHost(null);
+    setSelectedHost(name);
+    setHighlightedHost(name);
   }, [refresh, runAutoWebDavSync]);
+
+  useEffect(() => {
+    if (!highlightedHost) return;
+    const timer = window.setTimeout(() => setHighlightedHost(null), 2600);
+    return () => window.clearTimeout(timer);
+  }, [highlightedHost]);
 
   const handleProxyChanged = useCallback(async () => {
     await refresh();
@@ -504,9 +532,10 @@ export default function App() {
   }, [ensureLocalDaemon]);
 
   // V2-5: global keyboard shortcuts. Ctrl/Cmd+K opens the command palette,
-  // Ctrl/Cmd+1..9 jumps to the Nth module in the sidebar (SIDEBAR_ORDER, so the
-  // number always matches the rail's position), Ctrl/Cmd+Shift+A surfaces the
-  // pending approval dialog (or reports there is none to act on).
+  // Ctrl/Cmd+1..9 jumps to SHORTCUT_MODULES (the daily set, not the rail
+  // order), Ctrl/Cmd+Shift+A surfaces the pending approval workbench.
+  // Hosts only: Ctrl/Cmd+N opens the add-host drawer and does not become a
+  // browser shortcut. Other modules leave Cmd/Ctrl+N alone.
   useEffect(() => {
     function handleGlobalKeyDown(e: KeyboardEvent) {
       const mod = e.metaKey || e.ctrlKey;
@@ -527,9 +556,16 @@ export default function App() {
         return;
       }
 
+      if (!e.shiftKey && key === "n" && activeModule === "hosts") {
+        e.preventDefault();
+        setEditingHost(null);
+        setIsHostDrawerOpen(true);
+        return;
+      }
+
       if (!e.shiftKey && key >= "1" && key <= "9") {
         const index = Number(key) - 1;
-        const moduleId = SIDEBAR_ORDER[index];
+        const moduleId = SHORTCUT_MODULES[index];
         if (moduleId) {
           e.preventDefault();
           openModule(moduleId);
@@ -538,7 +574,7 @@ export default function App() {
     }
     window.addEventListener("keydown", handleGlobalKeyDown);
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
-  }, [showToast, t, openApprovalsWorkbench, openModule]);
+  }, [showToast, t, openApprovalsWorkbench, openModule, activeModule]);
 
   const handleGateToggle = useCallback(async () => {
     setGateBusy(true);
@@ -564,7 +600,7 @@ export default function App() {
         // The daemon runs the approved command itself (the original exec caller
         // was waiting on approval_wait), so the drawer must NOT re-type the
         // command — that would execute it twice.
-        setTerminalDrawer({ host: approval.host, command: null });
+        raiseTerminalDrawer(approval.host, null);
       } catch (err) {
         await reportUndecided(err, approval, "approve");
       }
@@ -749,8 +785,65 @@ export default function App() {
   const closeCommandPalette = useCallback(() => setCommandPaletteOpen(false), []);
   const openNetcattyImport = useCallback(() => setNetcattyOpen(true), []);
   const closeNetcattyImport = useCallback(() => setNetcattyOpen(false), []);
-  const cancelHostEdit = useCallback(() => setEditingHost(null), []);
-  const closeTerminalDrawer = useCallback(() => setTerminalDrawer(null), []);
+  const closeHostDrawer = useCallback(() => {
+    setIsHostDrawerOpen(false);
+    setEditingHost(null);
+  }, []);
+  const openAddHostDrawer = useCallback(() => {
+    setEditingHost(null);
+    setIsHostDrawerOpen(true);
+  }, []);
+  const openEditHostDrawer = useCallback((host: HostProfile) => {
+    setEditingHost(host);
+    setIsHostDrawerOpen(true);
+  }, []);
+  const raiseTerminalDrawer = useCallback((host: string, command: string | null) => {
+    dockSeq.current += 1;
+    const id = `dock-${dockSeq.current}`;
+    setDrawerConnected(false);
+    // A drawer that was never moved into the main terminal is replaced.
+    setDockedPtys((prev) => [
+      ...prev.filter((item) => item.sessionId),
+      { id, host, command, sessionId: null },
+    ]);
+    setTerminalDrawer({ id, host, command });
+  }, []);
+  const closeTerminalDrawer = useCallback(() => {
+    setTerminalDrawer((current) => {
+      if (current) {
+        setDockedPtys((prev) => prev.filter((item) => item.id !== current.id || item.sessionId));
+      }
+      return null;
+    });
+    setDrawerConnected(false);
+  }, []);
+  // The drawer's LiveTerminal stays mounted. Closing the chrome and focusing
+  // the host tab makes TerminalPanel render a slot; DockedView portals the
+  // same view into it, so the WebSocket is not opened again. The command is
+  // not forwarded — null already ran on the daemon, and a replay already
+  // typed into this view.
+  const openDrawerInTerminal = useCallback(
+    (host: string) => {
+      const dockId = terminalDrawer?.id ?? null;
+      setTerminalDrawer(null);
+      setSelectedHost(host);
+      setTerminalFocusRequest((current) => ({
+        host,
+        dockId,
+        nonce: (current?.nonce ?? 0) + 1,
+      }));
+      openModule("terminal");
+    },
+    [openModule, terminalDrawer],
+  );
+  const adoptDock = useCallback((dockId: string, sessionId: string) => {
+    setDockedPtys((prev) =>
+      prev.map((item) => (item.id === dockId ? { ...item, sessionId } : item)),
+    );
+  }, []);
+  const releaseDock = useCallback((sessionId: string) => {
+    setDockedPtys((prev) => prev.filter((item) => item.sessionId !== sessionId));
+  }, []);
   const openSetupWizard = useCallback(() => {
     setWizardDismissed(false);
     setShowWizard(true);
@@ -760,12 +853,18 @@ export default function App() {
     [openModule],
   );
   const replayAuditEntry = useCallback(
-    (entry: AuditEntry) => setTerminalDrawer({ host: entry.host, command: entry.command }),
-    [],
+    (entry: AuditEntry) => raiseTerminalDrawer(entry.host, entry.command),
+    [raiseTerminalDrawer],
   );
+  const clearExecPreferredMode = useCallback(() => {
+    setExecPreferredMode(undefined);
+  }, []);
   const goToExecuteForApproval = useCallback(
-    (approval: ApprovalRequest) => {
+    (approval: ApprovalRequest, command?: string) => {
       setSelectedHost(approval.host);
+      setExecInitialCommand(command ?? approval.command);
+      setExecCarryEpoch((epoch) => epoch + 1);
+      setExecPreferredMode("single");
       openModule("execute");
     },
     [openModule],
@@ -808,55 +907,45 @@ export default function App() {
     .map((id) => MODULES.find((module) => module.id === id))
     .filter((module): module is (typeof MODULES)[number] => Boolean(module));
 
-  const updateConnectionProgress = useCallback((next: ConnectionProgress | null) => {
+  const updateConnectionProgress = useCallback((next: HostConnectionProgress | null) => {
     setConnectionProgress(next);
   }, []);
 
   const showConnectionProgress = useCallback(
-    (host: string, message: string, percent: number, title?: string) => {
+    (host: string, message: string, percent: number) => {
       updateConnectionProgress({
         host,
-        title: title ?? t("Connecting to {host}", { host }),
         message,
         percent,
         busy: true,
-        variant: "active",
       });
     },
-    [t, updateConnectionProgress],
+    [updateConnectionProgress],
   );
 
   const completeConnectionProgress = useCallback(
     (host: string, message: string) => {
       updateConnectionProgress({
         host,
-        title: t("Connection complete"),
         message,
         percent: 100,
         busy: false,
-        variant: "success",
       });
       window.setTimeout(() => {
         setConnectionProgress((current) =>
-          current?.host === host && current.variant === "success" ? null : current
+          current?.host === host && !current.busy && current.message === message ? null : current
         );
       }, 900);
     },
-    [t, updateConnectionProgress],
+    [updateConnectionProgress],
   );
 
   const failConnectionProgress = useCallback(
     (host: string, message: string) => {
-      updateConnectionProgress({
-        host,
-        title: t("Connection failed"),
-        message,
-        percent: 100,
-        busy: false,
-        variant: "error",
-      });
+      showToast("error", message);
+      setConnectionProgress((current) => (current?.host === host ? null : current));
     },
-    [t, updateConnectionProgress],
+    [showToast],
   );
 
   const handleConnect = useCallback(
@@ -910,12 +999,7 @@ export default function App() {
     if (!fingerprintPrompt) return;
     setFingerprintBusy(true);
     const progressHost = fingerprintPrompt.host;
-    showConnectionProgress(
-      progressHost,
-      t("Updating trusted SSH fingerprint..."),
-      30,
-      t("Updating SSH fingerprint")
-    );
+    showConnectionProgress(progressHost, t("Updating trusted SSH fingerprint..."), 30);
     try {
       const { host, status } = fingerprintPrompt;
       await api.trustHostFingerprint({
@@ -987,6 +1071,7 @@ export default function App() {
   }
 
   return (
+    <TerminalDock>
     <div className="flex h-screen flex-col bg-background text-foreground">
       {/* K1: master-password unlock gate. Reloads hosts after unlock so resolved
           passwords are reflected. Also surfaced via the ⌘K unlock quick action. */}
@@ -1082,73 +1167,6 @@ export default function App() {
         </Dialog>
       )}
 
-      {connectionProgress && (
-        <Dialog
-          onClose={
-            connectionProgress.busy ? undefined : () => setConnectionProgress(null)
-          }
-          className="max-w-md"
-        >
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <h3 className="text-lg font-bold">{connectionProgress.title}</h3>
-              <p className="mt-1 break-words text-sm text-muted-foreground">
-                {connectionProgress.message}
-              </p>
-            </div>
-            <button
-              type="button"
-              className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
-              onClick={() => setConnectionProgress(null)}
-              disabled={connectionProgress.busy}
-              title={t("Close")}
-            >
-              <X size={18} />
-            </button>
-          </div>
-
-          <div className="mt-5 rounded-lg border border-border bg-muted/50 px-3 py-3">
-            <div className="flex items-center gap-2 text-sm font-medium">
-              {connectionProgress.busy && <Spinner size={15} />}
-              <span className="truncate">{connectionProgress.host}</span>
-              <span className="ml-auto tabular-nums text-muted-foreground">
-                {Math.round(connectionProgress.percent)}%
-              </span>
-            </div>
-            <div className="mt-2 h-2 overflow-hidden rounded bg-border">
-              <div
-                className={cn(
-                  "h-full rounded transition-all duration-300",
-                  connectionProgress.variant === "error"
-                    ? "bg-destructive"
-                    : connectionProgress.variant === "success"
-                      ? "bg-success"
-                      : "bg-primary"
-                )}
-                style={{
-                  width: `${Math.max(5, Math.min(100, connectionProgress.percent))}%`,
-                }}
-              />
-            </div>
-            <div className="mt-2 text-xs leading-snug text-muted-foreground">
-              {connectionProgress.busy
-                ? t("Please wait. The app is still responsive while SSH connects.")
-                : connectionProgress.variant === "success"
-                  ? t("Connection status updated.")
-                  : t("You can close this dialog and retry from Host Management.")}
-            </div>
-          </div>
-
-          {!connectionProgress.busy && (
-            <div className="mt-5 flex justify-end">
-              <Button variant="secondary" onClick={() => setConnectionProgress(null)}>
-                {t("Close")}
-              </Button>
-            </div>
-          )}
-        </Dialog>
-      )}
-
       {/* v3: status top bar with agent pills + ⌘K entry. The actions element is
           memoized so memo(TopBar) can bail out when only unrelated App state
           (active module, dialogs, drawer) changed. */}
@@ -1160,6 +1178,7 @@ export default function App() {
         pendingApprovalsCount={pendingApprovals.length}
         onOpenPalette={openCommandPalette}
         onOpenApprovals={openApprovalsWorkbench}
+        connectionBusy={connectionProgress?.busy === true}
         actions={settingsActions}
       />
 
@@ -1196,10 +1215,7 @@ export default function App() {
             tree lives inside the Terminal module, which is the connection
             surface. */}
         <nav
-          className={cn(
-            "flex min-h-0 flex-1 flex-col overflow-y-auto",
-            sidebarCollapsed ? "gap-0.5" : "gap-1.5"
-          )}
+          className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto"
           aria-label={t("Modules")}
         >
           {SIDEBAR_GROUPS.map((group, groupIndex) => (
@@ -1208,7 +1224,7 @@ export default function App() {
               className={cn("flex flex-col gap-0.5", group.pinBottom && "mt-auto pt-2")}
             >
               {group.title && !sidebarCollapsed && (
-                <div className="px-2.5 pb-0.5 pt-1 text-[10px] font-bold uppercase tracking-wide text-sidebar-foreground/40">
+                <div className="px-2 pt-0.5 text-[10px] font-bold uppercase tracking-wide text-sidebar-foreground/40">
                   {t(group.title)}
                 </div>
               )}
@@ -1241,13 +1257,17 @@ export default function App() {
           groups={groups}
           connectionStatuses={connectionStatuses}
           initialHost={selectedHost}
+          focusRequest={terminalFocusRequest}
+          onDockAdopted={adoptDock}
+          onSessionClosed={releaseDock}
           onNavigateModule={navigateModule}
         />
       </section>
 
       <section
         className={cn(
-          "flex min-h-0 min-w-0 flex-1 flex-col gap-5 overflow-y-auto p-6",
+          "flex min-h-0 min-w-0 flex-1 flex-col gap-5 p-6",
+          activeModule === "execute" || activeModule === "playbooks" ? "overflow-hidden" : "overflow-y-auto",
           activeModule === "terminal" && "hidden",
           !sidebarCollapsed && "max-lg:overflow-visible"
         )}
@@ -1269,14 +1289,19 @@ export default function App() {
         </header>
 
         {relatedModules.length > 0 && (
-          <Breadcrumb
+          <RelatedActionsBar
             current={activeModuleMeta}
             related={relatedModules}
             onNavigate={navigateModule}
           />
         )}
 
-        <section className="module-page">
+        <section
+          className={cn(
+            "module-page",
+            (activeModule === "execute" || activeModule === "playbooks") && "flex min-h-0 flex-1 flex-col",
+          )}
+        >
         {activeModule === "dashboard" && (
           <Dashboard
             hosts={hosts}
@@ -1290,8 +1315,7 @@ export default function App() {
 
         {activeModule === "hosts" && (
           <div className="space-y-4">
-          <LocalEnvironmentsCard />
-          <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(340px,0.6fr)] items-start gap-[18px] max-lg:grid-cols-1">
+            <LocalEnvironmentsCard />
             <HostList
               hosts={hosts}
               groups={groups}
@@ -1299,12 +1323,15 @@ export default function App() {
               selectedHost={selectedHost}
               selectedGroup={selectedGroup}
               connectionStatuses={connectionStatuses}
+              connectionProgress={connectionProgress}
+              highlightHost={highlightedHost}
               onSelect={setSelectedHost}
               onGroupSelect={setSelectedGroup}
               onCreateGroup={handleCreateGroup}
               onRenameGroup={handleRenameGroup}
               onDeleteGroup={handleDeleteGroup}
-              onEdit={setEditingHost}
+              onOpenAddHost={openAddHostDrawer}
+              onEdit={openEditHostDrawer}
               onRemove={handleRemoveHost}
               onBatchRemove={handleBatchRemoveHosts}
               onRefresh={refresh}
@@ -1314,17 +1341,22 @@ export default function App() {
               onForgetOpenssh={handleForgetOpenssh}
               onImportNetcatty={openNetcattyImport}
             />
-            <AddHostForm
-              hosts={hosts}
-              groups={groups}
-              proxies={proxies}
-              initialGroup={selectedGroup}
-              editingHost={editingHost}
-              onCancelEdit={cancelHostEdit}
-              onSaved={handleHostSaved}
-              onImportNetcatty={openNetcattyImport}
-            />
-          </div>
+            <HostDrawer
+              open={isHostDrawerOpen}
+              editingHostName={editingHost?.name ?? null}
+              onClose={closeHostDrawer}
+            >
+              <AddHostForm
+                hosts={hosts}
+                groups={groups}
+                proxies={proxies}
+                initialGroup={selectedGroup}
+                editingHost={editingHost}
+                onCancelEdit={closeHostDrawer}
+                onSaved={handleHostSaved}
+                onImportNetcatty={openNetcattyImport}
+              />
+            </HostDrawer>
           </div>
         )}
 
@@ -1335,10 +1367,15 @@ export default function App() {
         {activeModule === "recordings" && <RecordingsPanel />}
 
         {activeModule === "execute" && (
-          <div className="grid gap-[18px]">
-            <ExecPanel hosts={hosts} initialHost={selectedHost} onExecComplete={refreshAudit} />
-            <MultiExecPanel hosts={hosts} onExecComplete={refreshAudit} />
-          </div>
+          <ExecutionWorkbench
+            hosts={hosts}
+            initialHost={selectedHost}
+            initialCommand={execInitialCommand}
+            carryEpoch={execCarryEpoch}
+            preferredMode={execPreferredMode}
+            onPreferredModeApplied={clearExecPreferredMode}
+            onExecComplete={refreshAudit}
+          />
         )}
 
         {activeModule === "files-sessions" && (
@@ -1361,7 +1398,16 @@ export default function App() {
 
         {activeModule === "keys" && <KeysPanel onChanged={handleKeyChanged} />}
 
-        {activeModule === "playbooks" && <PlaybooksPanel hosts={hosts} />}
+        {activeModule === "playbooks" && (
+          <ExecutionWorkbench
+            hosts={hosts}
+            initialHost={selectedHost}
+            initialCommand={execInitialCommand}
+            carryEpoch={execCarryEpoch}
+            preferredMode="playbooks"
+            onExecComplete={refreshAudit}
+          />
+        )}
 
         {activeModule === "audit" && (
           <div className="grid gap-[18px]">
@@ -1409,8 +1455,25 @@ export default function App() {
         open={terminalDrawer !== null}
         host={terminalDrawer?.host ?? ""}
         command={terminalDrawer?.command ?? null}
+        slotId={terminalDrawer ? `drawer-${terminalDrawer.id}` : null}
+        connected={drawerConnected}
         onClose={closeTerminalDrawer}
+        onOpenInTerminal={openDrawerInTerminal}
       />
+      {dockedPtys.map((item) => (
+        <DockedView
+          key={item.id}
+          slotId={item.sessionId ? `session-${item.sessionId}` : `drawer-${item.id}`}
+        >
+          <LiveTerminal
+            host={item.host}
+            command={item.command}
+            onConnectedChange={(connected) => {
+              if (terminalDrawer?.id === item.id) setDrawerConnected(connected);
+            }}
+          />
+        </DockedView>
+      ))}
 
       <ConfirmHost />
       <NetcattyImportDialog
@@ -1419,5 +1482,6 @@ export default function App() {
         onImported={refresh}
       />
     </div>
+    </TerminalDock>
   );
 }

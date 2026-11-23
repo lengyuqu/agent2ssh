@@ -12,7 +12,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { memo, useMemo, useState  } from "react";
+import { memo, useEffect, useMemo, useRef, useState  } from "react";
 import {
   createColumnHelper,
   getCoreRowModel,
@@ -34,6 +34,13 @@ import { Input } from "./ui/input";
 import { EmptyState, InlineAlert } from "./ui/state";
 import { cn } from "../lib/utils";
 
+export type HostConnectionProgress = {
+  host: string;
+  message: string;
+  percent: number;
+  busy: boolean;
+};
+
 type Props = {
   hosts: HostProfile[];
   groups: HostGroup[];
@@ -47,6 +54,11 @@ type Props = {
   onRenameGroup: (id: string, name: string) => void | Promise<void>;
   onDeleteGroup: (id: string) => void | Promise<void>;
   onEdit: (host: HostProfile) => void;
+  onOpenAddHost: () => void;
+  /** In-flight (or just-finished) SSH connect. Only the matching row renders it. */
+  connectionProgress?: HostConnectionProgress | null;
+  /** Host just saved. The row is highlighted and scrolled into view. */
+  highlightHost?: string | null;
   onRemove: (name: string) => void;
   onBatchRemove: (names: string[]) => void;
   onRefresh: () => void;
@@ -84,6 +96,9 @@ function HostList({
   onRenameGroup,
   onDeleteGroup,
   onEdit,
+  onOpenAddHost,
+  connectionProgress,
+  highlightHost,
   onRemove,
   onBatchRemove,
   onRefresh,
@@ -103,6 +118,7 @@ function HostList({
   const [filters, setFilters] = useState({ env: "", role: "", owner: "", tag: "" });
   const [sorting, setSorting] = useState<SortingState>([]);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
+  const listRef = useRef<HTMLDivElement>(null);
 
   const hostCountsByGroup = useMemo(() => {
     const counts = new Map<string, number>();
@@ -182,15 +198,22 @@ function HostList({
       columnHelper.accessor((row) => row.host.name, {
         id: "name",
         header: t("Name"),
-        cell: ({ row }) => (
-          <span className="flex min-w-0 items-center gap-2 font-semibold">
-            <span
-              className={cn("size-2 shrink-0 rounded-full", row.original.connState.dotClass)}
-              title={row.original.connState.label}
-            />
-            <span className="truncate">{row.original.host.name}</span>
-          </span>
-        ),
+        cell: ({ row }) => {
+          const name = row.original.host.name;
+          const progress = connectionProgress?.host === name ? connectionProgress : null;
+          return (
+            <div className="min-w-0">
+              <span className="flex min-w-0 items-center gap-2 font-semibold">
+                <span
+                  className={cn("size-2 shrink-0 rounded-full", row.original.connState.dotClass)}
+                  title={row.original.connState.label}
+                />
+                <span className="truncate">{name}</span>
+              </span>
+              {progress && <HostConnectionProgressBar progress={progress} />}
+            </div>
+          );
+        },
         enableHiding: false,
       }),
       columnHelper.accessor((row) => row.address, {
@@ -306,7 +329,7 @@ function HostList({
       }),
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [t, proxies, onForgetOpenssh]
+    [t, proxies, onForgetOpenssh, connectionProgress]
   );
 
   const table = useReactTable({
@@ -322,6 +345,14 @@ function HostList({
   });
 
   const selectedNames = Object.keys(rowSelection).filter((name) => rowSelection[name]);
+
+  useEffect(() => {
+    if (!highlightHost) return;
+    const row = [...(listRef.current?.querySelectorAll<HTMLElement>("[data-host]") ?? [])].find(
+      (element) => element.dataset.host === highlightHost,
+    );
+    row?.scrollIntoView({ block: "nearest" });
+  }, [highlightHost, rows]);
 
   return (
     <Card className="space-y-4 p-4">
@@ -341,6 +372,10 @@ function HostList({
         >
           <ShieldCheck size={15} />
         </IconButton>
+        <Button size="sm" className="ml-auto" onClick={onOpenAddHost}>
+          <Plus size={14} />
+          {t("Add Host")}
+        </Button>
       </div>
 
       <HostPolicyLine host={selectedNames.length === 1 ? selectedNames[0] : null} />
@@ -492,12 +527,12 @@ function HostList({
         </div>
       )}
 
-      <div className="max-h-[430px] overflow-auto pr-0.5">
+      <div ref={listRef} className="max-h-[min(70vh,calc(100vh-16rem))] overflow-auto pr-0.5">
         {hosts.length === 0 ? (
           <EmptyState
             icon={Server}
             title={t("No hosts configured")}
-            description={t("Add one on the right, or import a Netcatty backup.")}
+            description={t("Add a host, or import a Netcatty backup.")}
             action={{ label: t("Import from Netcatty"), onClick: onImportNetcatty }}
           />
         ) : filteredHosts.length === 0 ? (
@@ -508,10 +543,12 @@ function HostList({
             minWidth={560}
             wrapperClassName="contents"
             onRowClick={(row) => onSelect(row.original.host.name)}
+            rowAttrs={(row) => ({ "data-host": row.original.host.name })}
             rowClassName={(row) =>
               cn(
                 "cursor-pointer border-b border-border transition-colors last:border-b-0",
                 row.original.host.name === selectedHost ? "bg-canvas-2" : "hover:bg-muted/50",
+                row.original.host.name === highlightHost && "bg-primary/15 ring-1 ring-inset ring-primary",
                 !row.original.connected && "opacity-75"
               )
             }
@@ -575,6 +612,32 @@ function HostList({
         />
       )}
     </Card>
+  );
+}
+
+function HostConnectionProgressBar({ progress }: { progress: HostConnectionProgress }) {
+  const percent = Math.round(Math.max(0, Math.min(100, progress.percent)));
+  return (
+    <div className="mt-1 min-w-[8rem]">
+      <div className="flex items-center gap-2 text-[10px] font-medium text-muted-foreground">
+        <span className="min-w-0 flex-1 truncate">{progress.message}</span>
+        <span className="shrink-0 tabular-nums">{percent}%</span>
+      </div>
+      <div
+        className="mt-0.5 h-1 overflow-hidden rounded-full bg-border"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={percent}
+        aria-busy={progress.busy}
+        aria-label={progress.message}
+      >
+        <div
+          className="h-full rounded-full bg-primary transition-all duration-300"
+          style={{ width: `${Math.max(5, percent)}%` }}
+        />
+      </div>
+    </div>
   );
 }
 

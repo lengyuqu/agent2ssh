@@ -39,7 +39,7 @@ type Props = {
   initialGroup: string;
   editingHost?: HostProfile | null;
   onCancelEdit?: () => void;
-  onSaved: () => void | Promise<void>;
+  onSaved: (name: string) => void | Promise<void>;
   /** Open the Netcatty importer. Shown only while adding, once a host exists. */
   onImportNetcatty?: () => void;
 };
@@ -141,7 +141,7 @@ function AddHostForm({
       } else {
         await api.addHost(hostPayload);
       }
-      await onSaved();
+      await onSaved(hostPayload.name);
       setForm(emptyForm);
       onCancelEdit?.();
     } catch (err) {

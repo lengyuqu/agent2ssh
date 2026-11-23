@@ -31,8 +31,8 @@ import {
  * invariant that ties them together is pinned in `nav.test.ts` instead.
  *
  * `MODULES` order carries no meaning for the user: the sidebar renders from
- * `SIDEBAR_GROUPS`, and the Ctrl/⌘+1..9 shortcuts index into `SIDEBAR_ORDER`
- * so "the Nth item in the rail" and "Ctrl/⌘+N" are always the same module.
+ * `SIDEBAR_GROUPS`. Ctrl/⌘+1..9 indexes `SHORTCUT_MODULES`, the daily set,
+ * because cockpit grouping puts Hosts past the ninth row.
  */
 export const MODULES = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -60,41 +60,48 @@ export const MODULES = [
 /** A module id, derived from the registry so the two cannot drift. */
 export type ModuleId = (typeof MODULES)[number]["id"];
 
-// Sidebar display structure. The top pinned group holds approvals (its
-// pending-count badge must stay the first thing in the rail) and the dashboard
-// (the page the console opens on, so the active highlight starts at the top).
-// The rest sit in three functional groups so twenty entries scan by domain
-// instead of by position, and Help is pinned to the bottom of the rail.
-// Group titles are i18n keys rendered through t() in App.tsx; an empty title
-// marks a pinned group.
+// Sidebar display structure: four cockpits, then Help pinned to the bottom of
+// the rail (`pinBottom` + an empty title — App.tsx pushes that group with
+// `mt-auto` and skips the label). Group titles are i18n keys rendered through
+// t() in App.tsx. Order inside a group is the rail order, and therefore the
+// Ctrl/⌘+1..9 order: shortcuts follow the rail.
 export const SIDEBAR_GROUPS: ReadonlyArray<{
   title: string;
   modules: ModuleId[];
   pinBottom?: boolean;
 }> = [
-  { title: "", modules: ["approvals", "dashboard"] },
+  {
+    title: "Review",
+    modules: ["approvals", "dashboard", "audit", "recordings", "activity"],
+  },
   {
     title: "Operations",
-    modules: [
-      "hosts",
-      "proxies",
-      "terminal",
-      "resident-sessions",
-      "execute",
-      "files-sessions",
-      "tunnels",
-      "playbooks",
-      "containers",
-    ],
+    modules: ["terminal", "resident-sessions", "execute", "playbooks", "tunnels", "files-sessions"],
   },
-  { title: "Observability", modules: ["activity", "audit", "recordings", "topology"] },
-  { title: "System", modules: ["mcp-agents", "keys", "sync", "config"] },
+  {
+    title: "Fleet",
+    modules: ["hosts", "topology", "containers", "proxies", "keys"],
+  },
+  { title: "System", modules: ["mcp-agents", "sync", "config"] },
   { title: "", modules: ["help"], pinBottom: true },
 ];
 
-// Flat sidebar render order, derived from the groups. The Ctrl/⌘+1..9
-// shortcuts index into it (App.tsx), so they always follow what the rail shows.
+// Flat sidebar render order, derived from the groups.
 export const SIDEBAR_ORDER: ModuleId[] = SIDEBAR_GROUPS.flatMap((group) => group.modules);
+
+// Ctrl/⌘+1..9. The rail is grouped by cockpit, which pushes Hosts past the
+// ninth row, so the shortcuts are this daily set instead of the rail order.
+export const SHORTCUT_MODULES: ModuleId[] = [
+  "approvals",
+  "dashboard",
+  "terminal",
+  "execute",
+  "hosts",
+  "files-sessions",
+  "tunnels",
+  "audit",
+  "activity",
+];
 
 // V3-4: mesh navigation, not a tab trail — each module lists a handful of the
 // other modules an operator is likely to jump to from here.

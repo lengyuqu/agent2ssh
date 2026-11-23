@@ -122,16 +122,20 @@ function host(name: string): HostProfile {
 
 const hosts = [host("zos"), host("db")];
 
-function renderPanel(props: Partial<Parameters<typeof TerminalPanel>[0]> = {}) {
-  return render(
+function panelElement(props: Partial<Parameters<typeof TerminalPanel>[0]> = {}) {
+  return (
     <I18nProvider>
       <ThemeProvider>
         <ToastProvider>
           <TerminalPanel hosts={hosts} groups={groups} connectionStatuses={[]} {...props} />
         </ToastProvider>
       </ThemeProvider>
-    </I18nProvider>,
+    </I18nProvider>
   );
+}
+
+function renderPanel(props: Partial<Parameters<typeof TerminalPanel>[0]> = {}) {
+  return render(panelElement(props));
 }
 
 function hostRow(name: string) {
@@ -217,6 +221,34 @@ describe("host tree → sessions", () => {
     renderPanel({ initialHost: "db" });
     fireEvent.click(screen.getByRole("button", { name: "New terminal" }));
     expect(terminals().map((node) => node.dataset.host)).toEqual(["db"]);
+  });
+
+  it("focuses or opens the drawer host without replaying a command", () => {
+    const view = renderPanel();
+    openHost("zos");
+    expect(terminals()).toHaveLength(1);
+    // An existing session is focused, not duplicated, and nothing is typed.
+    view.rerender(panelElement({ focusRequest: { host: "zos", dockId: null, nonce: 1 } }));
+    expect(terminals().map((node) => node.dataset.host)).toEqual(["zos"]);
+    expect(visibleTerminals().map((node) => node.dataset.host)).toEqual(["zos"]);
+    expect(registry.terminals.every((terminal) => terminal.sent.length === 0)).toBe(true);
+
+    // A host with no session gets one tab. The drawer's terminal id is not a
+    // second socket, and the audit/approval command is not injected.
+    view.rerender(panelElement({ focusRequest: { host: "db", dockId: null, nonce: 2 } }));
+    expect(terminals().map((node) => node.dataset.host)).toEqual(["zos", "db"]);
+    expect(visibleTerminals().map((node) => node.dataset.host)).toEqual(["db"]);
+    expect(registry.terminals.every((terminal) => terminal.sent.length === 0)).toBe(true);
+  });
+
+  it("renders a slot for the adopted drawer session instead of a second terminal", () => {
+    const view = renderPanel();
+    openHost("zos");
+    const sessionId = document.querySelector("[data-session-id]")?.getAttribute("data-session-id");
+    expect(sessionId).toBeTruthy();
+    view.rerender(panelElement({ focusRequest: { host: "zos", dockId: "dock-1", nonce: 1 } }));
+    expect(screen.queryAllByTestId("terminal")).toHaveLength(0);
+    expect(document.querySelector(`[data-terminal-slot="session-${sessionId}"]`)).toBeTruthy();
   });
 });
 

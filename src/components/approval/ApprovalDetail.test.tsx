@@ -22,7 +22,11 @@ function request(rewritable: boolean): ApprovalRequest {
   };
 }
 
-function renderDetail(approval: ApprovalRequest, onApprove = vi.fn()) {
+function renderDetail(
+  approval: ApprovalRequest,
+  onApprove = vi.fn(),
+  onCopyAndExecute = vi.fn(),
+) {
   render(
     <I18nProvider>
       <ApprovalDetail
@@ -30,7 +34,7 @@ function renderDetail(approval: ApprovalRequest, onApprove = vi.fn()) {
         busy={false}
         onApprove={onApprove}
         onReject={vi.fn()}
-        onCopyAndExecute={vi.fn()}
+        onCopyAndExecute={onCopyAndExecute}
       />
     </I18nProvider>
   );
@@ -56,9 +60,33 @@ describe("ApprovalDetail edit then execute", () => {
   });
 
   it("falls back to copy-and-open when the request cannot be rewritten", () => {
-    renderDetail(request(false));
+    const onCopyAndExecute = vi.fn();
+    renderDetail(request(false), vi.fn(), onCopyAndExecute);
     expect(screen.queryByText("Edit then execute")).toBeNull();
     expect(screen.getByText("Copy command and open Execution")).toBeTruthy();
+    expect(screen.getByText("Open in Execution")).toBeTruthy();
+    fireEvent.click(screen.getByText("Copy command and open Execution"));
+    expect(onCopyAndExecute).toHaveBeenCalledWith("rm -rf /tmp/build");
+  });
+
+  it("opens Execution with the trimmed draft from any pending card", () => {
+    const onCopyAndExecute = vi.fn();
+    renderDetail(request(true), vi.fn(), onCopyAndExecute);
+    fireEvent.click(screen.getByText("Edit then execute"));
+    fireEvent.change(screen.getByLabelText("Edited command"), {
+      target: { value: "  docker ps  " },
+    });
+    fireEvent.click(screen.getByText("Open in Execution"));
+    expect(onCopyAndExecute).toHaveBeenCalledWith("docker ps");
+  });
+
+  it("carries the requested command when the draft is blank", () => {
+    const onCopyAndExecute = vi.fn();
+    renderDetail(request(true), vi.fn(), onCopyAndExecute);
+    fireEvent.click(screen.getByText("Edit then execute"));
+    fireEvent.change(screen.getByLabelText("Edited command"), { target: { value: "   " } });
+    fireEvent.click(screen.getByText("Open in Execution"));
+    expect(onCopyAndExecute).toHaveBeenCalledWith("rm -rf /tmp/build");
   });
 
   it("does not offer approval of an emptied command", () => {

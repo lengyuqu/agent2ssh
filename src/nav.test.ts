@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { zh } from "./i18n";
-import { MODULES, RELATED_MODULES, SIDEBAR_GROUPS, SIDEBAR_ORDER } from "./nav";
+import { MODULES, RELATED_MODULES, SHORTCUT_MODULES, SIDEBAR_GROUPS, SIDEBAR_ORDER } from "./nav";
 
 /**
  * The module registry has several lists that must agree, and a missing entry
@@ -36,33 +36,45 @@ describe("module registry", () => {
     const grouped = SIDEBAR_GROUPS.flatMap((group) => group.modules);
     expect([...grouped].sort()).toEqual([...ids].sort());
     expect(new Set(grouped).size).toBe(grouped.length);
-    // The first group carries the approvals pin and must stay titleless so the
-    // pending-count badge sits at the very top of the rail; the dashboard (the
-    // page the console opens on) sits right under it.
-    expect(SIDEBAR_GROUPS[0]).toEqual({ title: "", modules: ["approvals", "dashboard"] });
-    // Help is pinned to the bottom of the rail.
-    expect(SIDEBAR_GROUPS[SIDEBAR_GROUPS.length - 1]).toEqual({ title: "", modules: ["help"], pinBottom: true });
+    // Four cockpits, in rail order. Approvals stays first inside Review so its
+    // pending-count badge is the top of the rail. Help is its own titleless
+    // group pinned to the bottom.
+    expect(SIDEBAR_GROUPS).toEqual([
+      { title: "Review", modules: ["approvals", "dashboard", "audit", "recordings", "activity"] },
+      {
+        title: "Operations",
+        modules: ["terminal", "resident-sessions", "execute", "playbooks", "tunnels", "files-sessions"],
+      },
+      { title: "Fleet", modules: ["hosts", "topology", "containers", "proxies", "keys"] },
+      { title: "System", modules: ["mcp-agents", "sync", "config"] },
+      { title: "", modules: ["help"], pinBottom: true },
+    ]);
+    expect(zh["Review"]).toBe("审查与态势");
+    expect(zh["Operations"]).toBe("终端与运维");
+    expect(zh["Fleet"]).toBe("资产与网络");
+    expect(zh["System"]).toBe("系统与配置");
     for (const group of SIDEBAR_GROUPS) {
       if (!group.title) continue;
       expect(zh[group.title], `missing zh title for ${group.title}`).toBeTruthy();
     }
   });
 
-  it("maps Ctrl/⌘+1..9 to the first nine sidebar entries", () => {
-    // App.tsx indexes SIDEBAR_ORDER for the numeric shortcuts, so Ctrl/⌘+N is
-    // always the Nth item a user sees in the rail. Pinned here so a regroup
-    // that moves a shortcut is a visible, deliberate change.
-    expect(SIDEBAR_ORDER.slice(0, 9)).toEqual([
+  it("maps Ctrl/⌘+1..9 to the daily modules, not the rail order", () => {
+    // The cockpits keep related modules together, so the first nine rows are
+    // not the nine an operator hits most. App.tsx indexes SHORTCUT_MODULES.
+    expect(SHORTCUT_MODULES).toEqual([
       "approvals",
       "dashboard",
-      "hosts",
-      "proxies",
       "terminal",
-      "resident-sessions",
       "execute",
+      "hosts",
       "files-sessions",
       "tunnels",
+      "audit",
+      "activity",
     ]);
+    expect(new Set(SHORTCUT_MODULES).size).toBe(9);
+    for (const id of SHORTCUT_MODULES) expect(ids).toContain(id);
   });
 
   it("relates only known modules, never to itself", () => {

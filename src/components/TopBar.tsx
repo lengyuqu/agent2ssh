@@ -15,6 +15,8 @@ type TopBarProps = {
   pendingApprovalsCount: number;
   onOpenPalette: () => void;
   onOpenApprovals: () => void;
+  /** True while an SSH connect is in flight. Pulses the connection pill. */
+  connectionBusy?: boolean;
   /** Right-end slot (SettingsMenu keeps its own props). */
   actions?: ReactNode;
 };
@@ -31,6 +33,7 @@ function TopBar({
   pendingApprovalsCount,
   onOpenPalette,
   onOpenApprovals,
+  connectionBusy = false,
   actions,
 }: TopBarProps) {
   const { t } = useI18n();
@@ -83,7 +86,11 @@ function TopBar({
         </span>
 
         <span
-          className="hidden shrink-0 items-center gap-1.5 lg:flex"
+          className={cn(
+            "hidden shrink-0 items-center gap-1.5 lg:flex",
+            connectionBusy && "animate-pulse text-primary"
+          )}
+          aria-busy={connectionBusy || undefined}
           title={t("Active embedded SSH connections")}
         >
           <Unplug size={11} />

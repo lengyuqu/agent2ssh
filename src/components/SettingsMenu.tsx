@@ -24,12 +24,19 @@ import {
 import { memo, useEffect, useRef, useState  } from "react";
 import { api, getDaemonUrl, reportError } from "../api";
 import { useI18n } from "../i18n";
-import type { DaemonDiagnosis, DaemonHealth, DiagnosticLogEntry, ExecutionGateStatus } from "../types";
+import type {
+  DaemonDiagnosis,
+  DaemonHealth,
+  DiagnosticLogEntry,
+  ExecutionGateStatus,
+  WebhookConfig,
+} from "../types";
 import LanguageSwitcher from "./LanguageSwitcher";
 import HighlightSettings from "./HighlightSettings";
 import RedactionSettings from "./RedactionSettings";
 import AlgoPrefsDialog from "./AlgoPrefsDialog";
 import { Button } from "./ui/button";
+import { Input } from "./ui/input";
 import { confirmDialog } from "./ui/dialog";
 import { IconButton } from "./ui/icon-button";
 import { Spinner } from "./ui/state";
@@ -63,6 +70,24 @@ const SHORTCUTS: Array<{ keys: string[]; label: string }> = [
   { keys: ["Ctrl/⌘", "Shift", "A"], label: "Jump to pending approval" },
 ];
 
+// The popover is 390px wide, so a left rail would crush the existing
+// three-column daemon controls. A 2×2 segmented control fits instead.
+const SETTINGS_TABS = [
+  { id: "general", label: "General" },
+  { id: "daemon", label: "Daemon" },
+  { id: "security", label: "Security" },
+  { id: "diagnostics", label: "Diagnostics" },
+] as const;
+
+type SettingsTab = (typeof SETTINGS_TABS)[number]["id"];
+
+const WEBHOOK_EVENTS = [
+  { id: "approval_required", label: "Approval required" },
+  { id: "exec_blocked", label: "Command blocked" },
+  { id: "exec_completed", label: "Command finished" },
+  { id: "diagnostic_error", label: "Diagnostic error" },
+] as const;
+
 function SettingsMenu({
   gateStatus,
   gateBusy,
@@ -78,6 +103,7 @@ function SettingsMenu({
   const { t } = useI18n();
   const { theme, setTheme } = useTheme();
   const [open, setOpen] = useState(false);
+  const [section, setSection] = useState<SettingsTab>("general");
   const [refreshBusy, setRefreshBusy] = useState(false);
   const [healthBusy, setHealthBusy] = useState(false);
   const [daemonActionBusy, setDaemonActionBusy] = useState<"start" | "stop" | "restart" | null>(
@@ -122,6 +148,9 @@ function SettingsMenu({
   const [secretsMessage, setSecretsMessage] = useState<string | null>(null);
   // A22: SSH algorithm preferences. `null` means "not loaded yet / load failed",
   // which the status line renders as a neutral hint rather than a claim.
+  const [webhook, setWebhook] = useState<WebhookConfig | null>(null);
+  const [webhookMessage, setWebhookMessage] = useState<string | null>(null);
+  const [webhookBusy, setWebhookBusy] = useState(false);
   const [algoOpen, setAlgoOpen] = useState(false);
   const [algoCustom, setAlgoCustom] = useState<boolean | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -221,6 +250,52 @@ function SettingsMenu({
     void refreshDaemonDiagnosis();
     return () => { daemonDiagnosisRequest.current += 1; };
   }, [open]);
+
+  useEffect(() => {
+    if (!open || section !== "diagnostics") return;
+    let cancelled = false;
+    void api
+      .getWebhookConfig()
+      .then((config) => {
+        if (!cancelled) setWebhook(config);
+      })
+      .catch(() => {
+        if (!cancelled) setWebhookMessage(t("Webhook unavailable"));
+      });
+    return () => {
+      cancelled = true;
+    };
+    // `t` is stable in behavior; listing it refetches on every render of the mock.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, section]);
+
+  async function saveWebhook() {
+    if (!webhook || webhookBusy) return;
+    setWebhookBusy(true);
+    setWebhookMessage(null);
+    try {
+      await api.setWebhookConfig({
+        url: webhook.url?.trim() || null,
+        secret: webhook.secret?.trim() || null,
+        events: webhook.events,
+      });
+      setWebhookMessage(t("Webhook saved"));
+    } catch (err) {
+      setWebhookMessage(String(err));
+    } finally {
+      setWebhookBusy(false);
+    }
+  }
+
+  function toggleWebhookEvent(id: string) {
+    setWebhook((current) => {
+      if (!current) return current;
+      const events = current.events.includes(id)
+        ? current.events.filter((event) => event !== id)
+        : [...current.events, id];
+      return { ...current, events };
+    });
+  }
 
   // K1: set the master password (first time) or change it. Setting it for the
   // first time also encrypts any existing plaintext credentials.
@@ -570,7 +645,35 @@ function SettingsMenu({
             </IconButton>
           </div>
 
-          <section className="grid gap-2">
+          <div role="tablist" aria-label={t("Settings")} className="grid grid-cols-2 gap-1">
+            {SETTINGS_TABS.map((tab) => {
+              const selected = section === tab.id;
+              return (
+                <Button
+                  key={tab.id}
+                  variant="outline"
+                  size="sm"
+                  role="tab"
+                  id={`settings-tab-${tab.id}`}
+                  aria-selected={selected}
+                  aria-controls={`settings-panel-${tab.id}`}
+                  className={cn(
+                    "h-8 px-2 font-medium",
+                    selected
+                      ? "border-primary bg-primary/10 text-primary hover:bg-primary/10 hover:text-primary"
+                      : undefined
+                  )}
+                  onClick={() => setSection(tab.id)}
+                >
+                  {t(tab.label)}
+                </Button>
+              );
+            })}
+          </div>
+
+          {section === "daemon" && (
+          <>
+          <section id="settings-panel-daemon" className="grid gap-2">
             <div className={sectionTitleCls}>
               <Activity size={15} />
               {t("Execution gate")}
@@ -708,7 +811,10 @@ function SettingsMenu({
               {t("Refresh daemon health")}
             </Button>
           </section>
+          </>
+          )}
 
+          {section === "general" && (
           <section className="grid gap-2">
             <div className={sectionTitleCls}>
               <Download size={15} />
@@ -742,7 +848,10 @@ function SettingsMenu({
               </Button>
             </div>
           </section>
+          )}
 
+          {section === "security" && (
+          <>
           <section className="grid gap-2">
             <div className={sectionTitleCls}>
               <Lock size={15} />
@@ -811,7 +920,11 @@ function SettingsMenu({
               <span className="truncate">{t("Edit SSH algorithms")}</span>
             </Button>
           </section>
+          </>
+          )}
 
+          {section === "general" && (
+          <>
           <section className="grid gap-2">
             <div className={sectionTitleCls}>{t("Telemetry")}</div>
             <label className="flex items-start gap-2.5 text-sm">
@@ -833,12 +946,17 @@ function SettingsMenu({
             <div className={sectionTitleCls}>{t("Terminal highlights")}</div>
             <HighlightSettings />
           </section>
+          </>
+          )}
 
+          {section === "security" && (
           <section className="grid gap-2">
             <div className={sectionTitleCls}>{t("Redaction rules")}</div>
             <RedactionSettings />
           </section>
+          )}
 
+          {section === "daemon" && (
           <section className="grid gap-2">
             <div className={sectionTitleCls}>{t("Daemon controls")}</div>
             {canRequestUnboundStop && <p className="text-xs text-muted-foreground">{t("Health only shows that an endpoint responded; it does not verify daemon process identity. Quitting does not request shutdown, but the environment may still stop the daemon.")}</p>}
@@ -891,7 +1009,10 @@ function SettingsMenu({
               </div>
             )}
           </section>
+          )}
 
+          {section === "general" && (
+          <>
           <section className="grid gap-2">
             <div className={sectionTitleCls}>{t("Theme")}</div>
             <div className="grid grid-cols-2 gap-1.5">
@@ -951,7 +1072,10 @@ function SettingsMenu({
               ))}
             </div>
           </section>
+          </>
+          )}
 
+          {section === "daemon" && (
           <section className="grid gap-2">
             <div className={sectionTitleCls}>{t("Daemon console")}</div>
             <div
@@ -987,11 +1111,71 @@ function SettingsMenu({
               </span>
             </Button>
           </section>
+          )}
 
-          <section className="grid gap-2">
+          {section === "diagnostics" && (
+          <section id="settings-panel-diagnostics" className="grid gap-2">
             <div className={sectionTitleCls}>
               <FileText size={15} />
               {t("Diagnostics")}
+            </div>
+            <div className="grid gap-2 rounded-md border border-border p-2">
+              <div className="text-xs font-semibold text-muted-foreground">{t("Webhook")}</div>
+              <label className="grid gap-1 text-xs font-medium text-foreground/90">
+                {t("Webhook URL")}
+                <Input
+                  value={webhook?.url ?? ""}
+                  placeholder="https://example.test/hooks/agent2ssh"
+                  onChange={(event) =>
+                    setWebhook((current) => ({
+                      url: event.target.value,
+                      secret: current?.secret ?? null,
+                      events: current?.events ?? ["approval_required"],
+                    }))
+                  }
+                />
+              </label>
+              <label className="grid gap-1 text-xs font-medium text-foreground/90">
+                {t("Signing secret")}
+                <Input
+                  type="password"
+                  value={webhook?.secret ?? ""}
+                  onChange={(event) =>
+                    setWebhook((current) => ({
+                      url: current?.url ?? "",
+                      secret: event.target.value,
+                      events: current?.events ?? ["approval_required"],
+                    }))
+                  }
+                />
+              </label>
+              <div className="grid gap-1">
+                <div className="text-xs font-medium text-foreground/90">{t("Notify on")}</div>
+                {WEBHOOK_EVENTS.map((event) => (
+                  <label key={event.id} className="flex items-center gap-2 text-xs">
+                    <input
+                      type="checkbox"
+                      className="size-3.5 accent-primary"
+                      checked={webhook?.events.includes(event.id) ?? false}
+                      onChange={() => toggleWebhookEvent(event.id)}
+                    />
+                    {t(event.label)}
+                  </label>
+                ))}
+              </div>
+              <Button
+                variant="outline"
+                block
+                className="px-2 text-left font-bold"
+                onClick={() => void saveWebhook()}
+                disabled={webhookBusy}
+              >
+                {webhookBusy ? <Spinner size={16} /> : <CheckCircle2 size={16} />}
+                <span className="truncate">{t("Save webhook")}</span>
+              </Button>
+              {webhookMessage && (
+                <div className="break-words text-xs text-muted-foreground">{webhookMessage}</div>
+              )}
             </div>
             <div className="grid grid-cols-2 gap-2">
               <Button
@@ -1055,7 +1239,10 @@ function SettingsMenu({
               </pre>
             )}
           </section>
+          )}
 
+          {section === "general" && (
+          <>
           <section className="grid gap-2">
             <div className={sectionTitleCls}>{t("App")}</div>
             <Button
@@ -1118,6 +1305,8 @@ function SettingsMenu({
               <span className="truncate">{t("Open setup wizard")}</span>
             </Button>
           </section>
+          </>
+          )}
 
           <div className="flex items-center gap-2 border-t border-border pt-3 text-xs text-muted-foreground">
             <Activity size={15} />

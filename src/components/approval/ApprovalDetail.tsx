@@ -1,4 +1,4 @@
-import { Copy, Pencil } from "lucide-react";
+import { Copy, Pencil, SquareArrowOutUpRight } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useI18n } from "../../i18n";
 import type { ApprovalRequest, RiskLevel } from "../../types";
@@ -14,9 +14,9 @@ type Props = {
   /** `command` is set when the approver edited the command first. */
   onApprove: (command?: string) => void;
   onReject: () => void;
-  /** For requests that cannot be rewritten: copy the command and drop the
-   * operator into the Execution module instead. */
-  onCopyAndExecute: () => void;
+  /** Drop the operator into Execution with this command — the trimmed draft
+   * when it is non-empty, otherwise the requested command. */
+  onCopyAndExecute: (command: string) => void;
 };
 
 /** The backend reports which policy matched but not which fragment of the
@@ -74,6 +74,10 @@ export default function ApprovalDetail({
   ];
   const contextRows = candidateRows.filter((row): row is [string, string] => Boolean(row[1]));
 
+  // Draft wins when the operator typed one; a blank draft falls back to the
+  // request. Both the copy path and "Open in Execution" carry this string.
+  const carried = draft.trim() || approval.command;
+
   // The "Copy command and open Execution" button below calls this and then
   // `onCopyAndExecute`. It used to call only the latter, so the label promised
   // a clipboard write that never happened.
@@ -89,9 +93,13 @@ export default function ApprovalDetail({
     if (!clipboard?.writeText) {
       return;
     }
-    clipboard.writeText(approval?.command ?? "").catch(() => {
+    clipboard.writeText(carried).catch(() => {
       // Silent by design here; see L2-115.
     });
+  }
+
+  function openInExecution() {
+    onCopyAndExecute(carried);
   }
 
   return (
@@ -171,13 +179,17 @@ export default function ApprovalDetail({
             disabled={busy}
             onClick={() => {
               handleCopy();
-              onCopyAndExecute();
+              openInExecution();
             }}
           >
             <Copy size={14} />
             {t("Copy command and open Execution")}
           </Button>
         )}
+        <Button variant="outline" disabled={busy} onClick={openInExecution}>
+          <SquareArrowOutUpRight size={14} />
+          {t("Open in Execution")}
+        </Button>
         {editing ? (
           <Button
             disabled={busy || draft.trim() === ""}

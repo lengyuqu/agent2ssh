@@ -93,6 +93,7 @@ export function DataTable<T>({
   minWidth = 560,
   wrapperClassName = "overflow-x-auto",
   rowClassName,
+  rowAttrs,
   onRowClick,
   footer,
 }: {
@@ -101,6 +102,7 @@ export function DataTable<T>({
   minWidth?: number;
   wrapperClassName?: string;
   rowClassName?: (row: Row<T>) => string;
+  rowAttrs?: (row: Row<T>) => Record<string, string>;
   onRowClick?: (row: Row<T>) => void;
   footer?: ReactNode;
 }) {
@@ -134,6 +136,7 @@ export function DataTable<T>({
           {bodyRows.map((row) => (
             <tr
               key={row.id}
+              {...(rowAttrs ? rowAttrs(row) : {})}
               onClick={onRowClick ? () => onRowClick(row) : undefined}
               className={rowClassName ? rowClassName(row) : undefined}
             >

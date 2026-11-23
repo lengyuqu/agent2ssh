@@ -63,7 +63,7 @@ export default function HostDiffView({ results }: Props) {
   if (withOutput.length < 2) return null;
 
   return (
-    <Card className="space-y-3 p-4">
+    <Card className="flex min-h-0 flex-1 flex-col gap-3 p-4">
       <div className="flex items-center gap-2 font-semibold">
         <GitCompare size={16} className="text-muted-foreground" />
         {t("Compare hosts")}
@@ -97,7 +97,7 @@ export default function HostDiffView({ results }: Props) {
         </span>
       </div>
 
-      <pre className="m-0 max-h-[360px] overflow-auto rounded-md bg-canvas-0 p-0 font-mono text-[13px] text-foreground">
+      <pre className="m-0 min-h-[40vh] flex-1 overflow-auto rounded-md bg-canvas-0 p-0 font-mono text-[13px] text-foreground">
         {lines.length === 0 ? (
           <div className="px-3.5 py-2.5 text-muted-foreground">{t("(no output)")}</div>
         ) : (

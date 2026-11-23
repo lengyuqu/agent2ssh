@@ -32,6 +32,7 @@ import { useTheme, type Theme as AppTheme } from "../theme";
 import TerminalView, { type TerminalViewHandle } from "./TerminalView";
 import SnippetsDialog from "./SnippetsDialog";
 import SFTPPanel from "./SFTPPanel";
+import { TerminalSlot } from "../features/terminal/dock";
 import HostTree from "../features/terminal/HostTree";
 import SessionTabs from "../features/terminal/SessionTabs";
 import {
@@ -69,6 +70,16 @@ type Props = {
   connectionStatuses: ConnectionStatus[];
   /** Host selected elsewhere in the console; the strip's "+" opens a session to it. */
   initialHost?: string;
+  /**
+   * Drawer handoff. `dockId` names the already-mounted PTY. The panel focuses
+   * or creates the host's tab and renders a slot there instead of a second
+   * TerminalView, so the same socket moves in. No command is replayed.
+   */
+  focusRequest?: { host: string; dockId: string | null; nonce: number } | null;
+  /** Called with the tab that now owns `dockId`, once that tab exists. */
+  onDockAdopted?: (dockId: string, sessionId: string) => void;
+  /** The docked PTY should close when its tab does. */
+  onSessionClosed?: (sessionId: string) => void;
   onNavigateModule?: (id: ModuleId) => void;
 };
 
@@ -101,11 +112,16 @@ function TerminalPanel({
   groups,
   connectionStatuses,
   initialHost = "",
+  focusRequest = null,
+  onDockAdopted,
+  onSessionClosed,
   onNavigateModule,
 }: Props) {
   const { t } = useI18n();
   const { theme: appTheme } = useTheme();
   const [state, setState] = useState<TerminalState>(() => loadTerminalState());
+  const stateRef = useRef(state);
+  stateRef.current = state;
   const [focusMode, setFocusMode] = useState(false);
   const [terminalTheme, setTerminalTheme] = useState<TerminalThemeId>(() => initialTerminalTheme());
   const [resolvedSystemTheme, setResolvedSystemTheme] = useState<AppTheme>(() => systemTheme());
@@ -166,6 +182,27 @@ function TerminalPanel({
   useEffect(() => {
     saveTerminalState(state);
   }, [state]);
+
+  // Sessions whose pane shows the drawer's PTY instead of a new TerminalView.
+  const [dockedSessionIds, setDockedSessionIds] = useState<string[]>([]);
+  const onDockAdoptedRef = useRef(onDockAdopted);
+  onDockAdoptedRef.current = onDockAdopted;
+
+  // Drawer → main terminal. Focus or create the host tab, and if this handoff
+  // carries a dock id, that tab renders a slot for the already-open PTY.
+  // The command is not written here: null was already run by the daemon, and
+  // a non-null command was already typed in the drawer.
+  useEffect(() => {
+    if (!focusRequest?.host) return;
+    const next = focusOrOpenSession(stateRef.current, focusRequest.host);
+    const sessionId =
+      [...next.sessions].reverse().find((session) => session.host === focusRequest.host)?.id ?? "";
+    setState(next);
+    if (focusRequest.dockId && sessionId) {
+      setDockedSessionIds((ids) => (ids.includes(sessionId) ? ids : [...ids, sessionId]));
+      onDockAdoptedRef.current?.(focusRequest.dockId, sessionId);
+    }
+  }, [focusRequest]);
 
   // A host removed from the configuration takes its sessions and panes with it.
   useEffect(() => {
@@ -228,6 +265,8 @@ function TerminalPanel({
   }
 
   function close(id: string) {
+    setDockedSessionIds((ids) => (ids.includes(id) ? ids.filter((item) => item !== id) : ids));
+    onSessionClosed?.(id);
     historyRef.current.delete(id);
     terminalRefs.current.delete(id);
     setTerminalConnections((previous) => {
@@ -752,6 +791,7 @@ function TerminalPanel({
             return (
               <div
                 key={session.id}
+                data-session-id={session.id}
                 className="absolute"
                 style={
                   assigned && rect
@@ -766,6 +806,9 @@ function TerminalPanel({
                     : { visibility: "hidden", top: 0, left: 0, width: "100%", height: "100%", zIndex: 0 }
                 }
               >
+                {dockedSessionIds.includes(session.id) ? (
+                  <TerminalSlot id={`session-${session.id}`} className="h-full" />
+                ) : (
                 <TerminalView
                   ref={(handle) => {
                     if (handle) terminalRefs.current.set(session.id, handle);
@@ -813,6 +856,7 @@ function TerminalPanel({
                     });
                   }}
                 />
+                )}
                 {/* OSC 7 cwd chip — best-effort: only shells with integration report it. */}
                 {cwd && (
                   <span

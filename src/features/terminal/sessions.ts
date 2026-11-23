@@ -106,8 +106,10 @@ export function activateSession(state: TerminalState, sessionId: string): Termin
 }
 
 /**
- * A host-tree click: focus the host's most recent session when it has one,
- * otherwise open a new one. Repeat clicks therefore never pile up sessions.
+ * A host-tree click, and the drawer's "open in terminal" handoff: focus the
+ * host's most recent session when it has one, otherwise open a new one.
+ * Repeat clicks therefore never pile up sessions. `withPane` keeps that
+ * session in the focused pane only — one session, one pane.
  */
 export function focusOrOpenSession(state: TerminalState, host: string): TerminalState {
   const existing = [...state.sessions].reverse().find((session) => session.host === host);

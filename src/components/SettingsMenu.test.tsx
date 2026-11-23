@@ -15,6 +15,8 @@ const mockApi = vi.hoisted(() => ({
   daemonStopUnboundGraceful: vi.fn().mockResolvedValue("Request accepted; exit unverified"),
   daemonRestart: vi.fn(),
   daemonStatus: vi.fn().mockResolvedValue({ running: false, pid: null, message: "", diagnosis: null }),
+  getWebhookConfig: vi.fn().mockResolvedValue({ url: "", events: ["approval_required"], secret: "" }),
+  setWebhookConfig: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("../api", () => ({ api: mockApi, getDaemonUrl: () => "", reportError: vi.fn() }));
 vi.mock("../i18n", () => ({
@@ -43,16 +45,17 @@ beforeEach(() => {
   mockApi.daemonStatus.mockResolvedValue({ running: false, pid: null, message: "", diagnosis: null });
 });
 
-function openSettings() {
+function openSettings(tab: "General" | "Daemon" | "Security" | "Diagnostics" = "General") {
   const noop = () => {};
   render(<><ConfirmHost /><SettingsMenu gateStatus={null} gateBusy={false} gateCheckedAt={null}
     daemonHealth={null} daemonHealthCheckedAt={null} onGateToggle={noop}
     onGateRefresh={noop} onDaemonHealthRefresh={noop} onImportConfig={noop} onOpenSetup={noop} /></>);
   fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  if (tab !== "General") fireEvent.click(screen.getByRole("tab", { name: tab }));
 }
 
 it("requires matching confirmation before initializing the credential store", async () => {
-  openSettings();
+  openSettings("Security");
   await waitFor(() => expect(mockApi.secretsStatus).toHaveBeenCalled());
   fireEvent.change(screen.getByPlaceholderText("Master password"), { target: { value: "synthetic-one" } });
   fireEvent.change(screen.getByPlaceholderText("Confirm master password"), { target: { value: "synthetic-other" } });
@@ -68,7 +71,7 @@ it("requires matching confirmation before initializing the credential store", as
 
 it("requires explicit confirmation before requesting an unbound shutdown", async () => {
   mockApi.daemonSupportsUnboundGraceful.mockResolvedValue(true);
-  openSettings();
+  openSettings("Daemon");
   fireEvent.click(await screen.findByRole("button", { name: "Request unverified shutdown" }));
   expect(screen.getByText(/may stop the wrong daemon and expose the admin token/)).toBeTruthy();
   expect((screen.getByRole("button", { name: "Request unverified shutdown" }) as HTMLButtonElement).disabled).toBe(true);
@@ -110,7 +113,7 @@ it("shows the daemon_status record, observation and lock instead of only the hea
     message: "",
     diagnosis: diagnosisFor({ pid_lock: "held" }),
   });
-  openSettings();
+  openSettings("Daemon");
   expect(await screen.findByText("Diagnosis: identity unverified")).toBeTruthy();
   expect(screen.getByText("Record PID: 4242")).toBeTruthy();
   expect(screen.getByText("The OS observes the recorded PID live")).toBeTruthy();
@@ -128,7 +131,7 @@ it("relays a denied observation as unknown identity, not as an exit", async () =
       observation: { state: "denied", reason: "OpenProcess denied (error 5)" },
     }),
   });
-  openSettings();
+  openSettings("Daemon");
   const line = await screen.findByText(/denied inspection of this process/);
   expect(line.textContent).toContain("not evidence it exited");
 });
@@ -144,7 +147,7 @@ it("names the observation states that contradict or erode the record", async () 
       verdict: "stale",
     }),
   });
-  openSettings();
+  openSettings("Daemon");
   expect(await screen.findByText("The OS reports the recorded PID absent")).toBeTruthy();
 });
 
@@ -152,13 +155,13 @@ it("names the observation states that contradict or erode the record", async () 
 // states that instead of leaving only the legacy /health line.
 it("says the read-only diagnosis is unavailable instead of staying silent", async () => {
   mockApi.daemonStatus.mockResolvedValue({ running: false, pid: null, message: "", diagnosis: null });
-  openSettings();
+  openSettings("Daemon");
   expect(await screen.findByText("Read-only diagnosis unavailable")).toBeTruthy();
 });
 
 it("keeps the existing change-password flow for an initialized store", async () => {
   mockApi.secretsStatus.mockResolvedValue({ initialized: true, unlocked: true });
-  openSettings();
+  openSettings("Security");
   const input = await screen.findByPlaceholderText("New master password");
   expect(screen.queryByPlaceholderText("Confirm master password")).toBeNull();
   fireEvent.change(input, { target: { value: "synthetic-new" } });
@@ -194,7 +197,7 @@ it("shows the daemon_status verdict and its next step for a stale record", async
   const nextStep =
     "Run 'agent2ssh daemon clear-stale --expect-pid 4242' to remove the record only if it still matches and the PID stays absent. No process is signalled.";
   mockApi.daemonStatus.mockResolvedValue(diagnosisResult("stale", nextStep, 4242));
-  openSettings();
+  openSettings("Daemon");
   expect(await screen.findByText("Diagnosis: stale PID record")).toBeTruthy();
   expect(screen.getByText(nextStep)).toBeTruthy();
   expect(mockApi.daemonStatus).toHaveBeenCalledTimes(1);
@@ -211,7 +214,7 @@ it("shows the verdict without the next step when the daemon is healthy", async (
       1
     )
   );
-  openSettings();
+  openSettings("Daemon");
   expect(await screen.findByText("Diagnosis: health checks passed")).toBeTruthy();
   expect(screen.getByText("Health checks do not verify daemon process identity.")).toBeTruthy();
   expect(screen.queryByText(/Nothing to do/)).toBeNull();
@@ -219,7 +222,7 @@ it("shows the verdict without the next step when the daemon is healthy", async (
 
 it("renders no diagnosis line when daemon_status itself fails", async () => {
   mockApi.daemonStatus.mockRejectedValue(new Error("ipc broken"));
-  openSettings();
+  openSettings("Daemon");
   await waitFor(() => expect(mockApi.daemonStatus).toHaveBeenCalled());
   expect(screen.queryByText(/^Diagnosis:/)).toBeNull();
 });
@@ -229,7 +232,7 @@ it("ignores an older diagnosis that finishes after a newer refresh", async () =>
   mockApi.daemonStatus
     .mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }))
     .mockResolvedValueOnce(diagnosisResult("stale", "Inspect the stale record.", 42));
-  openSettings();
+  openSettings("Daemon");
   await waitFor(() => expect(mockApi.daemonStatus).toHaveBeenCalledTimes(1));
   fireEvent.click(screen.getByRole("button", { name: "Refresh daemon health" }));
   expect(await screen.findByText("Diagnosis: stale PID record")).toBeTruthy();
@@ -243,10 +246,11 @@ it("ignores a diagnosis from before the menu was closed and reopened", async () 
   mockApi.daemonStatus
     .mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }))
     .mockResolvedValueOnce(diagnosisResult("stale", "Inspect the stale record.", 42));
-  openSettings();
+  openSettings("Daemon");
   await waitFor(() => expect(mockApi.daemonStatus).toHaveBeenCalledTimes(1));
   fireEvent.click(screen.getByRole("button", { name: "Settings" }));
   fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  fireEvent.click(screen.getByRole("tab", { name: "Daemon" }));
   expect(await screen.findByText("Diagnosis: stale PID record")).toBeTruthy();
   await act(async () => finishFirst(diagnosisResult("healthy", "Old result", 1)));
   expect(screen.getByText("Diagnosis: stale PID record")).toBeTruthy();
@@ -257,7 +261,7 @@ it("refreshes the diagnosis after a failed daemon action", async () => {
     .mockResolvedValueOnce(diagnosisResult("healthy", "Old result", 1))
     .mockResolvedValueOnce(diagnosisResult("stale", "Inspect the stale record.", 42));
   mockApi.daemonRestart.mockRejectedValue(new Error("restart failed"));
-  openSettings();
+  openSettings("Daemon");
   await screen.findByText("Diagnosis: health checks passed");
   fireEvent.click(screen.getByRole("button", { name: "Restart daemon" }));
   expect(await screen.findByText("Error: restart failed")).toBeTruthy();
@@ -268,7 +272,7 @@ it("does not show a pre-action diagnosis while a restart is in progress", async 
   let finishRestart!: (value: { message: string }) => void;
   mockApi.daemonStatus.mockResolvedValue(diagnosisResult("stale", "Inspect the record.", 42));
   mockApi.daemonRestart.mockImplementationOnce(() => new Promise((resolve) => { finishRestart = resolve; }));
-  openSettings();
+  openSettings("Daemon");
   await screen.findByText("Diagnosis: stale PID record");
   fireEvent.click(screen.getByRole("button", { name: "Restart daemon" }));
   expect(screen.queryByText(/^Diagnosis:/)).toBeNull();
@@ -277,4 +281,22 @@ it("does not show a pre-action diagnosis while a restart is in progress", async 
   expect(screen.queryByText(/^Diagnosis:/)).toBeNull();
   await act(async () => finishRestart({ message: "Restarted" }));
   expect(await screen.findByText("Diagnosis: stale PID record", {}, { timeout: 2000 })).toBeTruthy();
+});
+
+it("saves a webhook from the diagnostics tab", async () => {
+  openSettings("Diagnostics");
+  await waitFor(() => expect(mockApi.getWebhookConfig).toHaveBeenCalled());
+  fireEvent.change(screen.getByPlaceholderText("https://example.test/hooks/agent2ssh"), {
+    target: { value: "https://hooks.test/a2s" },
+  });
+  fireEvent.click(screen.getByRole("checkbox", { name: "Command finished" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save webhook" }));
+  await waitFor(() =>
+    expect(mockApi.setWebhookConfig).toHaveBeenCalledWith({
+      url: "https://hooks.test/a2s",
+      secret: null,
+      events: ["approval_required", "exec_completed"],
+    }),
+  );
+  expect(await screen.findByText("Webhook saved")).toBeTruthy();
 });

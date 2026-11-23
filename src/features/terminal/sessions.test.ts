@@ -101,6 +101,30 @@ describe("opening sessions", () => {
     expect(clicked.panes).toEqual([null, state.sessions[0].id]);
     expect(clicked.sessions).toHaveLength(2);
   });
+
+  it("adopts a drawer host into exactly one pane, focusing an existing session", () => {
+    const base = stateWith(["zos", "db"]);
+    const split = setLayout(
+      { ...base, panes: [base.sessions[0].id, base.sessions[1].id], focusedPane: 1 },
+      "row-2",
+    );
+    const zosId = base.sessions[0].id;
+    // The session already occupies pane 0. Focusing it from the other pane
+    // moves it; it must not remain rendered in both.
+    const focused = focusOrOpenSession(split, "zos");
+    expect(focused.sessions).toBe(split.sessions);
+    expect(focused.panes.filter((id) => id === zosId)).toEqual([zosId]);
+    expect(focused.panes[focused.focusedPane]).toBe(zosId);
+
+    const again = focusOrOpenSession(focused, "zos");
+    expect(again.sessions).toBe(focused.sessions);
+    expect(again.panes.filter((id) => id === zosId)).toHaveLength(1);
+
+    const opened = focusOrOpenSession(emptyTerminalState(), "db");
+    expect(opened.sessions.map((session) => session.host)).toEqual(["db"]);
+    expect(opened.panes).toEqual([opened.sessions[0].id]);
+    expect(focusOrOpenSession(opened, "")).toBe(opened);
+  });
 });
 
 describe("closing sessions", () => {

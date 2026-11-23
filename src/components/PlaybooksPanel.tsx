@@ -332,7 +332,7 @@ function PlaybooksPanel({ hosts }: Props) {
   }
 
   return (
-    <Card className="space-y-3 p-4">
+    <Card className="min-h-0 flex-1 space-y-3 overflow-auto p-4">
       <div className="flex items-center gap-2 font-semibold">
         <BookOpen size={16} className="text-muted-foreground" />
         {t("Playbooks")}
