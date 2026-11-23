@@ -232,6 +232,21 @@ jobs:
     # in about 19 minutes. The bound still catches a hang; it just no longer
     # sits below the cold-start cost.
     timeout-minutes: 90
+    # Three Windows legs have died inside a cargo step with the annotation "The
+    # hosted runner lost communication with the server", which names CPU/memory
+    # starvation, and none of the three uploaded a log archive — while the macOS
+    # and Linux legs of the same runs passed and their logs are retrievable
+    # (44535711205, 45052551470, 45123017208). Two followed a Rust change, so the
+    # leg had to recompile and relink the top-level crate. With no `[profile.*]`
+    # override the dev profile carries full debuginfo and incremental
+    # compilation, and the no-default-features rlib is 143 MB with a 104 MB test
+    # binary behind it. Line tables keep file:line in a panic backtrace, which is
+    # what diagnosing the next failure needs, without the variable info that
+    # dominates the link; incremental artifacts are worthless across CI runs and
+    # are a large part of what `Post Cache cargo` has to save.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_INCREMENTAL: "false"
     strategy:
       matrix:
         include:
@@ -280,6 +295,11 @@ jobs:
         run: npm test
 
       - name: Rust unit tests
+        # 30, not the job's 90: run 45123017208 died here after 45m42s with the
+        # runner-lost-communication annotation and no log archive. A step bound
+        # below that fires while the runner is still alive, so the step fails and
+        # the log survives to say where it stopped. Warm this step is 1m25s.
+        timeout-minutes: 30
         run: cargo test --no-default-features --lib
         working-directory: src-tauri
 
@@ -321,7 +341,15 @@ jobs:
         working-directory: src-tauri
 
       - name: Rust CLI contract tests
-        run: cargo test --no-default-features --test cli_contract
+        # Healthy this step is 7-10s on Windows (seven green runs, 11-17 to
+        # 11-21) and 6.64s on real Windows hardware, so 10 minutes is generous.
+        # Run 45052551470 spent 45m22s here and the runner died with it, leaving
+        # no log. Serial plus --nocapture is the shape the desktop daemon
+        # lifecycle step above uses for the same reason: the last test name
+        # printed is the one that hung, and a panic reaches the log when it
+        # happens rather than after the whole binary finishes.
+        timeout-minutes: 10
+        run: cargo test --no-default-features --test cli_contract -- --test-threads=1 --nocapture
         working-directory: src-tauri
 
       - name: Rust connect deadline tests
