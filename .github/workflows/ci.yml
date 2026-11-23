@@ -7,9 +7,11 @@
 # 1. **PR dry-run**: Every pull request triggers the full `build` job matrix,
 #    which compiles all binaries (CLI, MCP, daemon) across 3 target platforms
 #    (aarch64 macOS, x86_64 Linux, x86_64 Windows; Intel Macs are no longer
-#    supported), runs unit tests, integration tests, CLI smoke and CLI
-#    contract tests, the explicit contract-consistency gate, and builds the
-#    frontend. This acts as
+#    supported). Linux and macOS run the portable integration suites and the
+#    frontend build. Windows is the wall clock, so that leg keeps the library
+#    tests, the daemon, and the suites whose Windows path has diverged
+#    (`host_secret_stdin`, `cli_contract`, `local_exec`, `resident_session`,
+#    `resident_close`). The explicit contract-consistency gate runs first. This acts as
 #    a release dry-run — if a PR passes all checks here, the code is ready to
 #    be merged and released.
 #    The `tauri-unit-tests` job covers the default (tauri) feature set, which
@@ -280,7 +282,11 @@ jobs:
         if: contains(matrix.target, 'apple-darwin')
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
+      # Frontend tests and the Vite build are platform-independent. Windows is
+      # the slow leg (warm run 44927413832: this job 10m24s, Linux 6m22s), so
+      # it does not install Node.
       - name: Install Node.js
+        if: runner.os != 'Windows'
         uses: actions/setup-node@v7
         with:
           node-version: 20
@@ -302,11 +308,22 @@ jobs:
           key: ${{ runner.os }}-cargo-v3-${{ hashFiles('src-tauri/Cargo.lock') }}
 
       - name: Install npm deps
+        if: runner.os != 'Windows'
         run: npm install
 
       # ── Test suite (runs on every push/PR, not just releases) ────────────
+      #
+      # Steps guarded with `runner.os != 'Windows'` have no Windows-only
+      # assertion. Linux and macOS still run them. Kept here on every OS:
+      # `cargo test --lib` (the library's `cfg(windows)` tests), daemon unit
+      # tests, the real-daemon end-to-end tests, `cli_smoke` (the PowerShell
+      # completion path), `host_secret_stdin` (the PowerShell 5.1 BOM),
+      # `cli_contract` (the step a Windows runner has hung in), `local_exec`,
+      # `resident_session`, and `resident_close` (a real `local:pwsh`
+      # process tree).
 
       - name: Frontend tests
+        if: runner.os != 'Windows'
         run: npm test
 
       - name: Rust unit tests
@@ -330,9 +347,12 @@ jobs:
         working-directory: src-tauri
 
       - name: Rust integration tests (daemon)
+        if: runner.os != 'Windows'
         run: cargo test --no-default-features --test daemon_integration
         working-directory: src-tauri
 
+      # Kept on Windows: the completion test asks clap for `powershell` here and
+      # `bash` elsewhere, and this binary is what a Windows script invokes.
       - name: Rust CLI smoke tests
         run: cargo test --no-default-features --test cli_smoke
         working-directory: src-tauri
@@ -342,6 +362,7 @@ jobs:
         working-directory: src-tauri
 
       - name: Legacy credential retag tests
+        if: runner.os != 'Windows'
         run: cargo test --no-default-features --test store_retag -- --test-threads=1
         working-directory: src-tauri
 
@@ -368,6 +389,7 @@ jobs:
         working-directory: src-tauri
 
       - name: Rust connect deadline tests
+        if: runner.os != 'Windows'
         run: cargo test --no-default-features --test connect_deadline
         working-directory: src-tauri
       # The local target and resident sessions run against real shells on this
@@ -402,7 +424,15 @@ jobs:
         working-directory: src-tauri
 
       - name: Deadline and approval persistence tests
+        if: runner.os != 'Windows'
         run: cargo test --no-default-features --test ssh_operation_deadline --test mcp_local_deadlines --test approval_store_persistence --test desktop_backup_decrypt --test resident_close
+        working-directory: src-tauri
+
+      # Split out of the step above. That group is portable; this one opens a
+      # real shell and reclaims a Windows process tree (`local:pwsh`, ping.exe).
+      - name: Resident close tests
+        if: runner.os == 'Windows'
+        run: cargo test --no-default-features --test resident_close
         working-directory: src-tauri
 
       # ── Compilation checks ────────────────────────────────────────────────
@@ -416,6 +446,7 @@ jobs:
         working-directory: src-tauri
 
       - name: Frontend build
+        if: runner.os != 'Windows'
         run: npm run build
 
       # ── PR dry-run: build release binaries to validate compilation ───────
