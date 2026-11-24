@@ -1,5 +1,5 @@
-import { Edit3, Network, Plus, Save, Trash2, X } from "lucide-react";
-import { memo, FormEvent, useMemo, useState  } from "react";
+import { Edit3, Network, Plus, Save, Trash2 } from "lucide-react";
+import { memo, FormEvent, useMemo, useState } from "react";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import { labelCls } from "../lib/ui-classes";
@@ -8,9 +8,11 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { ConfirmDialog } from "./ui/dialog";
+import { HostChipList } from "./ui/host-chips";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { Select } from "./ui/select";
+import { SlideOverDrawer } from "./ui/slide-over-drawer";
 import { EmptyState, InlineAlert } from "./ui/state";
 import { useToast } from "./ui/toast";
 
@@ -28,6 +30,8 @@ type Props = {
   proxies: ProxyProfile[];
   hosts: HostProfile[];
   onChanged: () => void | Promise<void>;
+  /** Jump to a host that uses this proxy. */
+  onSelectHost?: (hostName: string) => void;
 };
 
 function proxyIdFromName(name: string): string {
@@ -51,27 +55,45 @@ function formFromProxy(proxy: ProxyProfile) {
   };
 }
 
-function ProxyPanel({ proxies, hosts, onChanged }: Props) {
+function ProxyPanel({ proxies, hosts, onChanged, onSelectHost }: Props) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [form, setForm] = useState(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<ProxyProfile | null>(null);
   const [saving, setSaving] = useState(false);
 
   const hostsByProxy = useMemo(() => {
-    const counts = new Map<string, number>();
+    const names = new Map<string, string[]>();
     for (const host of hosts) {
-      if (host.proxy_id) {
-        counts.set(host.proxy_id, (counts.get(host.proxy_id) ?? 0) + 1);
-      }
+      if (!host.proxy_id) continue;
+      const list = names.get(host.proxy_id) ?? [];
+      list.push(host.name);
+      names.set(host.proxy_id, list);
     }
-    return counts;
+    return names;
   }, [hosts]);
 
   function resetForm() {
     setForm(emptyForm);
     setEditingId(null);
+  }
+
+  function closeDrawer() {
+    setDrawerOpen(false);
+    resetForm();
+  }
+
+  function openCreate() {
+    resetForm();
+    setDrawerOpen(true);
+  }
+
+  function openEdit(proxy: ProxyProfile) {
+    setEditingId(proxy.id);
+    setForm(formFromProxy(proxy));
+    setDrawerOpen(true);
   }
 
   async function handleSubmit(event: FormEvent) {
@@ -89,7 +111,7 @@ function ProxyPanel({ proxies, hosts, onChanged }: Props) {
         password: form.password || null,
       };
       await api.saveProxy(payload);
-      resetForm();
+      closeDrawer();
       await onChanged();
     } catch (err) {
       showToast("error", String(err));
@@ -101,7 +123,7 @@ function ProxyPanel({ proxies, hosts, onChanged }: Props) {
   async function handleDelete(proxy: ProxyProfile) {
     try {
       await api.deleteProxy(proxy.id);
-      if (editingId === proxy.id) resetForm();
+      if (editingId === proxy.id) closeDrawer();
       setConfirmDelete(null);
       await onChanged();
     } catch (err) {
@@ -109,75 +131,74 @@ function ProxyPanel({ proxies, hosts, onChanged }: Props) {
     }
   }
 
+  const affectedHosts = confirmDelete ? hostsByProxy.get(confirmDelete.id) ?? [] : [];
+
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)_360px] items-start gap-[18px] max-lg:grid-cols-1">
+    <div>
       <Card className="space-y-4 p-4">
-        <div className="flex items-center gap-2 font-semibold">
-          <Network size={16} className="text-muted-foreground" />
-          {t("Proxy profiles")}
-          <Badge variant="secondary" className="ml-1 font-medium">
-            {t("{count} proxies", { count: proxies.length })}
-          </Badge>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-2 font-semibold">
+            <Network size={16} className="text-muted-foreground" />
+            {t("Proxy profiles")}
+            <Badge variant="secondary" className="font-medium">
+              {t("{count} proxies", { count: proxies.length })}
+            </Badge>
+          </div>
+          <Button className="ml-auto" onClick={openCreate}>
+            <Plus size={14} />
+            {t("Add Proxy")}
+          </Button>
         </div>
 
         <div className="grid gap-2">
           {proxies.map((proxy) => {
-            const assignedHosts = hostsByProxy.get(proxy.id) ?? 0;
+            const assigned = hostsByProxy.get(proxy.id) ?? [];
             return (
-              <div
-                key={proxy.id}
-                className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-stretch overflow-hidden rounded-lg border border-border bg-card"
-              >
-                <div className="min-w-0 px-3 py-2.5">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <strong className="truncate font-semibold">{proxy.name}</strong>
-                    <Badge variant="secondary">{proxy.protocol.toUpperCase()}</Badge>
-                    {assignedHosts > 0 && (
-                      <span className="text-xs text-muted-foreground">
-                        {t("{count} hosts", { count: assignedHosts })}
-                      </span>
-                    )}
+              <div key={proxy.id} className="rounded-lg border border-border bg-card px-3 py-2.5">
+                <div className="flex items-start gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <strong className="truncate font-semibold">{proxy.name}</strong>
+                      <Badge variant="secondary">{proxy.protocol.toUpperCase()}</Badge>
+                    </div>
+                    <div className="mt-1 break-all text-xs text-muted-foreground">
+                      {proxy.host}:{proxy.port}
+                      {proxy.username && ` · ${t("auth enabled")}`}
+                    </div>
+                    <HostChipList
+                      className="mt-2"
+                      names={assigned}
+                      onSelect={onSelectHost}
+                      collapseAfter={5}
+                    />
                   </div>
-                  <div className="mt-1 break-all text-xs text-muted-foreground">
-                    {proxy.host}:{proxy.port}
-                    {proxy.username && ` · ${t("auth enabled")}`}
-                  </div>
+                  <IconButton
+                    title={t("Edit {name}", { name: proxy.name })}
+                    onClick={() => openEdit(proxy)}
+                  >
+                    <Edit3 size={14} />
+                  </IconButton>
+                  <IconButton
+                    title={t("Delete {name}", { name: proxy.name })}
+                    onClick={() => setConfirmDelete(proxy)}
+                  >
+                    <Trash2 size={14} />
+                  </IconButton>
                 </div>
-                <button
-                  className="flex items-center justify-center border-l border-border px-3 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                  title={t("Edit {name}", { name: proxy.name })}
-                  onClick={() => {
-                    setEditingId(proxy.id);
-                    setForm(formFromProxy(proxy));
-                  }}
-                >
-                  <Edit3 size={14} />
-                </button>
-                <button
-                  className="flex items-center justify-center border-l border-border px-3 text-muted-foreground transition-colors hover:bg-muted hover:text-destructive"
-                  title={t("Delete {name}", { name: proxy.name })}
-                  onClick={() => setConfirmDelete(proxy)}
-                >
-                  <Trash2 size={14} />
-                </button>
               </div>
             );
           })}
-          {proxies.length === 0 && <EmptyState icon={Network} title={t("No proxy profiles configured")} />}
+          {proxies.length === 0 && (
+            <EmptyState icon={Network} title={t("No proxy profiles configured")} />
+          )}
         </div>
       </Card>
 
-      <Card className="space-y-4 p-4">
-        <div className="flex items-center gap-2 font-semibold">
-          <Plus size={16} className="text-muted-foreground" />
-          {editingId ? t("Edit Proxy") : t("Add Proxy")}
-          {editingId && (
-            <IconButton className="ml-auto" type="button" title={t("Cancel")} onClick={resetForm}>
-              <X size={14} />
-            </IconButton>
-          )}
-        </div>
-
+      <SlideOverDrawer
+        open={drawerOpen}
+        onClose={closeDrawer}
+        title={editingId ? t("Edit Proxy") : t("Add Proxy")}
+      >
         <form className="grid gap-3.5" onSubmit={handleSubmit}>
           <label className={labelCls}>
             {t("Name")}
@@ -254,15 +275,22 @@ function ProxyPanel({ proxies, hosts, onChanged }: Props) {
             {saving ? t("Saving...") : editingId ? t("Update proxy") : t("Save proxy")}
           </Button>
         </form>
-      </Card>
+      </SlideOverDrawer>
 
       {confirmDelete && (
         <ConfirmDialog
           title={t("Delete proxy {name}?", { name: confirmDelete.name })}
           note={
-            <InlineAlert>
-              {t("Hosts using this proxy will switch back to direct connections.")}
-            </InlineAlert>
+            <div className="grid gap-2">
+              <InlineAlert>
+                {t("Hosts using this proxy will switch back to direct connections.")}
+              </InlineAlert>
+              {affectedHosts.length > 0 && (
+                <InlineAlert tone="destructive" bordered>
+                  {t("Affected hosts: {names}", { names: affectedHosts.join(", ") })}
+                </InlineAlert>
+              )}
+            </div>
           }
           confirmLabel={t("Delete")}
           danger

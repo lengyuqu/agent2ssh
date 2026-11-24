@@ -800,7 +800,7 @@ function SFTPPanel({ hosts, initialHost = "", embedded = false }: Props) {
       <div
         className={cn(
           "flex flex-col rounded-lg border border-border/70 bg-card/70",
-          embedded ? "min-h-[240px] gap-2 p-2.5" : "min-h-[560px] gap-3 p-3",
+          embedded ? "min-h-[240px] gap-2 p-2.5" : "min-h-0 flex-1 gap-3 p-3",
           layoutCls,
         )}
         onDragOver={(e) => {
@@ -1182,7 +1182,7 @@ function SFTPPanel({ hosts, initialHost = "", embedded = false }: Props) {
       className={cn(
         embedded
           ? "flex h-full min-h-0 flex-col gap-2.5 rounded-none border-0 bg-transparent p-3"
-          : "space-y-4 p-4",
+          : "flex min-h-0 flex-1 flex-col gap-4 overflow-hidden p-4",
       )}
     >
       {!embedded && (
@@ -1243,8 +1243,10 @@ function SFTPPanel({ hosts, initialHost = "", embedded = false }: Props) {
 
       <div
         className={cn(
-          "grid gap-4 xl:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]",
-          embedded && "min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)] gap-2 xl:grid-rows-1 xl:gap-3",
+          "grid min-h-0 gap-4 xl:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]",
+          embedded
+            ? "flex-1 grid-rows-[auto_minmax(0,1fr)] gap-2 xl:grid-rows-1 xl:gap-3"
+            : "flex-1 grid-rows-[minmax(0,1fr)_auto_minmax(0,1fr)] xl:grid-rows-1",
         )}
       >
         {renderSidePanel(

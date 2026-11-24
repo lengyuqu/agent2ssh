@@ -108,6 +108,40 @@ describe("HostSelector allowEmpty", () => {
   });
 });
 
+describe("HostSelector extra groups", () => {
+  it("does not replace a local target with the first SSH host", () => {
+    const { onChange } = renderSelector({
+      value: "local:zsh",
+      extraGroups: [
+        { label: "Local environments", options: [{ value: "local:zsh", label: "local:zsh" }] },
+      ],
+    });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("keeps a local target selectable when there are no SSH hosts", () => {
+    const { onChange, container } = renderSelector({
+      hosts: [],
+      value: "local",
+      extraGroups: [
+        {
+          label: "Local environments",
+          options: [
+            { value: "local", label: "local" },
+            { value: "local:zsh", label: "local:zsh" },
+          ],
+        },
+      ],
+    });
+    expect(onChange).not.toHaveBeenCalled();
+    expect(container.querySelector("select")?.disabled).toBe(false);
+    expect(optionsOf(container)).toEqual([
+      ["local", "local"],
+      ["local:zsh", "local:zsh"],
+    ]);
+  });
+});
+
 describe("HostSelector shell", () => {
   it("frames itself with a label and a Server mark by default", () => {
     const { container } = renderSelector({ label: "Jump host" });

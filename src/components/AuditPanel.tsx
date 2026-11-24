@@ -1,5 +1,5 @@
-import { Clipboard, History, RefreshCw, RotateCcw, SlidersHorizontal, Trash2 } from "lucide-react";
-import { memo, useMemo, useState  } from "react";
+import { Clipboard, History, RefreshCw, RotateCcw, SlidersHorizontal, Trash2, X } from "lucide-react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import {
   createColumnHelper,
   getCoreRowModel,
@@ -10,7 +10,8 @@ import {
 } from "@tanstack/react-table";
 import { useI18n } from "../i18n";
 import { api } from "../api";
-import type { AuditDecision, AuditEntry, AuditFilter, RiskLevel } from "../types";
+import type { AuditDecision, AuditEntry, RiskLevel } from "../types";
+import AuditDetailDrawer from "./AuditDetailDrawer";
 import RiskBadge from "./RiskBadge";
 import { Badge, type BadgeProps } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -82,25 +83,64 @@ const CHIP_IDLE: Record<RiskLevel, string> = {
 const RENDER_CAP_STEP = 200;
 
 type Props = {
+  /** Entries after range/host/source/search, before the risk cut. Chip counts use this. */
   audit: AuditEntry[];
-  onRefresh: (filter?: AuditFilter) => void | Promise<void>;
+  onRefresh: () => void | Promise<void>;
   /** v3 §3.3/§3.4: replay an audit row in the terminal drawer. Optional — the
    *  replay column only renders when a handler is provided. */
   onReplay?: (entry: AuditEntry) => void;
+  onEditAndExecute?: (entry: AuditEntry) => void;
+  host?: string;
+  riskLevel?: RiskLevel | "";
+  source?: string;
+  search?: string;
+  onHostChange?: (host: string) => void;
+  onRiskLevelChange?: (level: RiskLevel | "") => void;
+  onSourceChange?: (source: string) => void;
+  onSearchChange?: (search: string) => void;
+  onClearFilters?: () => void;
+  loading?: boolean;
 };
 
 const columnHelper = createColumnHelper<AuditEntry>();
 
-function AuditPanel({ audit, onRefresh, onReplay }: Props) {
+function AuditPanel({
+  audit,
+  onRefresh,
+  onReplay,
+  onEditAndExecute,
+  host = "",
+  riskLevel = "",
+  source = "",
+  search = "",
+  onHostChange,
+  onRiskLevelChange,
+  onSourceChange,
+  onSearchChange,
+  onClearFilters,
+  loading = false,
+}: Props) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [showFilters, setShowFilters] = useState(false);
-  const [hostFilter, setHostFilter] = useState("");
-  const [riskFilter, setRiskFilter] = useState<RiskLevel | "">("");
   const [limit, setLimit] = useState(50);
   const [renderCap, setRenderCap] = useState(RENDER_CAP_STEP);
   const [sorting, setSorting] = useState<SortingState>([{ id: "ts", desc: true }]);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
+  const [detail, setDetail] = useState<AuditEntry | null>(null);
+
+  const closeDetail = useCallback(() => setDetail(null), []);
+
+  useEffect(() => {
+    setRenderCap(RENDER_CAP_STEP);
+  }, [host, riskLevel, source, search]);
+
+  useEffect(() => {
+    setDetail((current) => {
+      if (!current) return current;
+      return audit.find((entry) => entry.id === current.id) ?? current;
+    });
+  }, [audit]);
 
   function parseLimit(value: string): number {
     const parsed = Number(value);
@@ -110,25 +150,20 @@ function AuditPanel({ audit, onRefresh, onReplay }: Props) {
 
   function applyFilters() {
     setRenderCap(RENDER_CAP_STEP);
-    const filter: AuditFilter = {
-      limit: parseLimit(String(limit)),
-      host: hostFilter.trim() || null,
-      risk_level: riskFilter || null,
-    };
-    onRefresh(filter);
+    onHostChange?.(host.trim());
+    onRiskLevelChange?.(riskLevel);
+    onSearchChange?.(search.trim());
   }
 
   function clearFilters() {
-    setHostFilter("");
-    setRiskFilter("");
     setLimit(50);
     setRenderCap(RENDER_CAP_STEP);
-    onRefresh();
+    onClearFilters?.();
   }
 
   const columns = useMemo(
     () => [
-      selectColumn<AuditEntry>({ size: 28 }),
+      selectColumn<AuditEntry>({ size: 28, stopRowClick: true }),
       columnHelper.accessor("ts", {
         header: t("time"),
         cell: (info) => (
@@ -205,7 +240,10 @@ function AuditPanel({ audit, onRefresh, onReplay }: Props) {
                 <IconButton
                   className="size-6"
                   title={t("Replay")}
-                  onClick={() => onReplay(row.original)}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onReplay(row.original);
+                  }}
                 >
                   <RotateCcw size={13} />
                 </IconButton>
@@ -220,8 +258,13 @@ function AuditPanel({ audit, onRefresh, onReplay }: Props) {
     [t, onReplay]
   );
 
+  const visible = useMemo(
+    () => (riskLevel ? audit.filter((entry) => entry.risk_level === riskLevel) : audit),
+    [audit, riskLevel],
+  );
+
   const table = useReactTable({
-    data: audit,
+    data: visible,
     columns,
     state: { sorting, rowSelection },
     onSortingChange: setSorting,
@@ -233,9 +276,11 @@ function AuditPanel({ audit, onRefresh, onReplay }: Props) {
   });
 
   const rows = table.getRowModel().rows;
+  const limitedCount = Math.min(rows.length, limit);
+  const shownRows = rows.slice(0, Math.min(renderCap, limit));
   const selectedIds = Object.keys(rowSelection).filter((id) => rowSelection[id]);
 
-  // v3: risk count chips over the currently loaded entries.
+  // Counts stay on the pre-risk set (`audit`), so choosing high does not zero the others.
   const riskCounts = useMemo(() => {
     const counts: Record<RiskLevel | "all", number> = {
       all: audit.length,
@@ -249,12 +294,36 @@ function AuditPanel({ audit, onRefresh, onReplay }: Props) {
   }, [audit]);
 
   function selectRisk(level: RiskLevel | "") {
-    setRiskFilter(level);
-    setRenderCap(RENDER_CAP_STEP);
-    onRefresh({
-      limit: parseLimit(String(limit)),
-      host: hostFilter.trim() || null,
-      risk_level: level || null,
+    onRiskLevelChange?.(level);
+  }
+
+  const activeChips: Array<{ key: string; label: string; clear: () => void }> = [];
+  if (host.trim()) {
+    activeChips.push({
+      key: "host",
+      label: t("Host: {value}", { value: host.trim() }),
+      clear: () => onHostChange?.(""),
+    });
+  }
+  if (source) {
+    activeChips.push({
+      key: "source",
+      label: t("Source: {value}", { value: source === "unknown" ? t("unknown") : source }),
+      clear: () => onSourceChange?.(""),
+    });
+  }
+  if (riskLevel) {
+    activeChips.push({
+      key: "risk",
+      label: t("Risk: {value}", { value: t(riskLevel) }),
+      clear: () => onRiskLevelChange?.(""),
+    });
+  }
+  if (search.trim()) {
+    activeChips.push({
+      key: "search",
+      label: t("Search: {value}", { value: search.trim() }),
+      clear: () => onSearchChange?.(""),
     });
   }
 
@@ -275,6 +344,7 @@ function AuditPanel({ audit, onRefresh, onReplay }: Props) {
   }
 
   return (
+    <>
     <Card className="space-y-3 p-4">
       <div className="flex items-center gap-2 font-semibold">
         <History size={16} className="text-muted-foreground" />
@@ -286,7 +356,7 @@ function AuditPanel({ audit, onRefresh, onReplay }: Props) {
         >
           <SlidersHorizontal size={15} />
         </IconButton>
-        <IconButton onClick={() => onRefresh()} title={t("Refresh audit")}>
+        <IconButton onClick={() => void onRefresh()} title={t("Refresh audit")}>
           <RefreshCw size={15} />
         </IconButton>
         <IconButton
@@ -314,14 +384,15 @@ function AuditPanel({ audit, onRefresh, onReplay }: Props) {
         </IconButton>
       </div>
 
-      {/* v3: risk filter chips — selected = solid risk color, idle = outline */}
+      {/* v3: risk filter chips — counts ignore the risk cut, so other levels stay visible */}
       <div className="flex flex-wrap items-center gap-1.5">
         <button
           type="button"
+          aria-pressed={riskLevel === ""}
           onClick={() => selectRisk("")}
           className={cn(
-            "rounded-full border px-2.5 py-0.5 font-mono text-[10.5px] font-bold uppercase tracking-wide transition-colors",
-            riskFilter === ""
+            "cursor-pointer rounded-full border px-2.5 py-0.5 font-mono text-[10.5px] font-bold uppercase tracking-wide transition-colors",
+            riskLevel === ""
               ? "border-transparent bg-foreground text-background"
               : "border-border text-muted-foreground hover:border-edge-strong hover:text-foreground"
           )}
@@ -332,10 +403,11 @@ function AuditPanel({ audit, onRefresh, onReplay }: Props) {
           <button
             key={level}
             type="button"
+            aria-pressed={riskLevel === level}
             onClick={() => selectRisk(level)}
             className={cn(
-              "rounded-full border px-2.5 py-0.5 font-mono text-[10.5px] font-bold uppercase tracking-wide transition-colors",
-              riskFilter === level ? CHIP_ACTIVE[level] : CHIP_IDLE[level]
+              "cursor-pointer rounded-full border px-2.5 py-0.5 font-mono text-[10.5px] font-bold uppercase tracking-wide transition-colors",
+              riskLevel === level ? CHIP_ACTIVE[level] : CHIP_IDLE[level]
             )}
           >
             {t(level)} {riskCounts[level]}
@@ -343,21 +415,53 @@ function AuditPanel({ audit, onRefresh, onReplay }: Props) {
         ))}
       </div>
 
+      <Input
+        value={search}
+        onChange={(event) => onSearchChange?.(event.target.value)}
+        placeholder={t("Search audit")}
+        aria-label={t("Search audit")}
+        className="h-8 max-w-sm"
+      />
+
+      {activeChips.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-xs text-muted-foreground">{t("Active filters")}</span>
+          {activeChips.map((chip) => (
+            <button
+              key={chip.key}
+              type="button"
+              onClick={chip.clear}
+              className="inline-flex cursor-pointer appearance-none items-center gap-1 rounded-full border border-border bg-muted/50 px-2 py-0.5 text-xs text-foreground"
+            >
+              {chip.label}
+              <X size={12} />
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={clearFilters}
+            className="cursor-pointer appearance-none border-0 bg-transparent px-1 text-xs text-muted-foreground hover:text-foreground"
+          >
+            {t("Clear filters")}
+          </button>
+        </div>
+      )}
+
       {showFilters && (
         <div className="grid grid-cols-[1fr_1fr_100px_auto] items-end gap-2.5 max-md:grid-cols-1">
           <label className={labelCls}>
             {t("Host")}
             <Input
-              value={hostFilter}
-              onChange={(e) => setHostFilter(e.target.value)}
+              value={host}
+              onChange={(e) => onHostChange?.(e.target.value)}
               placeholder={t("all hosts")}
             />
           </label>
           <label className={labelCls}>
             {t("Risk level")}
             <Select
-              value={riskFilter}
-              onChange={(e) => setRiskFilter(e.target.value as RiskLevel | "")}
+              value={riskLevel}
+              onChange={(e) => onRiskLevelChange?.(e.target.value as RiskLevel | "")}
             >
               <option value="">{t("all")}</option>
               <option value="low">{t("low")}</option>
@@ -397,34 +501,59 @@ function AuditPanel({ audit, onRefresh, onReplay }: Props) {
         </div>
       )}
 
-      {audit.length === 0 ? (
-        <EmptyState icon={History} title={t("No commands executed yet")} />
+      {loading && audit.length === 0 ? null : visible.length === 0 ? (
+        <EmptyState
+          icon={History}
+          title={t(audit.length === 0 ? "No commands executed yet" : "No audit entries match these filters")}
+        />
       ) : (
         <DataTable
           table={table}
-          rows={rows.slice(0, renderCap)}
+          rows={shownRows}
           minWidth={640}
+          onRowClick={(row) => setDetail(row.original)}
           rowClassName={(row) =>
             cn(
-              "border-t border-border",
+              "cursor-pointer border-t border-border",
               (row.original.risk_level === "high" || row.original.risk_level === "blocked") &&
                 "bg-risk-high/5"
             )
           }
           footer={
-            rows.length > renderCap ? (
+            limitedCount > shownRows.length ? (
               <button
                 type="button"
                 onClick={() => setRenderCap((c) => c + RENDER_CAP_STEP)}
                 className="w-full border-t border-border pt-2 text-center text-xs text-muted-foreground hover:text-foreground"
               >
-                {t("Show more ({count} hidden)", { count: rows.length - renderCap })}
+                {t("Show more ({count} hidden)", { count: limitedCount - shownRows.length })}
               </button>
             ) : null
           }
         />
       )}
     </Card>
+    <AuditDetailDrawer
+      entry={detail}
+      onClose={closeDetail}
+      onReplay={
+        onReplay
+          ? (entry) => {
+              onReplay(entry);
+              setDetail(null);
+            }
+          : undefined
+      }
+      onEditAndExecute={
+        onEditAndExecute
+          ? (entry) => {
+              onEditAndExecute(entry);
+              setDetail(null);
+            }
+          : undefined
+      }
+    />
+    </>
   );
 }
 

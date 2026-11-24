@@ -195,8 +195,8 @@ function RecordingsPanel() {
   }
 
   return (
-    <div className="grid gap-4">
-      <Card className="border-warning/40 bg-warning/5">
+    <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden">
+      <Card className="shrink-0 border-warning/40 bg-warning/5">
         <CardHeader>
           <CardTitle className="text-warning">
             <ShieldAlert size={18} /> {t("Sensitive terminal recordings")}
@@ -223,15 +223,15 @@ function RecordingsPanel() {
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-[minmax(280px,0.38fr)_minmax(0,0.62fr)] gap-4 max-lg:grid-cols-1">
-        <Card>
+      <div className="grid min-h-0 flex-1 grid-cols-[minmax(280px,0.38fr)_minmax(0,0.62fr)] gap-4 max-lg:grid-cols-1">
+        <Card className="flex min-h-0 flex-col">
           <CardHeader className="flex-row items-center justify-between">
             <CardTitle>{t("Recordings")}</CardTitle>
             <Button variant="outline" size="sm" onClick={() => void refresh()} disabled={loading}>
               {loading ? <Spinner /> : <RefreshCw />} {t("Refresh")}
             </Button>
           </CardHeader>
-          <CardContent className="grid max-h-[560px] gap-2 overflow-y-auto">
+          <CardContent className="grid min-h-0 flex-1 gap-2 overflow-y-auto">
             {!loading && recordings.length === 0 ? (
               <p className="py-8 text-center text-sm text-muted-foreground">{t("No terminal recordings.")}</p>
             ) : (
@@ -266,7 +266,7 @@ function RecordingsPanel() {
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="flex min-h-0 flex-col">
           <CardHeader className="gap-3">
             <CardTitle>{selected ? selected.info.host : t("Replay")}</CardTitle>
             <div className="flex flex-wrap items-center gap-2">
@@ -297,8 +297,8 @@ function RecordingsPanel() {
               <div className="h-full bg-primary transition-[width]" style={{ width: `${progress * 100}%` }} />
             </div>
           </CardHeader>
-          <CardContent>
-            <div ref={containerRef} className="terminal-surface h-[470px] overflow-auto rounded-lg bg-[#0d1117] p-2" />
+          <CardContent className="flex min-h-0 flex-1 flex-col">
+            <div ref={containerRef} className="terminal-surface min-h-0 flex-1 overflow-auto rounded-lg bg-[#0d1117] p-2" />
           </CardContent>
         </Card>
       </div>

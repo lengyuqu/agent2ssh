@@ -6,14 +6,20 @@ import type { HostProfile } from "../types";
 import ExecPanel from "./ExecPanel";
 import { ToastProvider } from "./ui/toast";
 
-const { classifyRisk } = vi.hoisted(() => ({
+const { classifyRisk, execLocal, execSshFull, listLocalEnvironments } = vi.hoisted(() => ({
   classifyRisk: vi.fn().mockResolvedValue("low"),
+  execLocal: vi.fn(),
+  execSshFull: vi.fn(),
+  listLocalEnvironments: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("../api", () => ({
   api: {
     setTrayLabels: vi.fn().mockResolvedValue(undefined),
     classifyRisk: (...args: unknown[]) => classifyRisk(...args),
+    execLocal: (...args: unknown[]) => execLocal(...args),
+    execSshFull: (...args: unknown[]) => execSshFull(...args),
+    listLocalEnvironments: (...args: unknown[]) => listLocalEnvironments(...args),
   },
   reportError: vi.fn(),
 }));
@@ -44,6 +50,21 @@ describe("ExecPanel initial command", () => {
     localStorage.setItem("agent2ssh.language", "en");
     classifyRisk.mockClear();
     classifyRisk.mockResolvedValue("low");
+    execLocal.mockReset();
+    execSshFull.mockReset();
+    listLocalEnvironments.mockReset();
+    listLocalEnvironments.mockResolvedValue([]);
+    const done = {
+      host: "web",
+      command: "uname -a",
+      exit_code: 0,
+      stdout: "ok",
+      stderr: "",
+      duration_ms: 4,
+      risk_level: "low" as const,
+    };
+    execLocal.mockResolvedValue({ ...done, host: "local" });
+    execSshFull.mockResolvedValue(done);
   });
 
   it("fills docker ps, focuses the end, toasts, and previews risk", async () => {
@@ -130,5 +151,88 @@ describe("ExecPanel initial command", () => {
     const field = commandField();
     expect(field.value).toBe(command);
     expect(field.rows).toBe(3);
+  });
+});
+
+describe("ExecPanel local target", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem("agent2ssh.language", "en");
+    classifyRisk.mockClear();
+    classifyRisk.mockResolvedValue("low");
+    execLocal.mockReset();
+    execSshFull.mockReset();
+    listLocalEnvironments.mockReset();
+    listLocalEnvironments.mockResolvedValue([
+      {
+        id: "local",
+        builtin: true,
+        base: null,
+        distro: null,
+        cwd: null,
+        env_count: 0,
+        description: "This machine",
+      },
+      {
+        id: "local:zsh",
+        builtin: true,
+        base: null,
+        distro: null,
+        cwd: null,
+        env_count: 0,
+        description: "Zsh",
+      },
+    ]);
+    execLocal.mockResolvedValue({
+      host: "local:zsh",
+      command: "echo hello",
+      exit_code: 0,
+      stdout: "hello",
+      stderr: "",
+      duration_ms: 4,
+      risk_level: "low",
+    });
+    execSshFull.mockResolvedValue({
+      host: "web",
+      command: "uname -a",
+      exit_code: 0,
+      stdout: "ok",
+      stderr: "",
+      duration_ms: 4,
+      risk_level: "low",
+    });
+  });
+
+  it("runs a local target through execLocal and renames the button", async () => {
+    renderPanel({ hosts: [], initialHost: "local:zsh", initialCommand: "echo hello" });
+    const button = screen.getByRole("button", { name: "Run locally" });
+    expect(screen.queryByRole("button", { name: "Run over SSH" })).toBeNull();
+    fireEvent.click(button);
+    await waitFor(() => {
+      expect(execLocal).toHaveBeenCalledWith(
+        expect.objectContaining({ host: "local:zsh", command: "echo hello" }),
+      );
+    });
+    expect(execSshFull).not.toHaveBeenCalled();
+  });
+
+  it("still runs an SSH host through execSshFull", async () => {
+    renderPanel();
+    fireEvent.click(screen.getByRole("button", { name: "Run over SSH" }));
+    await waitFor(() => {
+      expect(execSshFull).toHaveBeenCalledWith(
+        expect.objectContaining({ host: "web", command: "uname -a" }),
+      );
+    });
+    expect(execLocal).not.toHaveBeenCalled();
+  });
+
+  it("keeps a local target runnable when no SSH hosts are configured", async () => {
+    renderPanel({ hosts: [], initialHost: "", initialCommand: "echo hello" });
+    const button = await screen.findByRole("button", { name: "Run locally" });
+    fireEvent.click(button);
+    await waitFor(() => {
+      expect(execLocal).toHaveBeenCalledWith(expect.objectContaining({ host: "local" }));
+    });
   });
 });

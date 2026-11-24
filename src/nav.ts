@@ -31,8 +31,10 @@ import {
  * invariant that ties them together is pinned in `nav.test.ts` instead.
  *
  * `MODULES` order carries no meaning for the user: the sidebar renders from
- * `SIDEBAR_GROUPS`. Ctrl/⌘+1..9 indexes `SHORTCUT_MODULES`, the daily set,
- * because cockpit grouping puts Hosts past the ninth row.
+ * `SIDEBAR_GROUPS`. `playbooks` stays in `MODULES` so older links typecheck,
+ * and opens as a tab inside Execution rather than as its own rail item.
+ * Ctrl/⌘+1..9 indexes `SHORTCUT_MODULES`, the daily set, because cockpit
+ * grouping puts Hosts past the ninth row.
  */
 export const MODULES = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -76,7 +78,7 @@ export const SIDEBAR_GROUPS: ReadonlyArray<{
   },
   {
     title: "Operations",
-    modules: ["terminal", "resident-sessions", "execute", "playbooks", "tunnels", "files-sessions"],
+    modules: ["terminal", "resident-sessions", "execute", "tunnels", "files-sessions"],
   },
   {
     title: "Fleet",
@@ -103,6 +105,16 @@ export const SHORTCUT_MODULES: ModuleId[] = [
   "activity",
 ];
 
+/** Pages whose main view already scrolls or paints a canvas. The outer page
+ *  must not scroll as well, or the window grows a second scrollbar. */
+export const FULL_HEIGHT_MODULES: ReadonlySet<ModuleId> = new Set([
+  "execute",
+  "playbooks",
+  "files-sessions",
+  "topology",
+  "recordings",
+]);
+
 // V3-4: mesh navigation, not a tab trail — each module lists a handful of the
 // other modules an operator is likely to jump to from here.
 export const RELATED_MODULES: Partial<Record<ModuleId, ModuleId[]>> = {
@@ -116,7 +128,6 @@ export const RELATED_MODULES: Partial<Record<ModuleId, ModuleId[]>> = {
   tunnels: ["hosts"],
   activity: ["audit"],
   keys: ["hosts"],
-  playbooks: ["hosts", "execute"],
   audit: ["hosts", "approvals"],
   approvals: ["execute", "audit"],
   sync: ["config"],

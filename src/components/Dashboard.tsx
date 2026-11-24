@@ -26,7 +26,18 @@ type DashboardProps = {
   secretsLocked: boolean;
   daemonHealth: DaemonHealth | null;
   onNavigateModule: (id: string) => void;
+  onRequestUnlock?: () => void;
+  onStartDaemon?: () => void | Promise<void>;
+  onOpenAnomalies?: () => void;
+  onOpenHostTerminal?: (host: string) => void;
+  onInspectHost?: (host: string) => void;
 };
+
+/** Loading, a counted window, or a failed read. One null used to mean all three. */
+type ExecCountState =
+  | { status: "loading" }
+  | { status: "ready"; count: number }
+  | { status: "error" };
 
 type StatCardProps = {
   icon: React.ReactNode;
@@ -34,10 +45,11 @@ type StatCardProps = {
   value: React.ReactNode;
   hint?: string;
   tone?: "default" | "success" | "warning" | "destructive";
+  busy?: boolean;
   onClick?: () => void;
 };
 
-function StatCard({ icon, label, value, hint, tone = "default", onClick }: StatCardProps) {
+function StatCard({ icon, label, value, hint, tone = "default", busy = false, onClick }: StatCardProps) {
   return (
     <Card
       className={cn(
@@ -49,6 +61,7 @@ function StatCard({ icon, label, value, hint, tone = "default", onClick }: StatC
       )}
       onClick={onClick}
       role={onClick ? "button" : undefined}
+      aria-busy={busy || undefined}
     >
       <CardHeader className="pb-2">
         <CardTitle className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
@@ -82,14 +95,21 @@ function Dashboard({
   secretsLocked,
   daemonHealth,
   onNavigateModule,
+  onRequestUnlock,
+  onStartDaemon,
+  onOpenAnomalies,
+  onOpenHostTerminal,
+  onInspectHost,
 }: DashboardProps) {
   const { t } = useI18n();
-  const [execCount24h, setExecCount24h] = useState<number | null>(null);
+  const [execCount, setExecCount] = useState<ExecCountState>({ status: "loading" });
+  const [daemonStarting, setDaemonStarting] = useState(false);
+  const daemonStartRef = useRef(false);
+  const aliveRef = useRef(true);
   const [anomalyCount, setAnomalyCount] = useState(0);
   // V2-1: shared event bus (single SSE connection) instead of a dashboard-local
   // subscription — LiveActivityPanel and NotificationCenter use the same one.
   const anomalyStreamStatus = useEventsStatus();
-  const mountedAtRef = useRef(Date.now());
 
   useAgentEvents((event) => {
     if (event.event_type === "anomaly_detected") {
@@ -97,15 +117,24 @@ function Dashboard({
     }
   });
 
+  const daemonOk = daemonHealth?.ok === true;
+
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
+
   useEffect(() => {
     let active = true;
     async function loadExecCount() {
       try {
         const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
         const entries = await api.listAudit({ since, limit: 5000 });
-        if (active) setExecCount24h(entries.length);
+        if (active) setExecCount({ status: "ready", count: entries.length });
       } catch {
-        if (active) setExecCount24h(null);
+        if (active) setExecCount({ status: "error" });
       }
     }
     loadExecCount();
@@ -114,10 +143,23 @@ function Dashboard({
       active = false;
       window.clearInterval(id);
     };
-  }, []);
+  }, [daemonOk]);
+
+  function startDaemon() {
+    if (!onStartDaemon || daemonStartRef.current) return;
+    daemonStartRef.current = true;
+    setDaemonStarting(true);
+    void Promise.resolve(onStartDaemon()).finally(() => {
+      daemonStartRef.current = false;
+      if (aliveRef.current) setDaemonStarting(false);
+    });
+  }
 
   const connectedHosts = connectionStatuses.filter((c) => c.connected).length;
-  const daemonOk = daemonHealth?.ok === true;
+  const daemonOffline = daemonHealth != null && daemonHealth.ok !== true;
+  // A failed audit read and a daemon that is already offline are the same
+  // card: "—" plus Unavailable. Loading stays "…" and is never that null.
+  const execShown: ExecCountState = daemonOffline ? { status: "error" } : execCount;
 
   return (
     <div className="grid gap-4">
@@ -149,16 +191,13 @@ function Dashboard({
                 : t("stream offline")
           }
           tone={anomalyCount > 0 ? "warning" : "default"}
+          onClick={onOpenAnomalies ?? (() => onNavigateModule("activity"))}
         />
         <StatCard
           icon={<RadioTower size={13} />}
           label={t("24h executions")}
-          // `null` means three different things here: not loaded yet, loading,
-          // and the audit read failed (`:106-108` sets it to null in `catch`).
-          // All three render "…", so a daemon that is offline shows a spinner
-          // that never resolves rather than an error. Splitting the state is a
-          // type change to `StatCard`'s `value`; parked as L2-63.
-          value={execCount24h ?? "…"}
+          value={execShown.status === "loading" ? "…" : execShown.status === "error" ? "—" : execShown.count}
+          hint={execShown.status === "error" ? t("Unavailable") : undefined}
           onClick={() => onNavigateModule("audit")}
         />
         <StatCard
@@ -166,20 +205,43 @@ function Dashboard({
           label={t("Credential store")}
           value={secretsLocked ? t("Locked") : t("Unlocked")}
           tone={secretsLocked ? "warning" : "success"}
+          onClick={
+            secretsLocked
+              ? onRequestUnlock
+              : () => onNavigateModule("keys")
+          }
         />
         <StatCard
           icon={daemonOk ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
           label={t("Local daemon")}
-          value={daemonOk ? t("Daemon running") : t("Daemon offline")}
-          hint={daemonHealth?.version ? `v${daemonHealth.version}` : undefined}
-          tone={daemonOk ? "success" : "destructive"}
+          value={
+            daemonOk
+              ? t("Daemon running")
+              : daemonStarting
+                ? t("Starting...")
+                : t("Daemon offline")
+          }
+          hint={daemonOk && daemonHealth?.version ? `v${daemonHealth.version}` : undefined}
+          tone={daemonOk ? "success" : daemonStarting ? "warning" : "destructive"}
+          busy={daemonStarting}
+          onClick={
+            daemonOk
+              ? () => onNavigateModule("activity")
+              : onStartDaemon
+                ? startDaemon
+                : undefined
+          }
         />
       </div>
 
       {/* Connectivity sweep: content-area display for the per-host ping results.
           It lived in the sidebar rail (crushed labels) and then a popover
           (full-height overlay for a 37-host fleet) before landing here. */}
-      <PingPanel hosts={hosts} />
+      <PingPanel
+        hosts={hosts}
+        onOpenTerminal={onOpenHostTerminal}
+        onInspectHost={onInspectHost}
+      />
     </div>
   );
 }

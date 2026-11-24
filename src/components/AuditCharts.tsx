@@ -1,39 +1,37 @@
 import { Activity, BarChart3, Flame, Radar } from "lucide-react";
-import { memo, Fragment, useEffect, useMemo, useRef, useState  } from "react";
+import { memo, Fragment, useMemo } from "react";
 import {
   Area,
   AreaChart,
   Bar,
   BarChart,
   CartesianGrid,
+  Cell,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
-import { api, reportError } from "../api";
-import { useAgentEvents } from "../eventsBus";
 import { useI18n } from "../i18n";
 import type { AuditEntry, RiskLevel } from "../types";
 import { Card } from "./ui/card";
 import { EmptyState } from "./ui/state";
 import { cn } from "../lib/utils";
 import { formatClockTime } from "../lib/format";
+import {
+  type AuditRange,
+  AUDIT_RANGE_MS,
+  AUDIT_UNKNOWN_SOURCE,
+  auditEntryInRange,
+  auditEntryMatchesHost,
+  auditEntryMatchesRisk,
+  auditEntryMatchesSource,
+  auditSourceKey,
+} from "./auditFilters";
 
-type RangeKey = "24h" | "7d" | "30d";
+export type { AuditRange };
 
-const RANGE_MS: Record<RangeKey, number> = {
-  "24h": 24 * 60 * 60 * 1000,
-  "7d": 7 * 24 * 60 * 60 * 1000,
-  "30d": 30 * 24 * 60 * 60 * 1000,
-};
-
-const RANGE_LABEL: Record<RangeKey, string> = { "24h": "24h", "7d": "7d", "30d": "30d" };
-
-// Dashboard already fetches a 30-day window with the same cap for its 24h
-// counter; reuse that convention here rather than depending on whatever limit
-// the AuditPanel filter below happens to be set to.
-const FETCH_LIMIT = 5000;
+const RANGE_LABEL: Record<AuditRange, string> = { "24h": "24h", "7d": "7d", "30d": "30d" };
 const HEATMAP_TOP_HOSTS = 8;
 
 const RISK_ORDER: RiskLevel[] = ["low", "medium", "high", "blocked"];
@@ -60,76 +58,59 @@ function TrendTooltip({ active, payload, label }: { active?: boolean; payload?: 
   );
 }
 
-function RiskTooltip({ active, payload }: { active?: boolean; payload?: Array<{ payload: { level: string; count: number } }> }) {
+function RiskTooltip({ active, payload }: { active?: boolean; payload?: Array<{ payload: { label: string; count: number } }> }) {
   if (!active || !payload?.length) return null;
-  const { level, count } = payload[0].payload;
+  const { label, count } = payload[0].payload;
   return (
     <div className={tooltipBoxCls()}>
-      <div className="text-muted-foreground">{level}</div>
+      <div className="text-muted-foreground">{label}</div>
       <div className="font-semibold">{count}</div>
     </div>
   );
 }
 
-function SourceTooltip({ active, payload }: { active?: boolean; payload?: Array<{ payload: { source: string; count: number } }> }) {
-  if (!active || !payload?.length) return null;
-  const { source, count } = payload[0].payload;
-  return (
-    <div className={tooltipBoxCls()}>
-      <div className="text-muted-foreground">{source}</div>
-      <div className="font-semibold">{count}</div>
-    </div>
-  );
-}
+type Props = {
+  entries: AuditEntry[];
+  range: AuditRange;
+  onRangeChange: (range: AuditRange) => void;
+  activeRisk?: RiskLevel | "";
+  activeSource?: string;
+  activeHost?: string;
+  onSelectRisk?: (level: RiskLevel) => void;
+  onSelectSource?: (source: string) => void;
+  onSelectHost?: (host: string) => void;
+  loading?: boolean;
+};
 
-/** V2-3: audit visualizations — execution trend, risk distribution, source ranking, host×hour heatmap. */
-function AuditCharts() {
+/** V2-3: audit visualizations. Entries and the shared range come from AuditWorkbench. */
+function AuditCharts({
+  entries,
+  range,
+  onRangeChange,
+  activeRisk = "",
+  activeSource = "",
+  activeHost = "",
+  onSelectRisk,
+  onSelectSource,
+  onSelectHost,
+  loading = false,
+}: Props) {
   const { t } = useI18n();
-  const [entries, setEntries] = useState<AuditEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [range, setRange] = useState<RangeKey>("24h");
 
-  const load = async () => {
-    try {
-      const since = new Date(Date.now() - RANGE_MS["30d"]).toISOString();
-      const list = await api.listAudit({ since, limit: FETCH_LIMIT });
-      setEntries(list);
-    } catch (err) {
-      reportError("audit-charts", "load audit data for charts failed", err);
-    } finally {
-      setLoading(false);
-    }
+  const windowed = useMemo(
+    () => entries.filter((entry) => auditEntryInRange(entry, range)),
+    [entries, range],
+  );
+
+  const keep = (entry: AuditEntry, skip: "risk" | "source" | "host" | "none") => {
+    if (skip !== "host" && !auditEntryMatchesHost(entry, activeHost)) return false;
+    if (skip !== "source" && !auditEntryMatchesSource(entry, activeSource)) return false;
+    if (skip !== "risk" && !auditEntryMatchesRisk(entry, activeRisk)) return false;
+    return true;
   };
 
-  useEffect(() => {
-    load();
-  }, []);
-
-  // Nudge a refresh when a new exec lands so the trend line keeps pace with
-  // live activity instead of only updating when the module is re-entered.
-  // Coalesced: a multi-host exec fires one completion event per host, and each
-  // reload pulls up to FETCH_LIMIT rows, so bursts collapse into one fetch.
-  const reloadTimer = useRef<number | null>(null);
-  useAgentEvents((event) => {
-    if (event.event_type !== "exec_completed" || reloadTimer.current !== null) return;
-    reloadTimer.current = window.setTimeout(() => {
-      reloadTimer.current = null;
-      load();
-    }, 1500);
-  });
-  useEffect(
-    () => () => {
-      if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current);
-    },
-    []
-  );
-
-  const windowed = useMemo(() => {
-    const cutoff = Date.now() - RANGE_MS[range];
-    return entries.filter((entry) => new Date(entry.ts).getTime() >= cutoff);
-  }, [entries, range]);
-
   const trend = useMemo(() => {
+    const scoped = windowed.filter((entry) => keep(entry, "none"));
     const buckets = new Map<string, number>();
     const bucketMs = range === "24h" ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
     const bucketCount = range === "24h" ? 24 : range === "7d" ? 7 : 30;
@@ -144,7 +125,7 @@ function AuditCharts() {
       buckets.set(key, 0);
     }
     const keys = [...buckets.keys()];
-    for (const entry of windowed) {
+    for (const entry of scoped) {
       const ts = new Date(entry.ts).getTime();
       const stepsAgo = Math.floor((now - ts) / bucketMs);
       const idx = bucketCount - 1 - stepsAgo;
@@ -153,33 +134,45 @@ function AuditCharts() {
       }
     }
     return keys.map((label) => ({ label, count: buckets.get(label) ?? 0 }));
-  }, [windowed, range]);
+    // keep() closes over the active filters; listing them keeps the buckets honest.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [windowed, range, activeHost, activeSource, activeRisk]);
 
   const riskDistribution = useMemo(() => {
+    const scoped = windowed.filter((entry) => keep(entry, "risk"));
     const counts = new Map<RiskLevel, number>();
-    for (const entry of windowed) counts.set(entry.risk_level, (counts.get(entry.risk_level) ?? 0) + 1);
+    for (const entry of scoped) counts.set(entry.risk_level, (counts.get(entry.risk_level) ?? 0) + 1);
     return RISK_ORDER.map((level) => ({
-      level: t(level),
+      level,
+      label: t(level),
       count: counts.get(level) ?? 0,
       fill: RISK_COLOR[level],
     }));
-  }, [windowed, t]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [windowed, activeHost, activeSource, t]);
 
   const sourceRanking = useMemo(() => {
+    const scoped = windowed.filter((entry) => keep(entry, "source"));
     const counts = new Map<string, number>();
-    for (const entry of windowed) {
-      const source = entry.source ?? t("unknown");
+    for (const entry of scoped) {
+      const source = auditSourceKey(entry);
       counts.set(source, (counts.get(source) ?? 0) + 1);
     }
     return [...counts.entries()]
-      .map(([source, count]) => ({ source, count }))
+      .map(([source, count]) => ({
+        source,
+        label: source === AUDIT_UNKNOWN_SOURCE ? t("unknown") : source,
+        count,
+      }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 8);
-  }, [windowed, t]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [windowed, activeHost, activeRisk, t]);
 
   const heatmap = useMemo(() => {
+    const scoped = windowed.filter((entry) => keep(entry, "host"));
     const totalsByHost = new Map<string, number>();
-    for (const entry of windowed) totalsByHost.set(entry.host, (totalsByHost.get(entry.host) ?? 0) + 1);
+    for (const entry of scoped) totalsByHost.set(entry.host, (totalsByHost.get(entry.host) ?? 0) + 1);
     const topHosts = [...totalsByHost.entries()]
       .sort((a, b) => b[1] - a[1])
       .slice(0, HEATMAP_TOP_HOSTS)
@@ -188,7 +181,7 @@ function AuditCharts() {
 
     const grid = new Map<string, number>();
     let max = 0;
-    for (const entry of windowed) {
+    for (const entry of scoped) {
       if (!topHostSet.has(entry.host)) continue;
       const hour = new Date(entry.ts).getHours();
       const key = `${entry.host}:${hour}`;
@@ -197,9 +190,11 @@ function AuditCharts() {
       if (next > max) max = next;
     }
     return { hosts: topHosts, grid, max };
-  }, [windowed]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [windowed, activeSource, activeRisk]);
 
   const hasData = windowed.length > 0;
+  const sourceMax = sourceRanking[0]?.count ?? 0;
 
   return (
     <Card className="space-y-4 p-4">
@@ -207,13 +202,13 @@ function AuditCharts() {
         <Activity size={16} className="text-muted-foreground" />
         {t("Audit trends")}
         <div className="ml-auto flex gap-1 rounded-md border border-border bg-muted/40 p-0.5">
-          {(Object.keys(RANGE_MS) as RangeKey[]).map((key) => (
+          {(Object.keys(AUDIT_RANGE_MS) as AuditRange[]).map((key) => (
             <button
               key={key}
               type="button"
-              onClick={() => setRange(key)}
+              onClick={() => onRangeChange(key)}
               className={cn(
-                "rounded px-2.5 py-1 text-xs font-semibold transition-colors",
+                "cursor-pointer rounded px-2.5 py-1 text-xs font-semibold transition-colors",
                 range === key ? "bg-card text-foreground" : "text-muted-foreground hover:text-foreground"
               )}
             >
@@ -274,7 +269,7 @@ function AuditCharts() {
                 <BarChart data={riskDistribution} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
                   <CartesianGrid vertical={false} stroke="var(--border)" />
                   <XAxis
-                    dataKey="level"
+                    dataKey="label"
                     tick={{ fill: "var(--muted-foreground)", fontSize: 11 }}
                     axisLine={{ stroke: "var(--border)" }}
                     tickLine={false}
@@ -287,7 +282,31 @@ function AuditCharts() {
                     width={32}
                   />
                   <Tooltip content={<RiskTooltip />} cursor={{ fill: "var(--muted)" }} />
-                  <Bar dataKey="count" radius={[4, 4, 0, 0]} maxBarSize={40} />
+                  <Bar
+                    dataKey="count"
+                    radius={[4, 4, 0, 0]}
+                    maxBarSize={40}
+                    className="cursor-pointer"
+                    cursor="pointer"
+                    onClick={(item) => {
+                      const level = item.payload?.level as RiskLevel | undefined;
+                      if (level) onSelectRisk?.(level);
+                    }}
+                  >
+                    {riskDistribution.map((row) => {
+                      const selected = activeRisk === row.level;
+                      return (
+                        <Cell
+                          key={row.level}
+                          fill={row.fill}
+                          cursor="pointer"
+                          className="cursor-pointer"
+                          stroke={selected ? "var(--foreground)" : "transparent"}
+                          strokeWidth={selected ? 2 : 0}
+                        />
+                      );
+                    })}
+                  </Bar>
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -298,33 +317,32 @@ function AuditCharts() {
               <Radar size={13} />
               {t("Executions by source")}
             </div>
-            <div style={{ height: Math.max(120, sourceRanking.length * 34) }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart
-                  data={sourceRanking}
-                  layout="vertical"
-                  margin={{ top: 4, right: 16, left: 8, bottom: 0 }}
-                >
-                  <CartesianGrid horizontal={false} stroke="var(--border)" />
-                  <XAxis
-                    type="number"
-                    allowDecimals={false}
-                    tick={{ fill: "var(--muted-foreground)", fontSize: 11 }}
-                    axisLine={{ stroke: "var(--border)" }}
-                    tickLine={false}
-                  />
-                  <YAxis
-                    type="category"
-                    dataKey="source"
-                    tick={{ fill: "var(--foreground)", fontSize: 12 }}
-                    axisLine={false}
-                    tickLine={false}
-                    width={90}
-                  />
-                  <Tooltip content={<SourceTooltip />} cursor={{ fill: "var(--muted)" }} />
-                  <Bar dataKey="count" fill="var(--primary)" radius={[0, 4, 4, 0]} maxBarSize={18} />
-                </BarChart>
-              </ResponsiveContainer>
+            <div className="grid gap-1">
+              {sourceRanking.map((row) => {
+                const selected = activeSource === row.source;
+                const width = sourceMax > 0 ? Math.round((row.count / sourceMax) * 100) : 0;
+                return (
+                  <button
+                    key={row.source}
+                    type="button"
+                    aria-label={row.label}
+                    aria-pressed={selected}
+                    onClick={() => onSelectSource?.(row.source)}
+                    className={cn(
+                      "grid cursor-pointer appearance-none grid-cols-[90px_1fr_auto] items-center gap-2 rounded-md border px-2 py-1 text-left text-xs",
+                      selected
+                        ? "border-primary bg-primary/10 text-foreground"
+                        : "border-transparent text-foreground hover:bg-muted",
+                    )}
+                  >
+                    <span className="truncate font-medium">{row.label}</span>
+                    <span aria-hidden className="h-2 overflow-hidden rounded-full bg-muted">
+                      <span className="block h-full rounded-full bg-primary" style={{ width: `${width}%` }} />
+                    </span>
+                    <span aria-hidden className="font-mono text-muted-foreground">{row.count}</span>
+                  </button>
+                );
+              })}
             </div>
           </div>
 
@@ -347,30 +365,49 @@ function AuditCharts() {
                       {hour % 3 === 0 ? hour : ""}
                     </div>
                   ))}
-                  {heatmap.hosts.map((host) => (
-                    <Fragment key={host}>
-                      <div className="truncate pr-1.5 text-xs text-foreground/85" title={host}>
-                        {host}
-                      </div>
-                      {Array.from({ length: 24 }, (_, hour) => {
-                        const count = heatmap.grid.get(`${host}:${hour}`) ?? 0;
-                        const intensity = heatmap.max > 0 ? Math.round((count / heatmap.max) * 90) + 10 : 0;
-                        return (
-                          <div
-                            key={`${host}-${hour}`}
-                            title={`${host} · ${hour}:00 · ${t("{count} executions", { count })}`}
-                            className="aspect-square rounded-[2px]"
-                            style={{
-                              background:
-                                count === 0
-                                  ? "var(--muted)"
-                                  : `color-mix(in srgb, var(--primary) ${intensity}%, var(--card))`,
-                            }}
-                          />
-                        );
-                      })}
-                    </Fragment>
-                  ))}
+                  {heatmap.hosts.map((host) => {
+                    const selected = activeHost === host;
+                    return (
+                      <Fragment key={host}>
+                        <button
+                          type="button"
+                          title={host}
+                          aria-pressed={selected}
+                          onClick={() => onSelectHost?.(host)}
+                          className={cn(
+                            "min-w-0 cursor-pointer appearance-none truncate border-0 bg-transparent p-0 pr-1.5 text-left text-xs",
+                            selected ? "font-semibold text-primary" : "text-foreground/85",
+                          )}
+                        >
+                          {host}
+                        </button>
+                        {Array.from({ length: 24 }, (_, hour) => {
+                          const count = heatmap.grid.get(`${host}:${hour}`) ?? 0;
+                          const intensity = heatmap.max > 0 ? Math.round((count / heatmap.max) * 90) + 10 : 0;
+                          return (
+                            <button
+                              key={`${host}-${hour}`}
+                              type="button"
+                              title={`${host} · ${hour}:00 · ${t("{count} executions", { count })}`}
+                              aria-label={`${host} ${hour}:00`}
+                              aria-pressed={selected}
+                              onClick={() => onSelectHost?.(host)}
+                              className={cn(
+                                "aspect-square cursor-pointer appearance-none rounded-[2px] border-0 p-0",
+                                selected && "ring-2 ring-primary",
+                              )}
+                              style={{
+                                background:
+                                  count === 0
+                                    ? "var(--muted)"
+                                    : `color-mix(in srgb, var(--primary) ${intensity}%, var(--card))`,
+                              }}
+                            />
+                          );
+                        })}
+                      </Fragment>
+                    );
+                  })}
                 </div>
               </div>
             )}

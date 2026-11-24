@@ -9,13 +9,13 @@ import {
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, reportError } from "./api";
 import { isAlreadyDecided } from "./lib/approval-decision";
-import { MODULES, RELATED_MODULES, SHORTCUT_MODULES, SIDEBAR_GROUPS, type ModuleId } from "./nav";
+import { MODULES, RELATED_MODULES, FULL_HEIGHT_MODULES, SHORTCUT_MODULES, SIDEBAR_GROUPS, type ModuleId } from "./nav";
+import { moduleSubtitle } from "./moduleSubtitle";
 import { DockedView, TerminalDock } from "./features/terminal/dock";
 import LiveTerminal from "./features/terminal/LiveTerminal";
 import AddHostForm from "./components/AddHostForm";
 import ApprovalWorkbench from "./components/approval/ApprovalWorkbench";
-import AuditCharts from "./components/AuditCharts";
-import AuditPanel from "./components/AuditPanel";
+import AuditWorkbench from "./components/AuditWorkbench";
 import RelatedActionsBar from "./components/RelatedActionsBar";
 import ConfigSnapshotsPanel from "./components/ConfigSnapshotsPanel";
 import ContainersPanel from "./components/ContainersPanel";
@@ -31,7 +31,7 @@ import ExecutionWorkbench from "./components/ExecutionWorkbench";
 import ForwardPanel from "./components/ForwardPanel";
 import HelpPanel from "./components/HelpPanel";
 import HostDrawer from "./components/HostDrawer";
-import HostList, { type HostConnectionProgress } from "./components/HostList";
+import HostList, { ALL_GROUPS_ID, type HostConnectionProgress } from "./components/HostList";
 import NetcattyImportDialog from "./components/NetcattyImportDialog";
 import KeysPanel from "./components/KeysPanel";
 import LiveActivityPanel from "./components/LiveActivityPanel";
@@ -55,7 +55,7 @@ import { useToast } from "./components/ui/toast";
 import { useAgentEvents } from "./eventsBus";
 import { useI18n } from "./i18n";
 import { cn } from "./lib/utils";
-import type { ApprovalRequest, AuditEntry, AuditFilter, ConnectionStatus, DaemonHealth, ExecutionGateStatus, HostFingerprintStatus, HostGroup, HostProfile, ProxyProfile } from "./types";
+import type { ApprovalRequest, AuditEntry, ConnectionStatus, DaemonHealth, ExecutionGateStatus, HostFingerprintStatus, HostGroup, HostProfile, ProxyProfile } from "./types";
 
 const APPROVAL_POLL_MS = 2000;
 const DAEMON_START_RECHECK_MS = 700;
@@ -144,13 +144,12 @@ export default function App() {
   const [execPreferredMode, setExecPreferredMode] = useState<
     "single" | "multi" | "playbooks" | undefined
   >(undefined);
-  const [selectedGroup, setSelectedGroup] = useState("default");
+  const [selectedGroup, setSelectedGroup] = useState(ALL_GROUPS_ID);
   const [editingHost, setEditingHost] = useState<HostProfile | null>(null);
   const [isHostDrawerOpen, setIsHostDrawerOpen] = useState(false);
   const [highlightedHost, setHighlightedHost] = useState<string | null>(null);
   const [netcattyOpen, setNetcattyOpen] = useState(false);
   const [activeModule, setActiveModule] = useState<(typeof MODULES)[number]["id"]>("dashboard");
-  const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [pendingApprovals, setPendingApprovals] = useState<ApprovalRequest[]>([]);
   const [connectionStatuses, setConnectionStatuses] = useState<ConnectionStatus[]>([]);
@@ -196,6 +195,10 @@ export default function App() {
     dockId: string | null;
     nonce: number;
   } | null>(null);
+  // F5: the anomaly card opens Activity on the attention filter. The epoch
+  // re-applies that filter when the card is opened again after a switch to all.
+  const [activityPreset, setActivityPreset] = useState<"all" | "attention">("all");
+  const [activityPresetEpoch, setActivityPresetEpoch] = useState(0);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   // V4-5: icon-only sidebar, independent of the existing max-lg full-stack
   // fallback for genuinely narrow/mobile-style widths.
@@ -228,6 +231,11 @@ export default function App() {
   );
 
   const openModule = useCallback((id: (typeof MODULES)[number]["id"]) => {
+    if (id === "playbooks") {
+      setExecPreferredMode("playbooks");
+      setActiveModule("execute");
+      return;
+    }
     setActiveModule(id);
   }, []);
 
@@ -257,10 +265,9 @@ export default function App() {
     });
   }, []);
 
-  const refreshAudit = useCallback(async (filter?: AuditFilter) => {
-    const auditList = await api.listAudit(filter);
-    setAudit(auditList);
-  }, []);
+  // AuditWorkbench owns its own fetch and SSE refresh, so execution completion
+  // does not need to fire a discarded audit read here.
+  const handleExecComplete = useCallback(() => {}, []);
 
   const runAutoWebDavSync = useCallback(async (reason: string) => {
     if (webDavSyncInFlight.current) return;
@@ -387,11 +394,6 @@ export default function App() {
       // ignore persistence failures
     }
   }, [sidebarCollapsed]);
-
-  useEffect(() => {
-    if (activeModule !== "audit") return;
-    refreshAudit().catch((err) => showToast("error", String(err)));
-  }, [activeModule, refreshAudit]);
 
   // K1: gate the UI behind a master-password unlock when the credential store is
   // initialized but locked, so saved SSH passwords can be decrypted.
@@ -729,6 +731,11 @@ export default function App() {
     [showToast, t],
   );
 
+  const openAddHostDrawer = useCallback(() => {
+    setEditingHost(null);
+    setIsHostDrawerOpen(true);
+  }, []);
+
   // v3 §3.5: ⌘K quick actions — sync / unlock credentials / new host. The
   // unlock entry surfaces the credential gate (or the Keys module when already
   // unlocked); actions are rebuilt when language or lock state changes.
@@ -770,12 +777,15 @@ export default function App() {
         id: "new-host",
         label: t("New host"),
         icon: Plus,
-        run: () => openModule("hosts"),
+        run: () => {
+          openModule("hosts");
+          openAddHostDrawer();
+        },
       },
     ],
     // openModule is a stable setState wrapper; showToast/t come from context.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [t, secretsLocked]
+    [t, secretsLocked, openAddHostDrawer]
   );
 
   // Stable replacements for the inline closures previously passed as panel
@@ -788,10 +798,6 @@ export default function App() {
   const closeHostDrawer = useCallback(() => {
     setIsHostDrawerOpen(false);
     setEditingHost(null);
-  }, []);
-  const openAddHostDrawer = useCallback(() => {
-    setEditingHost(null);
-    setIsHostDrawerOpen(true);
   }, []);
   const openEditHostDrawer = useCallback((host: HostProfile) => {
     setEditingHost(host);
@@ -852,12 +858,39 @@ export default function App() {
     (id: string) => openModule(id as (typeof MODULES)[number]["id"]),
     [openModule],
   );
+  // Host chips on the proxy, key, and tunnel pages land on that host.
+  const openHostInFleet = useCallback((name: string) => {
+    setSelectedGroup(ALL_GROUPS_ID);
+    setSelectedHost(name);
+    setHighlightedHost(name);
+    openModule("hosts");
+  }, [openModule]);
+  const requestCredentialUnlock = useCallback(() => {
+    if (secretsLocked) setUnlockRequested(true);
+  }, [secretsLocked]);
+  const startDaemonFromDashboard = useCallback(async () => {
+    try {
+      await ensureLocalDaemon();
+    } catch (err) {
+      showToast("error", String(err));
+    }
+  }, [ensureLocalDaemon, showToast]);
+  const openAnomalies = useCallback(() => {
+    setActivityPreset("attention");
+    setActivityPresetEpoch((epoch) => epoch + 1);
+    openModule("activity");
+  }, [openModule]);
   const replayAuditEntry = useCallback(
     (entry: AuditEntry) => raiseTerminalDrawer(entry.host, entry.command),
     [raiseTerminalDrawer],
   );
   const clearExecPreferredMode = useCallback(() => {
     setExecPreferredMode(undefined);
+  }, []);
+  const handleExecModeChange = useCallback((mode: "single" | "multi" | "playbooks") => {
+    if (mode === "single" || mode === "multi") {
+      setActiveModule((current) => (current === "playbooks" ? "execute" : current));
+    }
   }, []);
   const goToExecuteForApproval = useCallback(
     (approval: ApprovalRequest, command?: string) => {
@@ -869,6 +902,34 @@ export default function App() {
     },
     [openModule],
   );
+  const goToExecuteFromAudit = useCallback(
+    (entry: AuditEntry) => {
+      setSelectedHost(entry.host);
+      setExecInitialCommand(entry.command);
+      setExecCarryEpoch((epoch) => epoch + 1);
+      setExecPreferredMode("single");
+      openModule("execute");
+    },
+    [openModule],
+  );
+  const openHostInTerminal = useCallback((host: string) => {
+    setSelectedHost(host);
+    setTerminalFocusRequest((current) => ({
+      host,
+      dockId: null,
+      nonce: (current?.nonce ?? 0) + 1,
+    }));
+    openModule("terminal");
+  }, [openModule]);
+  const openHostInExecute = useCallback((host: string) => {
+    setSelectedHost(host);
+    setExecPreferredMode("single");
+    openModule("execute");
+  }, [openModule]);
+  const openHostInFiles = useCallback((host: string) => {
+    setSelectedHost(host);
+    openModule("files-sessions");
+  }, [openModule]);
 
   // TopBar's `actions` slot: memoized element identity keeps memo(TopBar) and
   // the memoized SettingsMenu from re-rendering on unrelated App state churn.
@@ -1266,40 +1327,50 @@ export default function App() {
 
       <section
         className={cn(
-          "flex min-h-0 min-w-0 flex-1 flex-col gap-5 p-6",
-          activeModule === "execute" || activeModule === "playbooks" ? "overflow-hidden" : "overflow-y-auto",
+          "flex min-h-0 min-w-0 flex-1 flex-col gap-3 p-6",
+          FULL_HEIGHT_MODULES.has(activeModule) ? "overflow-hidden" : "overflow-y-auto",
           activeModule === "terminal" && "hidden",
           !sidebarCollapsed && "max-lg:overflow-visible"
         )}
       >
-        <header className="flex items-start justify-between gap-4 max-md:flex-col">
+        <header className="flex shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2">
           <div className="min-w-0">
             <h2 className="flex items-center gap-2 text-xl font-bold">
               <ActiveModuleIcon size={20} className="text-muted-foreground" />
               {t(activeModuleMeta.label)}
             </h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {activeModule === "hosts" && currentHost
-                ? `${currentHost.user ? `${currentHost.user}@` : ""}${currentHost.host}:${currentHost.port ?? 22}${currentHost.jump_host ? ` via ${currentHost.jump_host}` : ""}${currentHostProxy ? ` · ${t("proxy")} ${currentHostProxy.name}` : ""}`
-                : hosts.length > 0
-                  ? t("{count} hosts configured", { count: hosts.length })
-                  : t("Add a host to start issuing SSH commands")}
+            <p className="mt-0.5 text-sm text-muted-foreground">
+              {(() => {
+                const connectedHosts = connectionStatuses.filter((status) => status.connected).length;
+                const hostSummary =
+                  activeModule === "hosts" && currentHost
+                    ? `${currentHost.user ? `${currentHost.user}@` : ""}${currentHost.host}:${currentHost.port ?? 22}${currentHost.jump_host ? ` via ${currentHost.jump_host}` : ""}${currentHostProxy ? ` · ${t("proxy")} ${currentHostProxy.name}` : ""}`
+                    : null;
+                const line = moduleSubtitle(activeModule, {
+                  pending: pendingApprovals.length,
+                  totalHosts: hosts.length,
+                  connectedHosts,
+                  selectedHost,
+                  hostSummary,
+                });
+                return line.raw ? line.text : t(line.text, line.vars);
+              })()}
             </p>
           </div>
+          {relatedModules.length > 0 && (
+            <RelatedActionsBar
+              className="max-w-full justify-end lg:max-w-[58%]"
+              current={activeModuleMeta}
+              related={relatedModules}
+              onNavigate={navigateModule}
+            />
+          )}
         </header>
-
-        {relatedModules.length > 0 && (
-          <RelatedActionsBar
-            current={activeModuleMeta}
-            related={relatedModules}
-            onNavigate={navigateModule}
-          />
-        )}
 
         <section
           className={cn(
             "module-page",
-            (activeModule === "execute" || activeModule === "playbooks") && "flex min-h-0 flex-1 flex-col",
+            FULL_HEIGHT_MODULES.has(activeModule) && "flex min-h-0 flex-1 flex-col",
           )}
         >
         {activeModule === "dashboard" && (
@@ -1310,12 +1381,17 @@ export default function App() {
             secretsLocked={secretsLocked}
             daemonHealth={daemonHealth}
             onNavigateModule={navigateModule}
+            onRequestUnlock={requestCredentialUnlock}
+            onStartDaemon={startDaemonFromDashboard}
+            onOpenAnomalies={openAnomalies}
+            onOpenHostTerminal={openHostInTerminal}
+            onInspectHost={openHostInFleet}
           />
         )}
 
         {activeModule === "hosts" && (
           <div className="space-y-4">
-            <LocalEnvironmentsCard />
+            <LocalEnvironmentsCard onExecuteLocal={openHostInExecute} />
             <HostList
               hosts={hosts}
               groups={groups}
@@ -1331,6 +1407,9 @@ export default function App() {
               onRenameGroup={handleRenameGroup}
               onDeleteGroup={handleDeleteGroup}
               onOpenAddHost={openAddHostDrawer}
+              onOpenTerminal={openHostInTerminal}
+              onOpenExecute={openHostInExecute}
+              onOpenFiles={openHostInFiles}
               onEdit={openEditHostDrawer}
               onRemove={handleRemoveHost}
               onBatchRemove={handleBatchRemoveHosts}
@@ -1350,7 +1429,7 @@ export default function App() {
                 hosts={hosts}
                 groups={groups}
                 proxies={proxies}
-                initialGroup={selectedGroup}
+                initialGroup={selectedGroup === ALL_GROUPS_ID ? "default" : selectedGroup}
                 editingHost={editingHost}
                 onCancelEdit={closeHostDrawer}
                 onSaved={handleHostSaved}
@@ -1361,20 +1440,26 @@ export default function App() {
         )}
 
         {activeModule === "proxies" && (
-          <ProxyPanel proxies={proxies} hosts={hosts} onChanged={handleProxyChanged} />
+          <ProxyPanel
+            proxies={proxies}
+            hosts={hosts}
+            onChanged={handleProxyChanged}
+            onSelectHost={openHostInFleet}
+          />
         )}
 
         {activeModule === "recordings" && <RecordingsPanel />}
 
-        {activeModule === "execute" && (
+        {(activeModule === "execute" || activeModule === "playbooks") && (
           <ExecutionWorkbench
             hosts={hosts}
             initialHost={selectedHost}
             initialCommand={execInitialCommand}
             carryEpoch={execCarryEpoch}
-            preferredMode={execPreferredMode}
-            onPreferredModeApplied={clearExecPreferredMode}
-            onExecComplete={refreshAudit}
+            preferredMode={activeModule === "playbooks" ? "playbooks" : execPreferredMode}
+            onPreferredModeApplied={activeModule === "playbooks" ? undefined : clearExecPreferredMode}
+            onModeChange={handleExecModeChange}
+            onExecComplete={handleExecComplete}
           />
         )}
 
@@ -1387,37 +1472,27 @@ export default function App() {
             hosts={hosts}
             initialHost={selectedHost}
             onChanged={handleForwardChanged}
+            onSelectHost={openHostInFleet}
           />
         )}
 
-        {activeModule === "activity" && <LiveActivityPanel />}
+        {activeModule === "activity" && (
+          <LiveActivityPanel presetFilter={activityPreset} presetEpoch={activityPresetEpoch} />
+        )}
 
         {activeModule === "mcp-agents" && <McpAgentsPanel />}
 
         {activeModule === "sync" && <SyncPanel onRestored={refresh} />}
 
-        {activeModule === "keys" && <KeysPanel onChanged={handleKeyChanged} />}
-
-        {activeModule === "playbooks" && (
-          <ExecutionWorkbench
-            hosts={hosts}
-            initialHost={selectedHost}
-            initialCommand={execInitialCommand}
-            carryEpoch={execCarryEpoch}
-            preferredMode="playbooks"
-            onExecComplete={refreshAudit}
-          />
+        {activeModule === "keys" && (
+          <KeysPanel hosts={hosts} onChanged={handleKeyChanged} onSelectHost={openHostInFleet} />
         )}
 
         {activeModule === "audit" && (
-          <div className="grid gap-[18px]">
-            <AuditCharts />
-            <AuditPanel
-              audit={audit}
-              onRefresh={refreshAudit}
-              onReplay={replayAuditEntry}
-            />
-          </div>
+          <AuditWorkbench
+            onReplay={replayAuditEntry}
+            onEditAndExecute={goToExecuteFromAudit}
+          />
         )}
 
         {activeModule === "help" && <HelpPanel />}

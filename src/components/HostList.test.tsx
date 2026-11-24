@@ -114,7 +114,8 @@ describe("HostList", () => {
   it("forgets a host in the system OpenSSH known_hosts from the row action", () => {
     const { props } = renderHostList();
 
-    fireEvent.click(screen.getByTitle("Forget web-01 in OpenSSH known_hosts"));
+    fireEvent.click(screen.getByTitle("More actions for web-01"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Forget web-01 in OpenSSH known_hosts" }));
 
     expect(props.onForgetOpenssh).toHaveBeenCalledWith(expect.objectContaining({ name: "web-01" }));
   });
@@ -127,13 +128,16 @@ describe("HostList", () => {
     expect(props.onImportOpensshTrust).toHaveBeenCalledTimes(1);
   });
 
-  it("filters hosts by env", () => {    renderHostList({
+  it("filters hosts by env", () => {
+    renderHostList({
       hosts: [
         makeHost({ name: "web-01", env: "prod" }),
         makeHost({ name: "web-02", host: "10.0.0.2", env: "staging" }),
       ],
     });
 
+    expect(screen.queryByPlaceholderText("env")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Attribute filters/ }));
     fireEvent.change(screen.getByPlaceholderText("env"), { target: { value: "prod" } });
 
     expect(screen.getByText("web-01")).toBeTruthy();
@@ -187,11 +191,118 @@ describe("HostList", () => {
   it("removes a host after confirming in the dialog", () => {
     const { props } = renderHostList();
 
-    fireEvent.click(screen.getByTitle("Remove web-01"));
+    fireEvent.click(screen.getByTitle("More actions for web-01"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Remove web-01" }));
     expect(screen.getByText("Remove host web-01?")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Remove" }));
 
     expect(props.onRemove).toHaveBeenCalledWith("web-01");
+  });
+
+  it("shows every host from the All group and counts the full list", () => {
+    const { props, rerender } = renderHostList({
+      selectedGroup: "__all__",
+      groups: [
+        { id: "default", name: "Default", color: "#4A6CF7", sort_order: 0 },
+        { id: "prod", name: "Prod", color: "#22c55e", sort_order: 1 },
+      ],
+      hosts: [
+        makeHost({ name: "web-01", group: "default" }),
+        makeHost({ name: "db-01", host: "10.0.0.9", user: "root", group: "prod" }),
+      ],
+    });
+
+    expect(screen.getByText("web-01")).toBeTruthy();
+    expect(screen.getByText("db-01")).toBeTruthy();
+    const all = screen.getByRole("button", { name: /All hosts/ });
+    expect(within(all).getByText("2")).toBeTruthy();
+    const defaultGroup = screen.getByRole("button", { name: /Default/ });
+    expect(
+      all.compareDocumentPosition(defaultGroup) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+
+    fireEvent.click(all);
+    expect(props.onGroupSelect).toHaveBeenCalledWith("__all__");
+
+    rerender(
+      <I18nProvider>
+        <HostList {...props} selectedGroup="prod" />
+      </I18nProvider>
+    );
+    expect(screen.queryByText("web-01")).toBeNull();
+    expect(screen.getByText("db-01")).toBeTruthy();
+    expect(within(screen.getByRole("button", { name: /All hosts/ })).getByText("2")).toBeTruthy();
+  });
+
+  it("filters by a case-insensitive substring and clears the search", () => {
+    renderHostList({
+      hosts: [
+        makeHost({ name: "web-01", host: "10.1.2.3", user: "deploy", tags: ["edge"] }),
+        makeHost({ name: "db-01", host: "10.9.9.9", user: "root", tags: ["data"] }),
+      ],
+    });
+
+    const search = screen.getByPlaceholderText("Search hosts, addresses, tags");
+    fireEvent.change(search, { target: { value: "10.1" } });
+    expect(screen.getByText("web-01")).toBeTruthy();
+    expect(screen.queryByText("db-01")).toBeNull();
+
+    fireEvent.change(search, { target: { value: "DATA" } });
+    expect(screen.queryByText("web-01")).toBeNull();
+    expect(screen.getByText("db-01")).toBeTruthy();
+
+    fireEvent.change(search, { target: { value: "ROOT" } });
+    expect(screen.getByText("db-01")).toBeTruthy();
+    expect(screen.queryByText("web-01")).toBeNull();
+
+    fireEvent.click(screen.getByTitle("Clear search"));
+    expect(screen.getByText("web-01")).toBeTruthy();
+    expect(screen.getByText("db-01")).toBeTruthy();
+  });
+
+  it("matches attribute filters by case-insensitive substring and shows the active count", () => {
+    renderHostList({
+      hosts: [
+        makeHost({ name: "web-01", env: "Production", role: "edge", owner: "SRE", tags: ["edge-tier"] }),
+        makeHost({ name: "web-02", host: "10.0.0.2", env: "staging", role: "db", owner: "Data", tags: ["core"] }),
+      ],
+    });
+
+    expect(screen.queryByPlaceholderText("env")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Attribute filters/ }));
+    fireEvent.change(screen.getByPlaceholderText("env"), { target: { value: "prod" } });
+    expect(screen.getByText("web-01")).toBeTruthy();
+    expect(screen.queryByText("web-02")).toBeNull();
+    expect(within(screen.getByRole("button", { name: /Attribute filters/ })).getByText("1")).toBeTruthy();
+
+    fireEvent.change(screen.getByPlaceholderText("env"), { target: { value: "" } });
+    fireEvent.change(screen.getByPlaceholderText("tag"), { target: { value: "EDGE" } });
+    expect(screen.getByText("web-01")).toBeTruthy();
+    expect(screen.queryByText("web-02")).toBeNull();
+
+    fireEvent.change(screen.getByPlaceholderText("tag"), { target: { value: "" } });
+    fireEvent.change(screen.getByPlaceholderText("owner"), { target: { value: "sr" } });
+    expect(screen.getByText("web-01")).toBeTruthy();
+    expect(screen.queryByText("web-02")).toBeNull();
+  });
+
+  it("opens terminal, execute and SFTP from the row without selecting the host", () => {
+    const { props } = renderHostList({
+      onOpenTerminal: vi.fn(),
+      onOpenExecute: vi.fn(),
+      onOpenFiles: vi.fn(),
+    });
+
+    const row = screen.getByText("web-01").closest("tr")!;
+    fireEvent.click(within(row).getByTitle("Open terminal web-01"));
+    fireEvent.click(within(row).getByTitle("Execute on web-01"));
+    fireEvent.click(within(row).getByTitle("Open SFTP web-01"));
+    fireEvent.click(within(row).getByTitle("More actions for web-01"));
+
+    expect(props.onOpenTerminal).toHaveBeenCalledWith("web-01");
+    expect(props.onOpenExecute).toHaveBeenCalledWith("web-01");
+    expect(props.onOpenFiles).toHaveBeenCalledWith("web-01");
+    expect(props.onSelect).not.toHaveBeenCalled();
   });
 });

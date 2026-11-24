@@ -1,5 +1,5 @@
 import { Server } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import { useI18n } from "../i18n";
 import { labelCls } from "../lib/ui-classes";
 import type { HostProfile } from "../types";
@@ -40,6 +40,14 @@ type Props = {
   shell?: Shell;
   /** Forwarded to the `<select>` itself, for callers that size it. */
   selectClassName?: string;
+  /**
+   * Extra targets that are legal even though they are not SSH hosts — `local`
+   * and `local:<id>`. A value in one of these groups is left alone, including
+   * when `hosts` is empty, instead of being reset to the first host.
+   */
+  extraGroups?: Array<{ label: string; options: Array<{ value: string; label: string }> }>;
+  /** Optgroup label for `hosts` when `extraGroups` splits the menu. */
+  hostGroupLabel?: string;
 };
 
 function describeHost(host: HostProfile): string {
@@ -69,37 +77,69 @@ export default function HostSelector({
   optionLabel = describeHost,
   shell = "label",
   selectClassName,
+  extraGroups,
+  hostGroupLabel,
 }: Props) {
   const { t } = useI18n();
+  const extraKey = useMemo(
+    () =>
+      (extraGroups ?? [])
+        .flatMap((group) => group.options.map((option) => option.value))
+        .join("\0"),
+    [extraGroups],
+  );
+  const hasExtra = extraKey.length > 0;
 
   useEffect(() => {
+    const extraValues = extraKey ? extraKey.split("\0") : [];
+    if (extraValues.includes(value) || hosts.some((host) => host.name === value)) return;
     if (hosts.length === 0) {
+      // No SSH host to fall back to. A local target is still a real answer, so
+      // take the first extra option instead of clearing one the caller set.
+      if (!allowEmpty && extraValues[0]) {
+        onChange(extraValues[0]);
+        return;
+      }
       if (value) onChange("");
       return;
     }
-    if (hosts.some((host) => host.name === value)) return;
     // The value is not selectable any more. When an empty value is legal it is
     // the right fallback — that is what "none" means. When it is not, the
     // control has to hold something real, so take the first host.
     const next = allowEmpty ? "" : hosts[0].name;
     if (next !== value) onChange(next);
-  }, [hosts, onChange, value, allowEmpty]);
+  }, [hosts, onChange, value, allowEmpty, extraKey]);
+
+  const hostOptions = hosts.map((host) => (
+    <option key={host.name} value={host.name}>
+      {optionLabel(host)}
+    </option>
+  ));
 
   const select = (
     <Select
       value={value}
       onChange={(event) => onChange(event.target.value)}
-      disabled={disabled || (hosts.length === 0 && !allowEmpty)}
+      disabled={disabled || (hosts.length === 0 && !hasExtra && !allowEmpty)}
       className={selectClassName}
     >
       {emptyOption !== undefined && <option value="">{emptyOption}</option>}
-      {emptyOption === undefined && hosts.length === 0 && (
+      {emptyOption === undefined && hosts.length === 0 && !hasExtra && (
         <option value="">{t("No hosts")}</option>
       )}
-      {hosts.map((host) => (
-        <option key={host.name} value={host.name}>
-          {optionLabel(host)}
-        </option>
+      {hasExtra && hosts.length > 0 ? (
+        <optgroup label={hostGroupLabel ?? t("SSH hosts")}>{hostOptions}</optgroup>
+      ) : (
+        hostOptions
+      )}
+      {extraGroups?.map((group) => (
+        <optgroup key={group.label} label={group.label}>
+          {group.options.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </optgroup>
       ))}
     </Select>
   );

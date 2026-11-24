@@ -29,6 +29,8 @@ type Props = {
    */
   preferredMode?: ExecMode;
   onPreferredModeApplied?: () => void;
+  /** Fired when the user picks a tab. Programmatic mode changes stay local. */
+  onModeChange?: (mode: ExecMode) => void;
   onExecComplete: () => void;
 };
 
@@ -50,6 +52,7 @@ function ExecutionWorkbench({
   carryEpoch = 0,
   preferredMode,
   onPreferredModeApplied,
+  onModeChange,
   onExecComplete,
 }: Props) {
   const { t } = useI18n();
@@ -115,7 +118,10 @@ function ExecutionWorkbench({
                   ? "bg-primary text-primary-foreground"
                   : "text-muted-foreground hover:text-foreground",
               )}
-              onClick={() => setMode(item.id)}
+              onClick={() => {
+                setMode(item.id);
+                onModeChange?.(item.id);
+              }}
             >
               {t(item.label)}
             </button>

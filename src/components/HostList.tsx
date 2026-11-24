@@ -1,14 +1,20 @@
 import {
+  ChevronDown,
+  ChevronUp,
   Edit3,
   Folder,
+  FolderOpen,
+  MoreHorizontal,
+  Play,
   Plug,
   PlugZap,
   Plus,
   RefreshCw,
   Save,
+  Search,
   Server,
   ShieldCheck,
-  ShieldMinus,
+  Terminal,
   Trash2,
   X,
 } from "lucide-react";
@@ -26,6 +32,7 @@ import type { ConnectionStatus, HostGroup, HostProfile, ProxyProfile } from "../
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
+import { ContextMenu } from "./ui/context-menu";
 import { ColumnVisibilityMenu, DataTable, selectColumn } from "./ui/data-table";
 import { ConfirmDialog } from "./ui/dialog";
 import { IconButton } from "./ui/icon-button";
@@ -55,6 +62,12 @@ type Props = {
   onDeleteGroup: (id: string) => void | Promise<void>;
   onEdit: (host: HostProfile) => void;
   onOpenAddHost: () => void;
+  /** Open this host in the terminal module. */
+  onOpenTerminal?: (hostName: string) => void;
+  /** Open this host on the single-host execute workbench. */
+  onOpenExecute?: (hostName: string) => void;
+  /** Open this host in the SFTP / files module. */
+  onOpenFiles?: (hostName: string) => void;
   /** In-flight (or just-finished) SSH connect. Only the matching row renders it. */
   connectionProgress?: HostConnectionProgress | null;
   /** Host just saved. The row is highlighted and scrolled into view. */
@@ -71,6 +84,9 @@ type Props = {
   /** Open the Netcatty vault-backup importer. */
   onImportNetcatty: () => void;
 };
+
+/** Group id that lists every host, ignoring `host.group`. */
+export const ALL_GROUPS_ID = "__all__";
 
 type ConnState = { connected: boolean; dotClass: string; label: string };
 
@@ -97,6 +113,9 @@ function HostList({
   onDeleteGroup,
   onEdit,
   onOpenAddHost,
+  onOpenTerminal,
+  onOpenExecute,
+  onOpenFiles,
   connectionProgress,
   highlightHost,
   onRemove,
@@ -116,6 +135,9 @@ function HostList({
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [editingGroupName, setEditingGroupName] = useState("");
   const [filters, setFilters] = useState({ env: "", role: "", owner: "", tag: "" });
+  const [query, setQuery] = useState("");
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
+  const [rowMenu, setRowMenu] = useState<{ host: HostProfile; x: number; y: number } | null>(null);
   const [sorting, setSorting] = useState<SortingState>([]);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const listRef = useRef<HTMLDivElement>(null);
@@ -132,18 +154,22 @@ function HostList({
   const filteredHosts = useMemo(
     () =>
       hosts.filter((host) => {
-        if ((host.group || "default") !== selectedGroup) return false;
+        if (selectedGroup !== ALL_GROUPS_ID && (host.group || "default") !== selectedGroup) {
+          return false;
+        }
+        if (!matchesHostQuery(host, query)) return false;
         if (!matchesFilter(host.env, filters.env)) return false;
         if (!matchesFilter(host.role, filters.role)) return false;
         if (!matchesFilter(host.owner, filters.owner)) return false;
-        const tag = filters.tag.trim().toLowerCase();
-        if (tag && !(host.tags ?? []).some((item) => item.trim().toLowerCase() === tag)) {
-          return false;
-        }
+        if (!matchesTag(host.tags, filters.tag)) return false;
         return true;
       }),
-    [hosts, filters, selectedGroup]
+    [hosts, filters, query, selectedGroup]
   );
+
+  const activeFilterCount = [filters.env, filters.role, filters.owner, filters.tag].filter((value) =>
+    value.trim()
+  ).length;
 
   // K5: surface the supervisor's liveness/reconnect state, not just presence.
   function connectionState(name: string): ConnState {
@@ -282,15 +308,45 @@ function HostList({
           const connected = row.original.connected;
           return (
             <div className="flex items-center justify-end gap-1">
-              <IconButton
-                title={t("Edit {name}", { name: host.name })}
+              <Button
+                variant="outline"
+                size="sm"
+                className="px-2"
+                title={t("Open terminal {name}", { name: host.name })}
                 onClick={(e) => {
                   e.stopPropagation();
-                  onEdit(host);
+                  onOpenTerminal?.(host.name);
                 }}
               >
-                <Edit3 size={14} />
-              </IconButton>
+                <Terminal size={14} />
+                {t("Terminal")}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="px-2"
+                title={t("Execute on {name}", { name: host.name })}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenExecute?.(host.name);
+                }}
+              >
+                <Play size={14} />
+                {t("Execute")}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="px-2"
+                title={t("Open SFTP {name}", { name: host.name })}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenFiles?.(host.name);
+                }}
+              >
+                <FolderOpen size={14} />
+                {t("SFTP")}
+              </Button>
               <IconButton
                 title={
                   connected
@@ -305,23 +361,24 @@ function HostList({
                 {connected ? <PlugZap size={14} /> : <Plug size={14} />}
               </IconButton>
               <IconButton
-                title={t("Forget {name} in OpenSSH known_hosts", { name: host.name })}
+                title={t("Edit {name}", { name: host.name })}
                 onClick={(e) => {
                   e.stopPropagation();
-                  onForgetOpenssh(host);
+                  onEdit(host);
                 }}
               >
-                <ShieldMinus size={14} />
+                <Edit3 size={14} />
               </IconButton>
               <IconButton
-                variant="danger"
-                title={t("Remove {name}", { name: host.name })}
+                title={t("More actions for {name}", { name: host.name })}
+                aria-haspopup="menu"
                 onClick={(e) => {
                   e.stopPropagation();
-                  setConfirmTarget(host.name);
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setRowMenu({ host, x: rect.left, y: rect.bottom + 4 });
                 }}
               >
-                <Trash2 size={14} />
+                <MoreHorizontal size={14} />
               </IconButton>
             </div>
           );
@@ -329,7 +386,7 @@ function HostList({
       }),
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [t, proxies, onForgetOpenssh, connectionProgress]
+    [t, proxies, onForgetOpenssh, connectionProgress, onOpenTerminal, onOpenExecute, onOpenFiles, onEdit, onConnect, onDisconnect]
   );
 
   const table = useReactTable({
@@ -386,6 +443,21 @@ function HostList({
           {t("Groups")}
         </div>
         <div className="grid gap-1.5">
+          <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-1">
+            <button
+              type="button"
+              className={cn(
+                "flex items-center justify-between gap-2 rounded-md border px-2.5 py-1.5 text-left text-sm transition-colors",
+                selectedGroup === ALL_GROUPS_ID
+                  ? "border-primary/40 bg-primary/10 text-primary"
+                  : "border-border bg-card hover:bg-muted"
+              )}
+              onClick={() => onGroupSelect(ALL_GROUPS_ID)}
+            >
+              <span className="truncate">{t("All hosts")}</span>
+              <span className="text-xs text-muted-foreground">{hosts.length}</span>
+            </button>
+          </div>
           {groups.map((group) => {
             const isDefault = group.id === "default";
             const editing = editingGroupId === group.id;
@@ -483,32 +555,72 @@ function HostList({
         </div>
       </div>
 
-      <div className="grid grid-cols-4 gap-2 max-sm:grid-cols-2">
-        <Input
-          className="h-8"
-          value={filters.env}
-          onChange={(e) => setFilters({ ...filters, env: e.target.value })}
-          placeholder={t("env")}
-        />
-        <Input
-          className="h-8"
-          value={filters.role}
-          onChange={(e) => setFilters({ ...filters, role: e.target.value })}
-          placeholder={t("role")}
-        />
-        <Input
-          className="h-8"
-          value={filters.owner}
-          onChange={(e) => setFilters({ ...filters, owner: e.target.value })}
-          placeholder={t("owner")}
-        />
-        <Input
-          className="h-8"
-          value={filters.tag}
-          onChange={(e) => setFilters({ ...filters, tag: e.target.value })}
-          placeholder={t("tag")}
-        />
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative min-w-0 flex-1">
+          <Search
+            size={14}
+            className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
+          />
+          <Input
+            className="h-8 pl-8 pr-8"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={t("Search hosts, addresses, tags")}
+          />
+          {query && (
+            <IconButton
+              variant="ghost"
+              size="sm"
+              title={t("Clear search")}
+              className="absolute right-0.5 top-1/2 -translate-y-1/2"
+              onClick={() => setQuery("")}
+            >
+              <X size={14} />
+            </IconButton>
+          )}
+        </div>
+        <Button
+          variant={showAdvancedFilters ? "secondary" : "outline"}
+          size="sm"
+          aria-expanded={showAdvancedFilters}
+          onClick={() => setShowAdvancedFilters((open) => !open)}
+        >
+          {showAdvancedFilters ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+          {t("Attribute filters")}
+          {activeFilterCount > 0 && (
+            <Badge className="min-w-5 justify-center px-1.5">{activeFilterCount}</Badge>
+          )}
+        </Button>
       </div>
+
+      {showAdvancedFilters && (
+        <div className="grid grid-cols-4 gap-2 max-sm:grid-cols-2">
+          <Input
+            className="h-8"
+            value={filters.env}
+            onChange={(e) => setFilters({ ...filters, env: e.target.value })}
+            placeholder={t("env")}
+          />
+          <Input
+            className="h-8"
+            value={filters.role}
+            onChange={(e) => setFilters({ ...filters, role: e.target.value })}
+            placeholder={t("role")}
+          />
+          <Input
+            className="h-8"
+            value={filters.owner}
+            onChange={(e) => setFilters({ ...filters, owner: e.target.value })}
+            placeholder={t("owner")}
+          />
+          <Input
+            className="h-8"
+            value={filters.tag}
+            onChange={(e) => setFilters({ ...filters, tag: e.target.value })}
+            placeholder={t("tag")}
+          />
+        </div>
+      )}
 
       {selectedNames.length > 0 && (
         <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2">
@@ -540,7 +652,7 @@ function HostList({
         ) : (
           <DataTable
             table={table}
-            minWidth={560}
+            minWidth={860}
             wrapperClassName="contents"
             onRowClick={(row) => onSelect(row.original.host.name)}
             rowAttrs={(row) => ({ "data-host": row.original.host.name })}
@@ -555,6 +667,25 @@ function HostList({
           />
         )}
       </div>
+
+      {rowMenu && (
+        <ContextMenu
+          x={rowMenu.x}
+          y={rowMenu.y}
+          onClose={() => setRowMenu(null)}
+          items={[
+            {
+              label: t("Forget {name} in OpenSSH known_hosts", { name: rowMenu.host.name }),
+              onSelect: () => onForgetOpenssh(rowMenu.host),
+            },
+            {
+              label: t("Remove {name}", { name: rowMenu.host.name }),
+              danger: true,
+              onSelect: () => setConfirmTarget(rowMenu.host.name),
+            },
+          ]}
+        />
+      )}
 
       {confirmTarget && (
         <ConfirmDialog
@@ -641,10 +772,31 @@ function HostConnectionProgressBar({ progress }: { progress: HostConnectionProgr
   );
 }
 
+function matchesHostQuery(host: HostProfile, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return true;
+  const fields = [
+    host.name,
+    host.host,
+    host.user,
+    host.env,
+    host.role,
+    host.owner,
+    ...(host.tags ?? []),
+  ];
+  return fields.some((field) => (field ?? "").toLowerCase().includes(needle));
+}
+
 function matchesFilter(value: string | null | undefined, filter: string): boolean {
   const normalized = filter.trim().toLowerCase();
   if (!normalized) return true;
-  return (value ?? "").trim().toLowerCase() === normalized;
+  return (value ?? "").toLowerCase().includes(normalized);
+}
+
+function matchesTag(tags: string[] | null | undefined, filter: string): boolean {
+  const normalized = filter.trim().toLowerCase();
+  if (!normalized) return true;
+  return (tags ?? []).some((item) => item.toLowerCase().includes(normalized));
 }
 
 export default memo(HostList);

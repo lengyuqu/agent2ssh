@@ -96,6 +96,17 @@ describe("ExecutionWorkbench", () => {
     expect(screen.queryByTestId("multi-exec-panel")).toBeNull();
   });
 
+  it("reports a tab change through onModeChange", () => {
+    const onModeChange = vi.fn();
+    render(tree({ onModeChange }));
+    fireEvent.click(screen.getByRole("tab", { name: "Multi-Host" }));
+    expect(onModeChange).toHaveBeenCalledWith("multi");
+    fireEvent.click(screen.getByRole("tab", { name: "Playbooks" }));
+    expect(onModeChange).toHaveBeenCalledWith("playbooks");
+    fireEvent.click(screen.getByRole("tab", { name: "Single Host" }));
+    expect(onModeChange).toHaveBeenCalledWith("single");
+  });
+
   it("keeps the playbooks route on playbooks when a command is already carried", () => {
     localStorage.setItem(EXEC_MODE_STORAGE_KEY, "single");
     render(tree({ preferredMode: "playbooks", initialCommand: "docker ps", carryEpoch: 3 }));

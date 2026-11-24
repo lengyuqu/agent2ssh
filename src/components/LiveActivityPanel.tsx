@@ -4,6 +4,7 @@ import { api } from "../api";
 import { useAgentEvents, useEventsStatus } from "../eventsBus";
 import { useI18n } from "../i18n";
 import type { AgentEvent, AuditEntry } from "../types";
+import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { Select } from "./ui/select";
 import { EmptyState, InlineAlert } from "./ui/state";
@@ -117,7 +118,14 @@ const statusCls: Record<string, string> = {
   offline: "bg-destructive/15 text-destructive",
 };
 
-function LiveActivityPanel() {
+type LiveActivityPanelProps = {
+  /** When App opens this panel from the dashboard anomaly card. */
+  presetFilter?: "all" | "attention";
+  /** Bumped on each open so a later click re-applies the preset after the user chose All. */
+  presetEpoch?: number;
+};
+
+function LiveActivityPanel({ presetFilter, presetEpoch = 0 }: LiveActivityPanelProps) {
   const { t } = useI18n();
   const status = useEventsStatus();
   const [events, setEvents] = useState<AgentEvent[]>([]);
@@ -125,6 +133,7 @@ function LiveActivityPanel() {
   const [sourceFilter, setSourceFilter] = useState("all");
   const [kindFilter, setKindFilter] = useState("all");
   const [search, setSearch] = useState("");
+  const [attentionOnly, setAttentionOnly] = useState(presetFilter === "attention");
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const eventQueueRef = useRef<AgentEvent[]>([]);
   const flushTimerRef = useRef<number | null>(null);
@@ -148,6 +157,11 @@ function LiveActivityPanel() {
       eventQueueRef.current = [];
     };
   }, []);
+
+  useEffect(() => {
+    if (presetFilter == null) return;
+    setAttentionOnly(presetFilter === "attention");
+  }, [presetFilter, presetEpoch]);
 
   useEffect(() => {
     let active = true;
@@ -191,6 +205,7 @@ function LiveActivityPanel() {
   const items = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return allItems.filter((item) => {
+      if (attentionOnly && !needsAttention(item)) return false;
       if (sourceFilter !== "all" && item.source !== sourceFilter) return false;
       if (kindFilter !== "all" && item.kind !== kindFilter) return false;
       if (!needle) return true;
@@ -210,7 +225,7 @@ function LiveActivityPanel() {
         .filter(Boolean)
         .some((value) => value!.toLowerCase().includes(needle));
     });
-  }, [allItems, kindFilter, search, sourceFilter]);
+  }, [allItems, attentionOnly, kindFilter, search, sourceFilter]);
 
   const attentionItem = useMemo(
     () => allItems.find((item) => needsAttention(item)),
@@ -228,9 +243,27 @@ function LiveActivityPanel() {
 
   return (
     <Card className="space-y-3 p-4">
-      <div className="flex items-center gap-2 font-semibold">
+      <div className="flex flex-wrap items-center gap-2 font-semibold">
         <Activity size={16} className="text-muted-foreground" />
         {t("Live Agent Activity")}
+        <div className="flex items-center gap-1 font-normal">
+          <Button
+            size="sm"
+            variant={attentionOnly ? "outline" : "secondary"}
+            aria-pressed={!attentionOnly}
+            onClick={() => setAttentionOnly(false)}
+          >
+            {t("All")}
+          </Button>
+          <Button
+            size="sm"
+            variant={attentionOnly ? "secondary" : "outline"}
+            aria-pressed={attentionOnly}
+            onClick={() => setAttentionOnly(true)}
+          >
+            {t("Needs attention")}
+          </Button>
+        </div>
         <span
           className={cn(
             "ml-auto rounded-full px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide",

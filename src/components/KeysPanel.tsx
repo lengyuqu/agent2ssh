@@ -1,22 +1,80 @@
 import { Key, Plus, Trash2, Copy, Download, Check } from "lucide-react";
-import { memo, useEffect, useState  } from "react";
+import { memo, useEffect, useState } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
-import type { KeyAlgorithm, SshKeyInfo } from "../types";
+import { cn } from "../lib/utils";
+import type { HostProfile, KeyAlgorithm, SshKeyInfo } from "../types";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
+import { confirmDialog } from "./ui/dialog";
+import { HostChipList } from "./ui/host-chips";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
-import { EmptyState } from "./ui/state";
+import { EmptyState, InlineAlert } from "./ui/state";
 import { useToast } from "./ui/toast";
-import { confirmDialog } from "./ui/dialog";
-import { cn } from "../lib/utils";
 
 type Props = {
+  hosts?: HostProfile[];
   onChanged?: () => void | Promise<void>;
+  /** Jump to a host that references this private key. */
+  onSelectHost?: (hostName: string) => void;
 };
 
-function KeysPanel({ onChanged }: Props) {
+/** True when `host.key_path` and `key.private_path` name the same file.
+ *
+ * Managed keys store an absolute `private_path`. A host may store that path,
+ * a `~/…` form of it, or either spelling with backslashes. `~user/…` is left
+ * alone — the backend does not expand that form either.
+ */
+export function keyMatchesHost(key: SshKeyInfo, host: HostProfile): boolean {
+  const hostPath = host.key_path?.trim() ?? "";
+  const keyPath = key.private_path.trim();
+  if (!hostPath || !keyPath) return false;
+  return sameKeyPath(hostPath, keyPath);
+}
+
+function sameKeyPath(a: string, b: string): boolean {
+  const left = normalizeKeyPath(a);
+  const right = normalizeKeyPath(b);
+  if (left === right) return true;
+  const leftHome = tildeRelative(left);
+  const rightHome = tildeRelative(right);
+  if (leftHome !== null && rightHome === null) return absoluteMatchesTilde(right, leftHome);
+  if (rightHome !== null && leftHome === null) return absoluteMatchesTilde(left, rightHome);
+  return false;
+}
+
+function normalizeKeyPath(path: string): string {
+  let value = path.trim().replace(/\\/g, "/");
+  value = value.replace(/\/{2,}/g, "/");
+  if (value.length > 1 && value.endsWith("/")) value = value.replace(/\/+$/, "");
+  return value;
+}
+
+/** The path after a leading `~/`, or `""` for a bare `~`. Anything else is not a home path. */
+function tildeRelative(path: string): string | null {
+  if (path === "~") return "";
+  if (path.startsWith("~/")) return path.slice(2);
+  return null;
+}
+
+function absoluteMatchesTilde(absolute: string, relative: string): boolean {
+  if (!relative || !isAbsolutePath(absolute)) return false;
+  const suffix = `/${relative}`;
+  if (!absolute.endsWith(suffix)) return false;
+  return isHomeDirectory(absolute.slice(0, -suffix.length));
+}
+
+function isAbsolutePath(path: string): boolean {
+  return path.startsWith("/") || /^[A-Za-z]:\//.test(path);
+}
+
+function isHomeDirectory(path: string): boolean {
+  if (/^(?:[A-Za-z]:)?\/root$/.test(path)) return true;
+  return /^(?:[A-Za-z]:)?\/(?:Users|home)\/[^/]+$/.test(path);
+}
+
+function KeysPanel({ hosts, onChanged, onSelectHost }: Props) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [keys, setKeys] = useState<SshKeyInfo[]>([]);
@@ -102,15 +160,24 @@ function KeysPanel({ onChanged }: Props) {
     }
   }
 
-  async function handleDelete(name: string) {
+  async function handleDelete(key: SshKeyInfo) {
+    const usedBy = (hosts ?? []).filter((host) => keyMatchesHost(key, host));
     const ok = await confirmDialog({
-      title: t('Delete key "{name}"?', { name }),
+      title: t('Delete key "{name}"?', { name: key.name }),
       confirmLabel: t("Delete"),
       danger: true,
+      note:
+        usedBy.length > 0 ? (
+          <InlineAlert tone="destructive" bordered>
+            {t("These hosts use this key: {names}", {
+              names: usedBy.map((host) => host.name).join(", "),
+            })}
+          </InlineAlert>
+        ) : undefined,
     });
     if (!ok) return;
     try {
-      await api.deleteKey(name);
+      await api.deleteKey(key.name);
       await refresh();
       await onChanged?.();
     } catch (err) {
@@ -237,6 +304,7 @@ function KeysPanel({ onChanged }: Props) {
               <th className="px-2 py-1.5 font-medium">{t("Name")}</th>
               <th className="px-2 py-1.5 font-medium">{t("Type")}</th>
               <th className="px-2 py-1.5 font-medium">{t("Public Key")}</th>
+              {hosts && <th className="px-2 py-1.5 font-medium">{t("Hosts")}</th>}
               <th className="px-2 py-1.5" />
             </tr>
           </thead>
@@ -274,8 +342,20 @@ function KeysPanel({ onChanged }: Props) {
                     )}
                   </div>
                 </td>
+                {hosts && (
+                  <td className="px-2 py-1.5">
+                    <HostChipList
+                      names={hosts.filter((host) => keyMatchesHost(k, host)).map((host) => host.name)}
+                      onSelect={onSelectHost}
+                    />
+                  </td>
+                )}
                 <td className="px-2 py-1.5">
-                  <IconButton variant="danger" onClick={() => handleDelete(k.name)}>
+                  <IconButton
+                    variant="danger"
+                    title={t("Delete {name}", { name: k.name })}
+                    onClick={() => handleDelete(k)}
+                  >
                     <Trash2 size={14} />
                   </IconButton>
                 </td>

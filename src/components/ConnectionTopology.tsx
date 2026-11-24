@@ -227,7 +227,7 @@ function ConnectionTopology({
   }, [nodes, links, size.width, size.height]);
 
   return (
-    <Card className="space-y-3 p-4">
+    <Card className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-4">
       <div className="flex items-center gap-2 font-semibold">
         <Waypoints size={16} className="text-muted-foreground" />
         {t("Connection topology")}
@@ -257,7 +257,7 @@ function ConnectionTopology({
         </span>
       </div>
 
-      <div ref={containerRef} className="min-h-[420px] w-full overflow-hidden rounded-lg border border-border bg-muted/20">
+      <div ref={containerRef} className="min-h-0 w-full flex-1 overflow-hidden rounded-lg border border-border bg-muted/20">
         {hosts.length === 0 ? (
           <EmptyState icon={Waypoints} title={t("No hosts configured")} />
         ) : (

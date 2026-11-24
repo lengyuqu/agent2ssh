@@ -229,6 +229,7 @@ export const api = {
     invoke<ExecResult>("exec_ssh", { request: { host, command, force } }),
   execSshFull: (request: ExecRequest) =>
     invoke<ExecResult>("exec_ssh", { request }),
+  execLocal: (request: ExecRequest) => invoke<ExecResult>("exec_local", { request }),
   execMulti: (
     hosts: string[],
     command: string,

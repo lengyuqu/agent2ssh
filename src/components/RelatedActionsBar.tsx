@@ -1,6 +1,7 @@
 import { memo } from "react";
 import { Zap, type LucideIcon } from "lucide-react";
 import { useI18n } from "../i18n";
+import { cn } from "../lib/utils";
 
 export type RelatedModule = { id: string; label: string; icon: LucideIcon };
 
@@ -8,15 +9,19 @@ type Props = {
   current: RelatedModule;
   related: RelatedModule[];
   onNavigate: (id: string) => void;
+  className?: string;
 };
 
 /** Jumps to the modules an operator is likely to open next. The current module
  *  stays selected in App (including the host); this bar only switches modules. */
-function RelatedActionsBar({ related, onNavigate }: Props) {
+function RelatedActionsBar({ related, onNavigate, className }: Props) {
   const { t } = useI18n();
   if (related.length === 0) return null;
   return (
-    <nav aria-label={t("Related modules")} className="flex flex-wrap items-center gap-1.5 text-sm">
+    <nav
+      aria-label={t("Related modules")}
+      className={cn("flex flex-wrap items-center gap-1.5 text-sm", className)}
+    >
       <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
         <Zap size={13} />
         {t("Quick jump")}

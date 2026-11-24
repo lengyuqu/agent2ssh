@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { zh } from "./i18n";
-import { MODULES, RELATED_MODULES, SHORTCUT_MODULES, SIDEBAR_GROUPS, SIDEBAR_ORDER } from "./nav";
+import { MODULES, RELATED_MODULES, SHORTCUT_MODULES, SIDEBAR_GROUPS, SIDEBAR_ORDER, FULL_HEIGHT_MODULES } from "./nav";
 
 /**
  * The module registry has several lists that must agree, and a missing entry
@@ -20,12 +20,14 @@ describe("module registry", () => {
     }
   });
 
-  it("offers every module in the sidebar exactly once", () => {
-    // Set equality in both directions: a module missing from the sidebar is
-    // unreachable, and an id that is not a module is a typo that renders
-    // nothing.
-    expect([...SIDEBAR_ORDER].sort()).toEqual([...ids].sort());
+  it("offers every sidebar module exactly once", () => {
+    // Set equality in both directions for the rail: an id that is not a module
+    // is a typo that renders nothing. `playbooks` stays in MODULES so older
+    // links typecheck, and is reached from the Execution tabs instead.
     expect(new Set(SIDEBAR_ORDER).size).toBe(SIDEBAR_ORDER.length);
+    for (const id of SIDEBAR_ORDER) expect(ids).toContain(id);
+    expect(SIDEBAR_ORDER).not.toContain("playbooks");
+    expect(ids.filter((id) => !SIDEBAR_ORDER.includes(id))).toEqual(["playbooks"]);
   });
 
   it("covers every module in exactly one sidebar group, with titles translated", () => {
@@ -34,8 +36,11 @@ describe("module registry", () => {
     // here is unreachable exactly as a missing SIDEBAR_ORDER entry used to be,
     // and a duplicated id would render the same panel under two groups.
     const grouped = SIDEBAR_GROUPS.flatMap((group) => group.modules);
-    expect([...grouped].sort()).toEqual([...ids].sort());
+    expect([...grouped].sort()).toEqual([...SIDEBAR_ORDER].sort());
     expect(new Set(grouped).size).toBe(grouped.length);
+    for (const group of SIDEBAR_GROUPS) {
+      expect(group.modules).not.toContain("playbooks");
+    }
     // Four cockpits, in rail order. Approvals stays first inside Review so its
     // pending-count badge is the top of the rail. Help is its own titleless
     // group pinned to the bottom.
@@ -43,7 +48,7 @@ describe("module registry", () => {
       { title: "Review", modules: ["approvals", "dashboard", "audit", "recordings", "activity"] },
       {
         title: "Operations",
-        modules: ["terminal", "resident-sessions", "execute", "playbooks", "tunnels", "files-sessions"],
+        modules: ["terminal", "resident-sessions", "execute", "tunnels", "files-sessions"],
       },
       { title: "Fleet", modules: ["hosts", "topology", "containers", "proxies", "keys"] },
       { title: "System", modules: ["mcp-agents", "sync", "config"] },
@@ -74,7 +79,15 @@ describe("module registry", () => {
       "activity",
     ]);
     expect(new Set(SHORTCUT_MODULES).size).toBe(9);
+    expect(SHORTCUT_MODULES).not.toContain("playbooks");
     for (const id of SHORTCUT_MODULES) expect(ids).toContain(id);
+  });
+
+  it("keeps full-height pages inside the module registry", () => {
+    expect([...FULL_HEIGHT_MODULES].sort()).toEqual(
+      ["execute", "files-sessions", "playbooks", "recordings", "topology"].sort(),
+    );
+    for (const id of FULL_HEIGHT_MODULES) expect(ids).toContain(id);
   });
 
   it("relates only known modules, never to itself", () => {
@@ -84,7 +97,9 @@ describe("module registry", () => {
       for (const target of to ?? []) {
         expect(ids).toContain(target);
         expect(target).not.toBe(from);
+        expect(target).not.toBe("playbooks");
       }
+      expect(from).not.toBe("playbooks");
     }
   });
 

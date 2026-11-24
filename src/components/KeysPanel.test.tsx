@@ -1,7 +1,10 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { type ComponentProps } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../i18n";
-import KeysPanel from "./KeysPanel";
+import type { HostProfile, SshKeyInfo } from "../types";
+import KeysPanel, { keyMatchesHost } from "./KeysPanel";
+import { ConfirmHost } from "./ui/dialog";
 import { ToastProvider } from "./ui/toast";
 
 // The panel lists keys on mount and asks the backend which algorithm this build
@@ -12,6 +15,7 @@ const mockApi = vi.hoisted(() => ({
   listKeys: vi.fn(),
   defaultKeyAlgorithm: vi.fn(),
   generateKey: vi.fn(),
+  deleteKey: vi.fn(),
 }));
 
 vi.mock("../api", () => ({
@@ -19,14 +23,29 @@ vi.mock("../api", () => ({
   reportError: vi.fn(),
 }));
 
-function renderPanel() {
+function renderPanel(props: Partial<ComponentProps<typeof KeysPanel>> = {}) {
   return render(
     <I18nProvider>
       <ToastProvider>
-        <KeysPanel />
+        <ConfirmHost />
+        <KeysPanel {...props} />
       </ToastProvider>
     </I18nProvider>
   );
+}
+
+function keyInfo(privatePath: string, name = "id-work"): SshKeyInfo {
+  return {
+    name,
+    private_path: privatePath,
+    public_path: `${privatePath}.pub`,
+    public_key: "ssh-ed25519 AAAA",
+    key_type: "ed25519",
+  };
+}
+
+function hostUsing(name: string, keyPath?: string | null): HostProfile {
+  return { name, host: "10.0.0.1", group: "default", key_path: keyPath };
 }
 
 /** Open the "Add Key" form and type a name. */
@@ -49,6 +68,7 @@ describe("KeysPanel key algorithm", () => {
       public_key: "ssh-ed25519 AAAA",
       key_type: "ed25519",
     });
+    mockApi.deleteKey.mockResolvedValue(undefined);
   });
 
   it("marks the backend's recommended algorithm and defers to it by default", async () => {
@@ -124,5 +144,100 @@ describe("KeysPanel key algorithm", () => {
     await waitFor(() =>
       expect(mockApi.generateKey).toHaveBeenCalledWith("id-work", undefined, undefined)
     );
+  });
+});
+
+describe("keyMatchesHost", () => {
+  const managed = keyInfo("/Users/yuqu/.agent2ssh/keys/id-work");
+
+  it("treats a tilde path, an absolute path, and either slash as the same file", () => {
+    expect(keyMatchesHost(managed, hostUsing("abs", "/Users/yuqu/.agent2ssh/keys/id-work"))).toBe(
+      true
+    );
+    expect(keyMatchesHost(managed, hostUsing("tilde", "~/.agent2ssh/keys/id-work"))).toBe(true);
+    expect(
+      keyMatchesHost(managed, hostUsing("win", "\\Users\\yuqu\\.agent2ssh\\keys\\id-work"))
+    ).toBe(true);
+    expect(
+      keyMatchesHost(managed, hostUsing("slash", "/Users/yuqu//.agent2ssh/keys/id-work/"))
+    ).toBe(true);
+    expect(
+      keyMatchesHost(
+        keyInfo("C:\\Users\\yuqu\\.ssh\\id_rsa", "id-rsa"),
+        hostUsing("drive", "~/.ssh/id_rsa")
+      )
+    ).toBe(true);
+    expect(
+      keyMatchesHost(keyInfo("~/.ssh/id_ed25519"), hostUsing("home", "/home/yuqu/.ssh/id_ed25519"))
+    ).toBe(true);
+    expect(
+      keyMatchesHost(keyInfo("~/.ssh/id_ed25519"), hostUsing("root", "/root/.ssh/id_ed25519"))
+    ).toBe(true);
+  });
+
+  it("does not match a different file, a non-home prefix, or an empty path", () => {
+    expect(keyMatchesHost(managed, hostUsing("other", "/Users/yuqu/.agent2ssh/keys/other"))).toBe(
+      false
+    );
+    expect(keyMatchesHost(managed, hostUsing("opt", "/opt/keys/id-work"))).toBe(false);
+    expect(keyMatchesHost(managed, hostUsing("user", "~other/.agent2ssh/keys/id-work"))).toBe(
+      false
+    );
+    expect(keyMatchesHost(managed, hostUsing("bare"))).toBe(false);
+    expect(keyMatchesHost(managed, hostUsing("blank", "   "))).toBe(false);
+    expect(keyMatchesHost(managed, hostUsing("linux", "/home/yuqu/.agent2ssh/keys/id-work"))).toBe(
+      false
+    );
+  });
+});
+
+describe("KeysPanel host chips", () => {
+  const managed = keyInfo("/Users/yuqu/.agent2ssh/keys/id-work");
+  const unused = keyInfo("/Users/yuqu/.agent2ssh/keys/unused", "unused");
+  const hosts = [
+    hostUsing("web-01", "~/.agent2ssh/keys/id-work"),
+    hostUsing("win-01", "\\Users\\yuqu\\.agent2ssh\\keys\\id-work"),
+    hostUsing("db-01", "/etc/keys/other"),
+  ];
+
+  beforeEach(() => {
+    mockApi.listKeys.mockResolvedValue([managed, unused]);
+    mockApi.deleteKey.mockReset();
+    mockApi.deleteKey.mockResolvedValue(undefined);
+  });
+
+  it("shows a chip for each host that uses the key and selects it", async () => {
+    const onSelectHost = vi.fn();
+    renderPanel({ hosts, onSelectHost });
+
+    expect(await screen.findByRole("button", { name: "web-01" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "win-01" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "db-01" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "web-01" }));
+    expect(onSelectHost).toHaveBeenCalledWith("web-01");
+  });
+
+  it("warns with the host list before deleting a key that is in use", async () => {
+    renderPanel({ hosts });
+    fireEvent.click(await screen.findByTitle("Delete id-work"));
+
+    expect(
+      await screen.findByText("These hosts use this key: web-01, win-01")
+    ).toBeTruthy();
+    expect(screen.queryByText(/db-01/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Delete$/ }));
+    await waitFor(() => expect(mockApi.deleteKey).toHaveBeenCalledWith("id-work"));
+  });
+
+  it("does not warn when no host uses the key", async () => {
+    renderPanel({ hosts });
+    fireEvent.click(await screen.findByTitle("Delete unused"));
+
+    expect(await screen.findByText('Delete key "unused"?')).toBeTruthy();
+    expect(screen.queryByText(/These hosts use this key/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(mockApi.deleteKey).not.toHaveBeenCalled();
   });
 });

@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronUp, Play, ShieldAlert } from "lucide-react";
-import { memo, useEffect, useLayoutEffect, useRef, useState  } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import { labelCls } from "../lib/ui-classes";
@@ -25,6 +25,15 @@ type Props = {
   carryEpoch?: number;
   onExecComplete: () => void;
 };
+
+type LocalEnvInfo = {
+  id: string;
+  description: string | null;
+};
+
+function isLocalTarget(host: string): boolean {
+  return host === "local" || host.startsWith("local:");
+}
 
 function growCommandField(el: HTMLTextAreaElement) {
   el.style.height = "auto";
@@ -56,6 +65,40 @@ function ExecPanel({ hosts, initialHost = "", initialCommand, carryEpoch = 0, on
 
   // Pre-flight risk check
   const [previewRisk, setPreviewRisk] = useState<RiskLevel | null>(null);
+  const [environments, setEnvironments] = useState<LocalEnvInfo[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .listLocalEnvironments()
+      .then((list) => {
+        if (!cancelled) setEnvironments(list);
+      })
+      .catch(() => {
+        if (!cancelled) setEnvironments([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const localGroups = useMemo(() => {
+    const options = new Map<string, string>();
+    const add = (id: string, label?: string | null) => {
+      if (!id || options.has(id)) return;
+      options.set(id, label && label !== id ? `${id} — ${label}` : id);
+    };
+    for (const env of environments) add(env.id, env.description);
+    add("local");
+    if (isLocalTarget(initialHost)) add(initialHost);
+    if (isLocalTarget(targetHost)) add(targetHost);
+    return [
+      {
+        label: t("Local environments"),
+        options: [...options].map(([value, label]) => ({ value, label })),
+      },
+    ];
+  }, [environments, initialHost, targetHost, t]);
 
   useLayoutEffect(() => {
     if (initialHost) setTargetHost(initialHost);
@@ -121,14 +164,17 @@ function ExecPanel({ hosts, initialHost = "", initialCommand, carryEpoch = 0, on
     setBusy(true);
     setPendingApproval(false);
     try {
-      const next = await api.execSshFull({
+      const request = {
         host: targetHost,
         command,
         force: withForce || force,
         timeout_secs: timeoutSecs || null,
         stdin: stdin.trim() || null,
         max_output_bytes: maxOutputMb ? maxOutputMb * 1024 * 1024 : null,
-      });
+      };
+      const next = isLocalTarget(targetHost)
+        ? await api.execLocal(request)
+        : await api.execSshFull(request);
       setResult(next);
       onExecComplete();
     } catch (err) {
@@ -179,7 +225,14 @@ function ExecPanel({ hosts, initialHost = "", initialCommand, carryEpoch = 0, on
         {t("Execute")}
         {previewRisk && <RiskBadge level={previewRisk} />}
       </div>
-      <HostSelector hosts={hosts} value={targetHost} onChange={setTargetHost} disabled={busy} />
+      <HostSelector
+        hosts={hosts}
+        value={targetHost}
+        onChange={setTargetHost}
+        disabled={busy}
+        extraGroups={localGroups}
+        hostGroupLabel={t("SSH hosts")}
+      />
       <label className={labelCls}>
         {t("Command")}
         <Textarea
@@ -254,7 +307,7 @@ function ExecPanel({ hosts, initialHost = "", initialCommand, carryEpoch = 0, on
       </label>
       <Button onClick={handleRun} disabled={busy || !targetHost} block>
         <Play size={16} />
-        {busy ? t("Running") : t("Run over SSH")}
+        {busy ? t("Running") : isLocalTarget(targetHost) ? t("Run locally") : t("Run over SSH")}
       </Button>
 
       <div className="min-h-[45vh] flex-1 overflow-auto rounded-md bg-canvas-0 text-foreground">

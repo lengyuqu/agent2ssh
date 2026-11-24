@@ -8,11 +8,11 @@ use crate::{
     connection::{connect_host, disconnect_host, list_active_connections},
     core::{
         add_host_core, apply_risk_override, delete_host_group_core, delete_proxy_core,
-        exec_multi_core, exec_ssh_core, export_team_config, import_ssh_config_core,
-        import_team_config, list_audit_core, list_host_groups_core, list_hosts_core,
-        list_proxies_core, ping_hosts_core, remove_host_core, save_host_group_core,
-        save_proxy_core, sftp_download_core_with_source, sftp_ls_core_with_source,
-        sftp_mkdir_core_with_source, sftp_read_dir_core_with_source,
+        exec_local_core, exec_multi_core, exec_ssh_core, export_team_config,
+        import_ssh_config_core, import_team_config, list_audit_core, list_host_groups_core,
+        list_hosts_core, list_proxies_core, ping_hosts_core, remove_host_core,
+        save_host_group_core, save_proxy_core, sftp_download_core_with_source,
+        sftp_ls_core_with_source, sftp_mkdir_core_with_source, sftp_read_dir_core_with_source,
         sftp_read_text_core_with_source, sftp_remove_dir_all_core_with_source,
         sftp_remove_dir_core_with_source, sftp_remove_file_core_with_source,
         sftp_rename_core_with_source, sftp_stat_core_with_source, sftp_upload_core_with_source,
@@ -56,10 +56,11 @@ use crate::{
     ssh_algo::{reset_algo_prefs, save_algo_prefs, AlgoPrefsState, SshAlgoPrefs},
     store::{append_operation_audit, config_dir, lock_config_file, restrict_file_to_owner},
     types::{
-        source_from_transport, AuditEntry, AuditFilter, ConnectionStatus, ExecMultiResult,
-        ExecRequest, ExecResult, ForwardDirection, ForwardRule, HostGroup, HostProfile, PingResult,
-        ProxyProfile, RiskLevel, SftpDownloadRequest, SftpExchangeRequest, SftpExchangeResult,
-        SftpResult, SftpUploadRequest, WalkEntry,
+        is_local_host, source_from_transport, AuditEntry, AuditFilter, ConnectionStatus,
+        ExecMultiResult, ExecRequest, ExecResult, ForwardDirection, ForwardRule, HostGroup,
+        HostProfile, PingResult, ProxyProfile, RiskLevel, SftpDownloadRequest, SftpExchangeRequest,
+        SftpExchangeResult, SftpResult, SftpUploadRequest, WalkEntry, LOCAL_ENV_PREFIX,
+        LOCAL_TARGET_ID,
     },
     webdav_sync::{
         apply_config_template, create_named_snapshot, delete_config_snapshot,
@@ -429,6 +430,30 @@ pub async fn exec_ssh(mut request: ExecRequest) -> Result<ExecResult, String> {
     ensure_command_length(&request.command)?;
     authorize_desktop_exec_request(&mut request).await?;
     exec_ssh_core(request).await.map_err(|e| e.to_string())
+}
+
+/// Run a command on this machine (`local` or `local:<id>`).
+///
+/// The host check is first, before source, length, and
+/// [`authorize_desktop_exec_request`]. `exec_local_core` repeats the check so a
+/// caller that skipped this command still cannot apply an SSH profile's
+/// `risk_override` to a local process; this one exists so a non-local host
+/// never enters the authorization chain at all.
+#[tauri::command]
+pub async fn exec_local(mut request: ExecRequest) -> Result<ExecResult, String> {
+    if !is_local_host(&request.host) {
+        return Err(format!(
+            "local exec requires host = '{LOCAL_TARGET_ID}' or \
+             '{LOCAL_ENV_PREFIX}<environment>', got '{}'",
+            request.host
+        ));
+    }
+    if request.source.is_none() {
+        request.source = Some(source_from_transport());
+    }
+    ensure_command_length(&request.command)?;
+    authorize_desktop_exec_request(&mut request).await?;
+    exec_local_core(request).await.map_err(|e| e.to_string())
 }
 
 async fn authorize_desktop_exec_request(request: &mut ExecRequest) -> Result<RiskLevel, String> {
@@ -3868,6 +3893,7 @@ pub fn run_tauri() {
             classify_command_risk,
             classify_command_risk_for_host,
             exec_ssh,
+            exec_local,
             exec_multi,
             ping_hosts,
             // SFTP
@@ -4624,5 +4650,49 @@ mod tests {
         assert!(local_read_text_inner(file.to_string_lossy().to_string()).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn exec_request(host: &str, command: &str) -> ExecRequest {
+        serde_json::from_value(serde_json::json!({
+            "host": host,
+            "command": command,
+        }))
+        .expect("host and command are enough; the rest default")
+    }
+
+    /// A blocked command is refused by authorization with a risk error. The
+    /// host guard has to win before that, or this error would say "blocked".
+    #[tokio::test]
+    async fn exec_local_rejects_a_non_local_host_before_authorization() {
+        let error = exec_local(exec_request("prod-db", "rm -rf /"))
+            .await
+            .expect_err("an SSH alias is not a local target");
+        assert!(error.contains("local exec requires host"), "{error}");
+        assert!(
+            !error.contains("blocked"),
+            "a non-local host must be refused before authorization: {error}"
+        );
+    }
+
+    /// `local` and `local:<id>` pass the guard, so the same blocked command is
+    /// the authorization refusal and not the host-shape error. No shell runs:
+    /// blocked commands stop in the shared authorization chain.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn exec_local_accepts_a_local_host_at_the_guard() {
+        let _config = crate::store::TestConfigDir::new("exec-local-guard-accept");
+        for host in ["local", "local:zsh"] {
+            let error = exec_local(exec_request(host, "rm -rf /"))
+                .await
+                .expect_err("a blocked command is still refused");
+            assert!(
+                !error.contains("local exec requires host"),
+                "the guard must accept {host}, got {error}"
+            );
+            assert!(
+                error.contains("blocked"),
+                "authorization runs only after the guard accepts {host}, got {error}"
+            );
+        }
     }
 }
