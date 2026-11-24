@@ -7,6 +7,10 @@ type Props = {
   items: ApprovalRequestLite[];
   selectedIndex: number;
   onSelect: (index: number) => void;
+  /** Current clock in ms, ticked while pending items exist so TTL countdown stays live. */
+  nowMs?: number;
+  /** Override empty message when items are hidden by a filter rather than empty overall. */
+  emptyMessage?: string;
 };
 
 /** Minimal shape used by the queue (subset of ApprovalRequest). */
@@ -16,8 +20,27 @@ export type ApprovalRequestLite = {
   command: string;
   risk_level: RiskLevel;
   requested_at: string;
+  ttl_secs?: number;
   context?: { source?: string | null } | null;
 };
+
+/** Remaining seconds until this approval times out, or null when unparseable / unset. */
+export function remainingTtlSecs(
+  requestedAt: string,
+  ttlSecs: number | undefined,
+  nowMs: number,
+): number | null {
+  if (typeof ttlSecs !== "number" || !Number.isFinite(ttlSecs) || ttlSecs <= 0) return null;
+  const started = new Date(requestedAt).getTime();
+  if (!Number.isFinite(started)) return null;
+  return Math.max(0, Math.ceil((started + ttlSecs * 1000 - nowMs) / 1000));
+}
+
+function formatTtl(secs: number): string {
+  const minutes = Math.floor(secs / 60);
+  const rem = secs % 60;
+  return minutes > 0 ? `${minutes}m ${String(rem).padStart(2, "0")}s` : `${rem}s`;
+}
 
 /** Per-plan §4.2: the left edge carries the risk-family color. blocked reuses high. */
 const RISK_EDGE: Record<RiskLevel, string> = {
@@ -31,7 +54,13 @@ const RISK_EDGE: Record<RiskLevel, string> = {
  * left edge; unselected cards are dimmed to text-2. Cards are buttons so ↑↓
  * selection can move real DOM focus (first card carries a stable id for the
  * global ⌘⇧A "jump to workbench" shortcut). */
-export default function ApprovalQueue({ items, selectedIndex, onSelect }: Props) {
+export default function ApprovalQueue({
+  items,
+  selectedIndex,
+  onSelect,
+  nowMs = Date.now(),
+  emptyMessage,
+}: Props) {
   const { t } = useI18n();
 
   return (
@@ -42,10 +71,12 @@ export default function ApprovalQueue({ items, selectedIndex, onSelect }: Props)
     >
       {items.map((item, index) => {
         const selected = index === selectedIndex;
+        const remaining = remainingTtlSecs(item.requested_at, item.ttl_secs, nowMs);
+        const urgent = remaining !== null && remaining <= 60;
         return (
           <button
             key={item.id}
-            id={index === 0 ? "approval-queue-card-0" : undefined}
+            id={`approval-queue-card-${index}`}
             type="button"
             role="option"
             aria-selected={selected}
@@ -73,17 +104,31 @@ export default function ApprovalQueue({ items, selectedIndex, onSelect }: Props)
             >
               {item.command}
             </code>
-            {item.context?.source && (
-              <span className="mt-1.5 block truncate font-mono text-[11px] text-faint">
-                {t("From")} {item.context.source}
-              </span>
+            {(item.context?.source || remaining !== null) && (
+              <div className="mt-1.5 flex items-center gap-2 font-mono text-[11px] text-faint">
+                {item.context?.source && (
+                  <span className="min-w-0 truncate">
+                    {t("From")} {item.context.source}
+                  </span>
+                )}
+                {remaining !== null && (
+                  <span
+                    className={cn(
+                      "ml-auto shrink-0 tabular-nums",
+                      urgent && "font-semibold text-risk-high",
+                    )}
+                  >
+                    {remaining === 0 ? t("Expiring") : formatTtl(remaining)}
+                  </span>
+                )}
+              </div>
             )}
           </button>
         );
       })}
       {items.length === 0 && (
         <div className="rounded-lg border border-dashed border-line px-3 py-6 text-center text-xs text-faint">
-          {t("Nothing awaiting approval")}
+          {emptyMessage ?? t("Nothing awaiting approval")}
         </div>
       )}
     </div>

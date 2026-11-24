@@ -1,5 +1,5 @@
-import { Boxes, Check, Copy, Play, RefreshCw, SquareTerminal } from "lucide-react";
-import { memo, useEffect, useState  } from "react";
+import { Boxes, Check, Copy, Play, RefreshCw, Search, SquareTerminal, X } from "lucide-react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { ContainerDiscoveryTarget, ContainerPlatform, ContainerRuntimeInfo } from "../types";
@@ -7,6 +7,7 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { IconButton } from "./ui/icon-button";
+import { Input } from "./ui/input";
 import { cn } from "../lib/utils";
 import { EmptyState, LoadingState, Spinner } from "./ui/state";
 import { useToast } from "./ui/toast";
@@ -73,6 +74,7 @@ function ContainersPanel() {
   const [startingService, setStartingService] = useState(false);
   const [runtimeFilter, setRuntimeFilter] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
 
   async function refresh(includeStoppedNow = includeStopped, runtimeNow = runtimeFilter) {
     setBusy(true);
@@ -170,7 +172,23 @@ function ContainersPanel() {
   }
 
   const anyAvailable = runtimes.some((info) => info.available);
-  const selected = targets.find((target) => target.id === selectedId) ?? null;
+  const visibleTargets = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return targets;
+    return targets.filter((target) =>
+      [
+        target.container_name,
+        target.container_id,
+        target.image,
+        target.status,
+        target.namespace,
+        PLATFORM_LABEL[target.platform],
+      ]
+        .filter(Boolean)
+        .some((part) => part!.toLowerCase().includes(needle)),
+    );
+  }, [targets, query]);
+  const selected = visibleTargets.find((target) => target.id === selectedId) ?? null;
 
   return (
     <Card className="space-y-3.5 p-4">
@@ -302,8 +320,39 @@ function ContainersPanel() {
         </div>
       )}
 
+      {targets.length > 0 && (
+        <div className="relative max-w-sm">
+          <Search
+            size={14}
+            className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
+          />
+          <Input
+            className="h-8 pl-8 pr-8"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={t("Search containers, images, status")}
+            aria-label={t("Search containers, images, status")}
+          />
+          {query && (
+            <IconButton
+              variant="ghost"
+              size="sm"
+              title={t("Clear search")}
+              className="absolute right-0.5 top-1/2 -translate-y-1/2"
+              onClick={() => setQuery("")}
+            >
+              <X size={14} />
+            </IconButton>
+          )}
+        </div>
+      )}
+
+      {targets.length > 0 && visibleTargets.length === 0 && (
+        <EmptyState icon={Boxes} title={t("No containers match this search")} />
+      )}
+
       <div className="grid gap-2">
-        {targets.map((target) => (
+        {visibleTargets.map((target) => (
           <div
             key={target.id}
             role="button"

@@ -253,4 +253,18 @@ describe("ContainersPanel", () => {
       expect(mockApi.discoverContainers).toHaveBeenCalledWith({ all: false, runtime: "wslc" })
     );
   });
+
+  it("filters discovered containers by name or image", async () => {
+    mockApi.discoverContainers.mockResolvedValue([wslcTarget, dockerTarget]);
+    renderPanel();
+
+    expect(await screen.findByText("a2s-probe")).toBeTruthy();
+    const search = screen.getByLabelText("Search containers, images, status");
+    fireEvent.change(search, { target: { value: "nginx" } });
+    expect(screen.getByText("web-server")).toBeTruthy();
+    expect(screen.queryByText("a2s-probe")).toBeNull();
+
+    fireEvent.change(search, { target: { value: "nonexistent" } });
+    expect(screen.getByText("No containers match this search")).toBeTruthy();
+  });
 });

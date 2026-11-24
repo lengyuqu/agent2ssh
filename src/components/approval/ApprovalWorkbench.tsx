@@ -1,11 +1,14 @@
-import { ChevronDown, ChevronRight, ShieldCheck } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState  } from "react";
+import { ChevronDown, ChevronRight, Search, ShieldCheck, X, XCircle } from "lucide-react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, reportError } from "../../api";
 import { useAgentEvents } from "../../eventsBus";
 import { useI18n } from "../../i18n";
 import type { ApprovalRequest, ApprovalStatus } from "../../types";
 import ApprovalDialog from "../ApprovalDialog";
 import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+import { confirmDialog } from "../ui/dialog";
+import { Input } from "../ui/input";
 import ApprovalDetail from "./ApprovalDetail";
 import ApprovalQueue from "./ApprovalQueue";
 import { cn } from "../../lib/utils";
@@ -23,6 +26,8 @@ const IN_FLIGHT_WINDOW_MS = 15 * 60 * 1000;
 
 type Props = {
   pending: ApprovalRequest[];
+  /** Focus a specific pending approval (e.g. chosen from the ⌘K palette). */
+  focusRequest?: { id: string; nonce: number } | null;
   /** `command` approves that text instead of the requested one. */
   onApprove: (approval: ApprovalRequest, command?: string) => void | Promise<void>;
   onReject: (approval: ApprovalRequest) => void | Promise<void>;
@@ -58,7 +63,7 @@ function isSameLocalDay(iso: string): boolean {
  * pending queue + detail column, and a collapsed "decided today" group.
  * Owns its own 10s history poll + SSE nudge (pattern inherited from the
  * retired approval history timeline); the pending list itself streams from App. */
-function ApprovalWorkbench({ pending, onApprove, onReject, onGoExecute }: Props) {
+function ApprovalWorkbench({ pending, focusRequest = null, onApprove, onReject, onGoExecute }: Props) {
   const { t } = useI18n();
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [confirmTarget, setConfirmTarget] = useState<ApprovalRequest | null>(null);
@@ -71,14 +76,49 @@ function ApprovalWorkbench({ pending, onApprove, onReject, onGoExecute }: Props)
   const [showDecided, setShowDecided] = useState(false);
   const [mode, setMode] = useState<string>("ask");
   const [modeBusy, setModeBusy] = useState(false);
+  const [queueFilter, setQueueFilter] = useState("");
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const detailRef = useRef<HTMLDivElement>(null);
 
-  const selected = pending[Math.min(selectedIndex, Math.max(0, pending.length - 1))] ?? null;
+  const visiblePending = useMemo(() => {
+    const needle = queueFilter.trim().toLowerCase();
+    if (!needle) return pending;
+    return pending.filter((item) =>
+      [item.host, item.command, item.risk_level, item.context?.source]
+        .filter(Boolean)
+        .some((part) => part!.toLowerCase().includes(needle)),
+    );
+  }, [pending, queueFilter]);
 
-  // Keep the selection inside bounds as the queue shrinks/grows.
+  const selected =
+    visiblePending[Math.min(selectedIndex, Math.max(0, visiblePending.length - 1))] ?? null;
+
+  // Tick once per second only while pending approvals exist so TTL countdowns stay live.
   useEffect(() => {
-    setSelectedIndex((index) => Math.max(0, Math.min(index, pending.length - 1)));
+    if (pending.length === 0) return;
+    setNowMs(Date.now());
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
   }, [pending.length]);
+
+  // Keep the selection inside bounds as the queue shrinks/grows or filters change.
+  useEffect(() => {
+    setSelectedIndex((index) => Math.max(0, Math.min(index, visiblePending.length - 1)));
+  }, [visiblePending.length]);
+
+  useEffect(() => {
+    if (!focusRequest?.id) return;
+    setQueueFilter("");
+    const matchIndex = pending.findIndex((item) => item.id === focusRequest.id);
+    const targetIndex = matchIndex >= 0 ? matchIndex : 0;
+    setSelectedIndex(targetIndex);
+    const timer = window.setTimeout(() => {
+      document.getElementById(`approval-queue-card-${targetIndex}`)?.focus();
+    }, 0);
+    return () => window.clearTimeout(timer);
+    // Only re-run when a new focus request arrives; pending polling must not steal focus.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusRequest]);
 
   const refreshHistory = useCallback(async () => {
     try {
@@ -195,27 +235,27 @@ function ApprovalWorkbench({ pending, onApprove, onReject, onGoExecute }: Props)
       ) {
         return;
       }
-      if (confirmTarget || pending.length === 0) return;
+      if (confirmTarget || visiblePending.length === 0) return;
       if (event.key === "ArrowDown") {
         event.preventDefault();
-        setSelectedIndex((index) => Math.min(pending.length - 1, index + 1));
+        setSelectedIndex((index) => Math.min(visiblePending.length - 1, index + 1));
       } else if (event.key === "ArrowUp") {
         event.preventDefault();
         setSelectedIndex((index) => Math.max(0, index - 1));
       } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
         event.preventDefault();
-        requestApprove(pending[Math.min(selectedIndex, pending.length - 1)]);
+        requestApprove(visiblePending[Math.min(selectedIndex, visiblePending.length - 1)]);
       } else if (event.key === "Enter") {
         event.preventDefault();
         detailRef.current?.focus();
       } else if (event.key === "Backspace") {
         event.preventDefault();
-        requestReject(pending[Math.min(selectedIndex, pending.length - 1)]);
+        requestReject(visiblePending[Math.min(selectedIndex, visiblePending.length - 1)]);
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [pending, selectedIndex, confirmTarget, requestApprove, requestReject]);
+  }, [visiblePending, selectedIndex, confirmTarget, requestApprove, requestReject]);
 
   async function handleConfirmApprove() {
     if (!confirmTarget) return;
@@ -236,6 +276,25 @@ function ApprovalWorkbench({ pending, onApprove, onReject, onGoExecute }: Props)
     setBusy(true);
     try {
       await onReject(selected);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRejectAllShown() {
+    if (visiblePending.length === 0 || busy) return;
+    const targets = [...visiblePending];
+    const ok = await confirmDialog({
+      title: t("Reject {count} pending approvals?", { count: targets.length }),
+      confirmLabel: t("Reject"),
+      danger: true,
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      for (const item of targets) {
+        await onReject(item);
+      }
     } finally {
       setBusy(false);
     }
@@ -304,8 +363,59 @@ function ApprovalWorkbench({ pending, onApprove, onReject, onGoExecute }: Props)
         </div>
       </div>
 
+      {(pending.length > 1 || queueFilter.trim().length > 0) && (
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative min-w-[200px] flex-1 max-w-sm">
+            <Search
+              size={14}
+              className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
+            />
+            <Input
+              className="h-8 pl-8 pr-7"
+              value={queueFilter}
+              onChange={(event) => setQueueFilter(event.target.value)}
+              placeholder={t("Filter approvals by host or command")}
+              aria-label={t("Filter approvals by host or command")}
+            />
+            {queueFilter && (
+              <button
+                type="button"
+                title={t("Clear search")}
+                aria-label={t("Clear search")}
+                onClick={() => setQueueFilter("")}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              >
+                <X size={13} />
+              </button>
+            )}
+          </div>
+          {visiblePending.length > 1 && (
+            <Button
+              variant="destructive"
+              size="sm"
+              className="ml-auto"
+              disabled={busy}
+              onClick={() => void handleRejectAllShown()}
+            >
+              <XCircle size={14} />
+              {queueFilter.trim()
+                ? t("Reject shown ({count})", { count: visiblePending.length })
+                : t("Reject all ({count})", { count: visiblePending.length })}
+            </Button>
+          )}
+        </div>
+      )}
+
       <div className="grid items-start gap-4 lg:grid-cols-[250px_minmax(0,1fr)] max-lg:grid-cols-1">
-        <ApprovalQueue items={pending} selectedIndex={selectedIndex} onSelect={setSelectedIndex} />
+        <ApprovalQueue
+          items={visiblePending}
+          selectedIndex={selectedIndex}
+          onSelect={setSelectedIndex}
+          nowMs={nowMs}
+          emptyMessage={
+            pending.length > 0 ? t("No pending approvals match this filter") : undefined
+          }
+        />
         <div ref={detailRef} tabIndex={-1} className="min-w-0 focus-visible:outline-none">
           <ApprovalDetail
             approval={selected}

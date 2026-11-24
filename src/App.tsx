@@ -195,6 +195,10 @@ export default function App() {
     dockId: string | null;
     nonce: number;
   } | null>(null);
+  const [approvalFocusRequest, setApprovalFocusRequest] = useState<{
+    id: string;
+    nonce: number;
+  } | null>(null);
   // F5: the anomaly card opens Activity on the attention filter. The epoch
   // re-applies that filter when the card is opened again after a switch to all.
   const [activityPreset, setActivityPreset] = useState<"all" | "attention">("all");
@@ -239,14 +243,26 @@ export default function App() {
     setActiveModule(id);
   }, []);
 
-  // v3 §1.3: jump to the approval workbench and focus the first pending card
-  // (shared by ⌘⇧A and the ⌘K pending-approvals group).
-  const openApprovalsWorkbench = useCallback(() => {
-    openModule("approvals");
-    window.setTimeout(() => {
-      document.getElementById("approval-queue-card-0")?.focus();
-    }, 80);
-  }, [openModule]);
+  // v3 §1.3: jump to the approval workbench and focus the requested pending
+  // card (or the first card when opened from ⌘⇧A / TopBar).
+  const openApprovalsWorkbench = useCallback(
+    (approvalId?: string) => {
+      const targetId = typeof approvalId === "string" && approvalId ? approvalId : undefined;
+      if (targetId) {
+        setApprovalFocusRequest((current) => ({
+          id: targetId,
+          nonce: (current?.nonce ?? 0) + 1,
+        }));
+      }
+      openModule("approvals");
+      if (!targetId) {
+        window.setTimeout(() => {
+          document.getElementById("approval-queue-card-0")?.focus();
+        }, 80);
+      }
+    },
+    [openModule],
+  );
 
   const refresh = useCallback(async () => {
     const [hostList, groupList, proxyList] = await Promise.all([
@@ -1156,7 +1172,8 @@ export default function App() {
         pending={pendingApprovals}
         quickActions={quickActions}
         onNavigateModule={navigateModule}
-        onSelectHost={setSelectedHost}
+        onSelectHost={openHostInFleet}
+        onConnectHost={openHostInTerminal}
         onOpenApprovals={openApprovalsWorkbench}
       />
 
@@ -1234,11 +1251,16 @@ export default function App() {
       <TopBar
         daemonHealth={daemonHealth}
         gateStatus={gateStatus}
+        gateBusy={gateBusy}
         secretsLocked={secretsLocked}
         connectionStatuses={connectionStatuses}
         pendingApprovalsCount={pendingApprovals.length}
         onOpenPalette={openCommandPalette}
         onOpenApprovals={openApprovalsWorkbench}
+        onStartDaemon={startDaemonFromDashboard}
+        onGateToggle={handleGateToggle}
+        onRequestUnlock={requestCredentialUnlock}
+        onNavigateModule={navigateModule}
         connectionBusy={connectionProgress?.busy === true}
         actions={settingsActions}
       />
@@ -1322,6 +1344,9 @@ export default function App() {
           onDockAdopted={adoptDock}
           onSessionClosed={releaseDock}
           onNavigateModule={navigateModule}
+          onOpenExecute={openHostInExecute}
+          onOpenFiles={openHostInFiles}
+          onInspectHost={openHostInFleet}
         />
       </section>
 
@@ -1500,6 +1525,7 @@ export default function App() {
         {activeModule === "approvals" && (
           <ApprovalWorkbench
             pending={pendingApprovals}
+            focusRequest={approvalFocusRequest}
             onApprove={handleApprove}
             onReject={handleReject}
             onGoExecute={goToExecuteForApproval}
@@ -1517,8 +1543,10 @@ export default function App() {
             proxies={proxies}
             connectionStatuses={connectionStatuses}
             daemonHealth={daemonHealth}
-            onSelectHost={setSelectedHost}
+            onSelectHost={openHostInFleet}
             onNavigateModule={navigateModule}
+            onOpenTerminal={openHostInTerminal}
+            onOpenExecute={openHostInExecute}
           />
         )}
       </section>

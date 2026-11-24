@@ -139,7 +139,7 @@ function ExecutionWorkbench({
           />
         )}
         {mode === "multi" && <MultiExecPanel hosts={hosts} onExecComplete={onExecComplete} />}
-        {mode === "playbooks" && <PlaybooksPanel hosts={hosts} />}
+        {mode === "playbooks" && <PlaybooksPanel hosts={hosts} initialHost={initialHost} />}
       </div>
     </div>
   );

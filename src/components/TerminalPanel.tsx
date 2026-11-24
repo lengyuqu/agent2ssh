@@ -81,6 +81,9 @@ type Props = {
   /** The docked PTY should close when its tab does. */
   onSessionClosed?: (sessionId: string) => void;
   onNavigateModule?: (id: ModuleId) => void;
+  onOpenExecute?: (host: string) => void;
+  onOpenFiles?: (host: string) => void;
+  onInspectHost?: (host: string) => void;
 };
 
 const PANE_HEADER_PX = 28;
@@ -116,6 +119,9 @@ function TerminalPanel({
   onDockAdopted,
   onSessionClosed,
   onNavigateModule,
+  onOpenExecute,
+  onOpenFiles,
+  onInspectHost,
 }: Props) {
   const { t } = useI18n();
   const { theme: appTheme } = useTheme();
@@ -470,6 +476,9 @@ function TerminalPanel({
             sessionCounts={sessionCounts}
             onOpenHost={openHost}
             onNewSession={newSession}
+            onOpenExecute={onOpenExecute}
+            onOpenFiles={onOpenFiles}
+            onInspectHost={onInspectHost}
           />
 
           <div className="grid shrink-0 gap-1.5 border-t border-line pt-2">

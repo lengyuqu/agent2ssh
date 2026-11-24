@@ -10,6 +10,12 @@ import { IconButton } from "./ui/icon-button";
 import { EmptyState, LoadingState, Spinner } from "./ui/state";
 import { useToast } from "./ui/toast";
 
+const POLL_INTERVAL_MS = 5000;
+
+function keepIfEqual<T>(prev: T, next: T): T {
+  return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+}
+
 /**
  * List the daemon's resident sessions — the long-lived shells behind
  * `/resident-sessions`. Read-only plus close: opening and running commands in
@@ -24,11 +30,13 @@ function ResidentSessionsPanel() {
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [closing, setClosing] = useState<string | null>(null);
+  const hasSessions = sessions.length > 0;
 
   async function refresh() {
     setBusy(true);
     try {
-      setSessions(await api.residentListDaemon());
+      const next = await api.residentListDaemon();
+      setSessions((prev) => keepIfEqual(prev, next));
     } catch (err) {
       showToast("error", String(err));
       reportError("resident-sessions-panel", "resident session list failed", err);
@@ -40,8 +48,54 @@ function ResidentSessionsPanel() {
 
   useEffect(() => {
     refresh();
-    // Mount only, matching the other panels: the refresh button owns re-reads.
   }, []);
+
+  // Keep idle_secs and alive/dead liveness moving while sessions exist and the
+  // window is visible. Background tick errors stay quiet; Refresh reports them.
+  useEffect(() => {
+    if (!hasSessions) return;
+    let timer: number | null = null;
+    let cancelled = false;
+
+    const poll = () => {
+      if (document.visibilityState !== "visible") return;
+      void api
+        .residentListDaemon()
+        .then((next) => {
+          if (cancelled) return;
+          setSessions((prev) => keepIfEqual(prev, next));
+        })
+        .catch(() => {
+          // Silent on purpose: background ticks must not toast over the list.
+        });
+    };
+
+    const stop = () => {
+      if (timer !== null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+    };
+
+    const start = () => {
+      stop();
+      if (document.visibilityState !== "visible") return;
+      timer = window.setInterval(poll, POLL_INTERVAL_MS);
+    };
+
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") start();
+      else stop();
+    };
+
+    start();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      cancelled = true;
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [hasSessions]);
 
   async function close(session: ResidentSessionSummary) {
     setClosing(session.id);

@@ -128,11 +128,14 @@ type CommandPaletteProps = {
   modules: readonly CommandPaletteModule[];
   hosts: HostProfileLike[];
   onNavigateModule: (id: string) => void;
+  /** Inspect a host in Host Management (⌘↵ or fallback when `onConnectHost` is omitted). */
   onSelectHost: (name: string) => void;
+  /** Primary action for the "Connect host" group: open or focus that host's terminal tab. */
+  onConnectHost?: (name: string) => void;
   /** v3 §3.5: pending approvals pinned on top (only when N > 0). */
   pending?: ApprovalRequest[];
-  /** Activated from the pending group: jump to the workbench, focus first card. */
-  onOpenApprovals?: () => void;
+  /** Activated from the pending group: jump to the workbench and focus that specific card. */
+  onOpenApprovals?: (approvalId?: string) => void;
   /** v3 §3.5 quick actions (sync / unlock secrets / new host). */
   quickActions?: PaletteQuickAction[];
 };
@@ -169,6 +172,7 @@ function CommandPalette({
   hosts,
   onNavigateModule,
   onSelectHost,
+  onConnectHost,
   pending = [],
   onOpenApprovals,
   quickActions = [],
@@ -290,11 +294,11 @@ function CommandPalette({
     return section.startIndex + section.items.indexOf(item);
   }
 
-  function activate(item: PaletteItem) {
+  function activate(item: PaletteItem, secondary = false) {
     switch (item.kind) {
       case "approval":
-        // ↵ on a pending approval: workbench + focus the first card (plan §1.3).
-        onOpenApprovals?.();
+        // ↵ on a pending approval: jump to the workbench and select that exact card.
+        onOpenApprovals?.(item.approval.id);
         break;
       case "module":
         onNavigateModule(item.id);
@@ -306,8 +310,12 @@ function CommandPalette({
         onNavigateModule(item.moduleId);
         break;
       case "host":
-        onNavigateModule("hosts");
-        onSelectHost(item.name);
+        if (!secondary && onConnectHost) {
+          onConnectHost(item.name);
+        } else {
+          onNavigateModule("hosts");
+          onSelectHost(item.name);
+        }
         break;
     }
     onClose();
@@ -329,7 +337,7 @@ function CommandPalette({
         (s) => activeIndex >= s.startIndex && activeIndex < s.startIndex + s.items.length
       );
       const item = section?.items[activeIndex - (section?.startIndex ?? 0)];
-      if (item) activate(item);
+      if (item) activate(item, e.metaKey || e.ctrlKey);
     }
   }
 
@@ -458,7 +466,7 @@ function CommandPalette({
                             </span>
                           </span>
                           <span className="ml-auto shrink-0 text-[10px] uppercase text-muted-foreground/60">
-                            {t("Host")}
+                            {onConnectHost ? `${t("Terminal")} ↵` : t("Host")}
                           </span>
                         </>
                       )}

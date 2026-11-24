@@ -13,7 +13,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { dump as dumpYaml, load as loadYaml } from "js-yaml";
-import { memo, useEffect, useMemo, useRef, useState  } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, reportError } from "../api";
 import { useI18n } from "../i18n";
 import type { HostProfile, Playbook, PlaybookRunResult, RiskLevel } from "../types";
@@ -24,6 +24,7 @@ import { Card } from "./ui/card";
 import { IconButton } from "./ui/icon-button";
 import { Input } from "./ui/input";
 import { Select } from "./ui/select";
+import { SlideOverDrawer } from "./ui/slide-over-drawer";
 import { Textarea } from "./ui/textarea";
 import { EmptyState, Spinner } from "./ui/state";
 import { useToast } from "./ui/toast";
@@ -32,6 +33,8 @@ import { cn } from "../lib/utils";
 
 type Props = {
   hosts: HostProfile[];
+  /** Host selected elsewhere in the console; pre-fills the run target when it matches an SSH host. */
+  initialHost?: string;
 };
 
 type PlaybookForm = {
@@ -133,7 +136,7 @@ function stepCount(playbook: Playbook): number {
   return playbook.advanced_steps?.length || playbook.steps.length;
 }
 
-function PlaybooksPanel({ hosts }: Props) {
+function PlaybooksPanel({ hosts, initialHost = "" }: Props) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [playbooks, setPlaybooks] = useState<Playbook[]>([]);
@@ -142,7 +145,9 @@ function PlaybooksPanel({ hosts }: Props) {
   const [editingOriginalName, setEditingOriginalName] = useState<string | null>(null);
   const [form, setForm] = useState<PlaybookForm>(emptyForm);
   const [selectedPlaybook, setSelectedPlaybook] = useState<string | null>(null);
-  const [selectedHost, setSelectedHost] = useState("");
+  const [selectedHost, setSelectedHost] = useState(() =>
+    hosts.some((host) => host.name === initialHost) ? initialHost : "",
+  );
   const [force, setForce] = useState(false);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<PlaybookRunResult | null>(null);
@@ -158,6 +163,12 @@ function PlaybooksPanel({ hosts }: Props) {
     () => playbooks.find((playbook) => playbook.name === selectedPlaybook),
     [playbooks, selectedPlaybook]
   );
+
+  useLayoutEffect(() => {
+    if (initialHost && hosts.some((host) => host.name === initialHost)) {
+      setSelectedHost(initialHost);
+    }
+  }, [hosts, initialHost]);
 
   async function refresh() {
     setLoading(true);
@@ -350,8 +361,17 @@ function PlaybooksPanel({ hosts }: Props) {
         </Button>
       </div>
 
-      {editing && (
-        <div className="grid gap-3 rounded-lg border border-border bg-muted/40 p-3">
+      <SlideOverDrawer
+        open={editing}
+        onClose={cancelEdit}
+        widthClassName="w-[540px]"
+        title={
+          editingOriginalName
+            ? t("Edit playbook: {name}", { name: editingOriginalName })
+            : t("New playbook")
+        }
+      >
+        <div className="grid gap-3">
           <div className="grid grid-cols-[minmax(0,1fr)_180px] gap-3 max-md:grid-cols-1">
             <label className={fieldCls}>
               <span>{t("Name")}</span>
@@ -402,18 +422,11 @@ function PlaybooksPanel({ hosts }: Props) {
             <div className="flex items-center justify-between">
               <span className={cn(fieldCls, "text-xs")}>{t("Steps")}</span>
               <div className="inline-flex overflow-hidden rounded-md border border-border">
-                {/* This tab switch does not run `applyYamlToForm`, unlike the
-                    "Apply YAML to step editor" button at :492. Clicking it
-                    while `editorMode === "yaml"` therefore shows the stale form
-                    — the YAML text is kept in state and `handleSave` re-applies
-                    it before persisting (:250-253), so nothing is lost, but the
-                    step editor visibly disagrees with the YAML the user just
-                    typed. Fixing it means either calling `switchToVisual` here
-                    or disabling this tab while `yamlError` is set; both change
-                    what a click does, so it is L2-62. */}
                 <button
                   type="button"
-                  onClick={() => setEditorMode("visual")}
+                  onClick={() => {
+                    if (editorMode === "yaml") switchToVisual();
+                  }}
                   className={cn(
                     "px-2 py-1 text-xs font-semibold",
                     editorMode === "visual"
@@ -425,7 +438,9 @@ function PlaybooksPanel({ hosts }: Props) {
                 </button>
                 <button
                   type="button"
-                  onClick={switchToYaml}
+                  onClick={() => {
+                    if (editorMode === "visual") switchToYaml();
+                  }}
                   className={cn(
                     "inline-flex items-center gap-1 px-2 py-1 text-xs font-semibold",
                     editorMode === "yaml"
@@ -488,6 +503,7 @@ function PlaybooksPanel({ hosts }: Props) {
             ) : (
               <div className="grid gap-1.5">
                 <Textarea
+                  aria-label="YAML"
                   className="min-h-[180px] font-mono text-xs"
                   value={yamlText}
                   onChange={(event) => {
@@ -504,7 +520,7 @@ function PlaybooksPanel({ hosts }: Props) {
               </div>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 border-t border-border pt-3">
             <Button onClick={handleSave} disabled={saving}>
               {saving ? <Spinner size={14} /> : <Save size={14} />}
               {t("Save")}
@@ -515,7 +531,7 @@ function PlaybooksPanel({ hosts }: Props) {
             </Button>
           </div>
         </div>
-      )}
+      </SlideOverDrawer>
 
       {playbooks.length === 0 && !editing && (
         <EmptyState

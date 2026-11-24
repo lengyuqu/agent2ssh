@@ -102,4 +102,50 @@ describe("CommandPalette", () => {
     expect(screen.queryByText("Connect host")).toBeNull();
     expect(screen.getByText("MCP tools")).toBeTruthy();
   });
+
+  it("passes the chosen approval id and connects hosts on enter (or inspects on cmd+enter)", () => {
+    const onNavigateModule = vi.fn();
+    const onSelectHost = vi.fn();
+    const onConnectHost = vi.fn();
+    const onOpenApprovals = vi.fn();
+    render(
+      <I18nProvider>
+        <CommandPalette
+          open
+          modules={MODULES}
+          hosts={[
+            { name: "prod-web", host: "10.0.0.10", user: "ops", group: "prod" },
+          ]}
+          pending={[
+            pending[0],
+            {
+              ...pending[0],
+              id: "a2",
+              host: "prod-web",
+              command: "nginx -s reload",
+            },
+          ]}
+          onClose={vi.fn()}
+          onNavigateModule={onNavigateModule}
+          onSelectHost={onSelectHost}
+          onConnectHost={onConnectHost}
+          onOpenApprovals={onOpenApprovals}
+        />
+      </I18nProvider>,
+    );
+    const input = screen.getByPlaceholderText("Search modules, hosts, tools... (> for MCP tools)");
+
+    fireEvent.change(input, { target: { value: "nginx" } });
+    pressEnter(input);
+    expect(onOpenApprovals).toHaveBeenCalledWith("a2");
+
+    fireEvent.change(input, { target: { value: "10.0.0.10" } });
+    pressEnter(input);
+    expect(onConnectHost).toHaveBeenCalledWith("prod-web");
+    expect(onSelectHost).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input, { key: "Enter", metaKey: true });
+    expect(onSelectHost).toHaveBeenCalledWith("prod-web");
+    expect(onNavigateModule).toHaveBeenCalledWith("hosts");
+  });
 });

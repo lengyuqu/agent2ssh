@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
-import { Plus, Search } from "lucide-react";
+import { Plus, Search, X } from "lucide-react";
+import { ContextMenu, type ContextMenuItem } from "../../components/ui/context-menu";
 import { useI18n } from "../../i18n";
 import { cn } from "../../lib/utils";
 import type { ConnectionStatus, HostGroup, HostProfile } from "../../types";
@@ -12,6 +13,9 @@ type Props = {
   sessionCounts: ReadonlyMap<string, number>;
   onOpenHost: (name: string) => void;
   onNewSession: (name: string) => void;
+  onOpenExecute?: (name: string) => void;
+  onOpenFiles?: (name: string) => void;
+  onInspectHost?: (name: string) => void;
 };
 
 /**
@@ -28,9 +32,13 @@ export default function HostTree({
   sessionCounts,
   onOpenHost,
   onNewSession,
+  onOpenExecute,
+  onOpenFiles,
+  onInspectHost,
 }: Props) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
+  const [menu, setMenu] = useState<{ host: string; x: number; y: number } | null>(null);
 
   const connected = useMemo(
     () => new Set(connectionStatuses.filter((status) => status.connected).map((status) => status.host)),
@@ -42,13 +50,39 @@ export default function HostTree({
     if (!needle) return null;
     return new Set(
       hosts
-        .filter(
-          (host) =>
-            host.name.toLowerCase().includes(needle) || host.host.toLowerCase().includes(needle),
-        )
+        .filter((host) => {
+          const fields = [
+            host.name,
+            host.host,
+            host.user,
+            host.env,
+            host.role,
+            host.owner,
+            ...(host.tags ?? []),
+          ];
+          return fields.some((field) => (field ?? "").toLowerCase().includes(needle));
+        })
         .map((host) => host.name),
     );
   }, [hosts, query]);
+
+  const menuItems = useMemo<ContextMenuItem[]>(() => {
+    if (!menu) return [];
+    const items: ContextMenuItem[] = [
+      { label: t("Open terminal"), onSelect: () => onOpenHost(menu.host) },
+      { label: t("New session to {host}", { host: menu.host }), onSelect: () => onNewSession(menu.host) },
+    ];
+    if (onOpenExecute) {
+      items.push({ label: t("Execute"), onSelect: () => onOpenExecute(menu.host) });
+    }
+    if (onOpenFiles) {
+      items.push({ label: t("Files"), onSelect: () => onOpenFiles(menu.host) });
+    }
+    if (onInspectHost) {
+      items.push({ label: t("View host"), onSelect: () => onInspectHost(menu.host) });
+    }
+    return items;
+  }, [menu, onInspectHost, onNewSession, onOpenExecute, onOpenFiles, onOpenHost, t]);
 
   const visibleGroups = useMemo(
     () =>
@@ -74,10 +108,21 @@ export default function HostTree({
         <input
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder={t("Search hosts")}
+          placeholder={t("Search hosts, addresses, tags")}
           aria-label={t("Search hosts")}
-          className="h-7 w-full rounded-md border border-border bg-background/60 pl-7 pr-2 text-xs text-foreground outline-none placeholder:text-muted-foreground/70 focus:border-ring/60"
+          className="h-7 w-full rounded-md border border-border bg-background/60 pl-7 pr-6 text-xs text-foreground outline-none placeholder:text-muted-foreground/70 focus:border-ring/60"
         />
+        {query && (
+          <button
+            type="button"
+            title={t("Clear search")}
+            aria-label={t("Clear search")}
+            onClick={() => setQuery("")}
+            className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
+          >
+            <X size={11} />
+          </button>
+        )}
       </div>
 
       <div className="max-h-[42vh] min-h-0 overflow-y-auto">
@@ -93,6 +138,10 @@ export default function HostTree({
                 return (
                   <div
                     key={host.name}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      setMenu({ host: host.name, x: event.clientX, y: event.clientY });
+                    }}
                     className={cn(
                       "group flex items-center gap-1.5 rounded-md px-2 py-1 text-xs transition-colors",
                       count > 0 ? "bg-primary/10 text-foreground" : "text-foreground/85 hover:bg-muted",
@@ -141,6 +190,15 @@ export default function HostTree({
           </div>
         )}
       </div>
+
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menuItems}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </div>
   );
 }
