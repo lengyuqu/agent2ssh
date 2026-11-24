@@ -14,6 +14,16 @@ export default defineConfig({
     // The vm-isolated pool keeps the setup hooks in the same VM context and
     // runs green deterministically on node 24 and 26.
     pool: "vmThreads",
+    // Recharts's CJS build requires @reduxjs/toolkit, whose package exports
+    // expose "module-sync" -> .mjs. On Node 20.19+ under vmThreads, Vitest's
+    // CJS VM executor resolves "module-sync" to the ESM file and fails with
+    // SyntaxError: Unexpected token 'export'. Inlining recharts (and its
+    // ESM-in-CJS deps) routes them through Vite's ESM transform on Node 20+.
+    server: {
+      deps: {
+        inline: ["recharts", "@reduxjs/toolkit", "victory-vendor"],
+      },
+    },
     include: ["src/**/*.test.{ts,tsx}"],
     setupFiles: ["./src/test-setup.ts"],
   },
