@@ -2,7 +2,7 @@
 
 Agent2SSH 作为 MCP (Model Context Protocol) stdio 服务器运行，可与任何支持 MCP 协议的 AI 客户端集成。以下是常见客户端的配置模板。
 
-> **推荐：一条命令自动注册。** CLI 提供 `agent2ssh integrate` 子命令，可自动探测已安装的客户端并写入（带备份的）MCP 配置，无需手动编辑下面的模板：
+> **推荐：一条命令自动注册。** CLI 提供 `agent2ssh integrate` 子命令，可自动探测已安装的客户端并写入（带备份的）MCP 配置，无需手动编辑下面的模板。每个客户端都会在 Windows、macOS、Linux 各自可能出现的位置里找已经存在的配置文件：找到就改那一份，都没有才在当前系统的默认路径新建。Skill 目录用同一条规则。
 >
 > ```bash
 > agent2ssh integrate list                # 查看各客户端的探测/注册状态
@@ -234,7 +234,7 @@ npm install @modelcontextprotocol/sdk
 
 ## 6. Antigravity（agy）
 
-`agent2ssh integrate add agy` 不写死一条路径。它在当前用户主目录下探测实际存在的文件（Windows 上主目录是 `%USERPROFILE%`），按这个顺序选用：
+`agent2ssh integrate add agy` 和其它客户端走同一套探测。它在当前用户主目录下找实际存在的文件（Windows 上主目录是 `%USERPROFILE%`），按这个顺序选用：
 
 1. `~/.gemini/config/mcp_config.json` — 当前 CLI、App、IDE 都读的全局配置
 2. `~/.gemini/antigravity/mcp_config.json` — 旧布局；只有这份存在时才写这里
@@ -245,9 +245,16 @@ npm install @modelcontextprotocol/sdk
 
 ---
 
-## 7. Windsurf / Codeium
+## 7. Windsurf（现名 Devin Desktop）
 
-配置文件位置：`~/.codeium/windsurf/mcp_config.json`
+Windsurf 在 2026 年 6 月改名为 Devin Desktop，MCP 配置也随之从 `.codeium` 迁到 `.devin`。`agent2ssh integrate add windsurf` 按本机实际安装的版本选择写入位置：
+
+| 版本 | 配置文件 |
+| --- | --- |
+| Devin Desktop（当前） | macOS / Linux：`~/.config/devin/mcp_config.json`（或 `$XDG_CONFIG_HOME`）；Windows：`%APPDATA%\devin\mcp_config.json` |
+| 旧版 Windsurf | `~/.codeium/windsurf/mcp_config.json` |
+
+两处都有文件时写已经存在的那一份；只有一处有安装痕迹时优先那一处；都没有就创建当前版本的位置。
 
 ```json
 {

@@ -31,7 +31,7 @@ agent2ssh integrate list
 agent2ssh integrate add claude_code   # 或 claude_desktop / cursor / codex / trae / trae_cn / qoder / qoder_cn / windsurf / agy 等
 ```
 
-桌面端 **MCP/CLI 面板**按当前系统的安装位置探测客户端：MCP 页注册 `agent2ssh-mcp`，Skills + CLI 页把同一份 skill 装进每家 harness 自己的 skill 目录（Claude Code、Codex、Cursor、CodeBuddy、WorkBuddy、Qoder、Qoder CN、Trae、Trae CN、Antigravity）。Antigravity 的 MCP 文件和 skill 目录在 `~/.gemini` 下有多于一种布局，注册时选用本机已经存在的那一份。CLI 的 `integrate skill` 仍默认写 `~/.claude/skills/agent2ssh`，可用 `--dir` 覆盖。
+桌面端 **MCP/CLI 面板**按当前系统的安装位置探测客户端：MCP 页注册 `agent2ssh-mcp`，Skills + CLI 页把同一份 skill 装进每家 harness 自己的 skill 目录（Claude Code、Codex、Cursor、CodeBuddy、WorkBuddy、Qoder、Qoder CN、Trae、Trae CN、Antigravity）。每个客户端都先用本机已经存在的 MCP 文件和 skill 目录；Windows、macOS、Linux 的默认位置不同，旧布局只在那份文件还在时继续沿用。CLI 的 `integrate skill` 仍默认写 `~/.claude/skills/agent2ssh`，可用 `--dir` 覆盖。
 
 ---
 
