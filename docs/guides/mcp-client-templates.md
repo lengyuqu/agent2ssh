@@ -6,7 +6,7 @@ Agent2SSH 作为 MCP (Model Context Protocol) stdio 服务器运行，可与任�
 >
 > ```bash
 > agent2ssh integrate list                # 查看各客户端的探测/注册状态
-> agent2ssh integrate add claude_code     # 注册（支持 claude_code / claude_desktop / cursor / codex / trae / trae_cn / qoder / qoder_cn / windsurf 等）
+> agent2ssh integrate add claude_code     # 注册（支持 claude_code / claude_desktop / cursor / codex / trae / trae_cn / qoder / qoder_cn / windsurf / agy 等）
 > agent2ssh integrate rm claude_code      # 移除注册（保留备份）
 > agent2ssh integrate skill install       # 将 Agent Skill 安装到 ~/.claude/skills/agent2ssh
 > ```
@@ -232,7 +232,20 @@ npm install @modelcontextprotocol/sdk
 
 ---
 
-## 6. Windsurf / Codeium
+## 6. Antigravity（agy）
+
+`agent2ssh integrate add agy` 不写死一条路径。它在当前用户主目录下探测实际存在的文件（Windows 上主目录是 `%USERPROFILE%`），按这个顺序选用：
+
+1. `~/.gemini/config/mcp_config.json` — 当前 CLI、App、IDE 都读的全局配置
+2. `~/.gemini/antigravity/mcp_config.json` — 旧布局；只有这份存在时才写这里
+
+两份都不存在时，注册会创建第 1 条。Skill 同样先找已经装过的目录（`~/.gemini/config/skills/agent2ssh`，其次 CLI 专用的 `~/.gemini/antigravity-cli/skills/agent2ssh` 和 `~/.gemini/skills/agent2ssh`），没有安装时写入 App 和 CLI 共用的第一处。工作区里的 `.agents/mcp_config.json` 只对当前仓库生效，`integrate` 不改它。
+
+探测把 `agy` 命令、Antigravity 应用，以及 `~/.gemini/config`、`~/.gemini/antigravity`、`~/.gemini/antigravity-cli` 当作已安装。单独一个 `~/.gemini`（旧 Gemini CLI）不算。
+
+---
+
+## 7. Windsurf / Codeium
 
 配置文件位置：`~/.codeium/windsurf/mcp_config.json`
 
