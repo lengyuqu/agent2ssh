@@ -1,5 +1,6 @@
 import { ArrowUpCircle, BookOpen, Bot, CheckCircle2, Clipboard, Code2, PlugZap, RefreshCw, ShieldAlert, Trash2 } from "lucide-react";
 import { memo, useEffect, useMemo, useState } from "react";
+import agyLogo from "../assets/logos/agy.png";
 import claudeLogo from "../assets/logos/claude.png";
 import codebuddyLogo from "../assets/logos/codebuddy.png";
 import codexLogo from "../assets/logos/codex.svg";
@@ -22,6 +23,7 @@ import { confirmDialog } from "./ui/dialog";
 const chipCls = "max-w-full truncate rounded bg-muted px-1.5 py-1 text-xs text-muted-foreground";
 
 const AGENT_LOGOS: Record<string, string> = {
+  agy: agyLogo,
   claude_code: claudeLogo,
   claude_desktop: claudeLogo,
   codex: codexLogo,

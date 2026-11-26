@@ -175,10 +175,14 @@ struct ClientSpec {
     id: &'static str,
     name: &'static str,
     source: &'static str,
-    mcp_config: Option<PathBuf>,
+    /// MCP files this client reads, most current first. Registration uses the
+    /// first one that already exists, and creates the first one otherwise.
+    mcp_configs: Vec<PathBuf>,
     mcp_format: McpConfigFormat,
-    /// `~/<dot>/skills/agent2ssh` when this client loads Agent Skills.
-    skill_dir: Option<PathBuf>,
+    /// Skill directories this client reads, most current first. Empty when the
+    /// client has no skill loader. Same selection rule as `mcp_configs`,
+    /// except a directory counts only when it already holds `SKILL.md`.
+    skill_dirs: Vec<PathBuf>,
     detection_paths: Vec<PathBuf>,
     cli_names: &'static [&'static str],
 }
@@ -211,35 +215,122 @@ fn select_installed_skill_dir(candidates: &[PathBuf]) -> PathBuf {
         .unwrap_or_default()
 }
 
-/// Global MCP file for Antigravity (`agy`, the App, and the IDE).
+fn unique_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for path in paths {
+        if !out.iter().any(|seen| seen == &path) {
+            out.push(path);
+        }
+    }
+    out
+}
+
+/// Config-directory locations of one relative path, native directory first.
 ///
-/// `dirs::home_dir` is what makes one relative path land in the right home on
-/// macOS, Linux, and Windows (`%USERPROFILE%`). The file under that home is
-/// not stable across installs: current builds read
-/// `~/.gemini/config/mcp_config.json`, and older ones still have
-/// `~/.gemini/antigravity/mcp_config.json`. The docs do not say which wins
-/// when both exist, so prefer the current file when it is already there,
-/// otherwise the legacy file, otherwise the current path — a first
-/// registration then creates the file every current surface reads.
-fn agy_mcp_config_path() -> PathBuf {
-    select_existing_file(&[
-        home_path(".gemini/config/mcp_config.json"),
-        home_path(".gemini/antigravity/mcp_config.json"),
+/// `dirs::config_dir` is `%APPDATA%` on Windows, `~/Library/Application Support`
+/// on macOS, and `$XDG_CONFIG_HOME` or `~/.config` on Linux. The other roots
+/// stay in the list so a file that was created under a different convention
+/// (or copied across machines) is updated in place. The native path stays
+/// first, which is where a missing file is created.
+fn user_config_candidates(parts: &[&str]) -> Vec<PathBuf> {
+    let relative = parts
+        .iter()
+        .fold(PathBuf::new(), |path, part| path.join(part));
+    let roaming = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_path("AppData").join("Roaming"));
+    unique_paths([
+        user_config_file(parts),
+        home_path(".config").join(&relative),
+        home_path("Library")
+            .join("Application Support")
+            .join(&relative),
+        roaming.join(relative),
     ])
 }
 
-/// Skill directory Antigravity will actually load.
+/// One place a client keeps a config file, plus the directories that mean
+/// this place is the install in use.
+struct Layout {
+    target: PathBuf,
+    markers: Vec<PathBuf>,
+}
+
+/// Move the first layout whose marker exists to the front.
 ///
-/// The App and the CLI share `~/.gemini/config/skills/`. The CLI also reads
-/// `~/.gemini/antigravity-cli/skills/` and `~/.gemini/skills/`, which the App
-/// ignores. Update an existing install in place so a second copy is not
-/// written beside it; a machine with no install gets the shared directory.
-fn agy_skill_dir() -> PathBuf {
-    select_installed_skill_dir(&[
-        home_path(".gemini/config/skills").join(SKILL_DIR_NAME),
-        home_path(".gemini/antigravity-cli/skills").join(SKILL_DIR_NAME),
-        home_path(".gemini/skills").join(SKILL_DIR_NAME),
-    ])
+/// File existence is applied afterwards by [`select_existing_file`]: a layout
+/// that is installed but has no file yet becomes the create target, and a
+/// file that already exists is still chosen even when it is not that layout.
+fn order_layouts(layouts: &[Layout]) -> Vec<PathBuf> {
+    let promoted = layouts
+        .iter()
+        .position(|layout| layout.markers.iter().any(|path| path.exists()));
+    match promoted {
+        Some(index) => std::iter::once(layouts[index].target.clone())
+            .chain(
+                layouts
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != index)
+                    .map(|(_, layout)| layout.target.clone()),
+            )
+            .collect(),
+        None => layouts.iter().map(|layout| layout.target.clone()).collect(),
+    }
+}
+
+fn codebuddy_config_dir() -> PathBuf {
+    std::env::var_os("CODEBUDDY_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_path(".codebuddy"))
+}
+
+/// CodeBuddy reads the first of these that exists and, when none do, creates
+/// `.mcp.json`. `mcp.json` and `~/.codebuddy.json` are the older files.
+fn codebuddy_mcp_configs(dir: &Path, legacy: PathBuf) -> Vec<PathBuf> {
+    vec![dir.join(".mcp.json"), dir.join("mcp.json"), legacy]
+}
+
+/// Current Devin Desktop file. macOS and Linux use `~/.config` (or
+/// `$XDG_CONFIG_HOME`), not the platform config directory — on macOS that
+/// directory is `~/Library/Application Support`, which Devin does not read.
+/// Windows uses `%APPDATA%`.
+fn devin_mcp_config() -> PathBuf {
+    if cfg!(windows) {
+        return user_config_file(&["devin", "mcp_config.json"]);
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+        return PathBuf::from(xdg).join("devin").join("mcp_config.json");
+    }
+    home_path(".config/devin/mcp_config.json")
+}
+
+fn windsurf_mcp_configs() -> Vec<PathBuf> {
+    let legacy = home_path(".codeium/windsurf/mcp_config.json");
+    let current = devin_mcp_config();
+    let mut windsurf_markers = vec![home_path(".codeium/windsurf")];
+    windsurf_markers.extend(install_evidence(&["Windsurf"]));
+    let mut devin_markers = Vec::new();
+    if let Some(parent) = current.parent() {
+        devin_markers.push(parent.to_path_buf());
+    }
+    devin_markers.extend(install_evidence(&["Devin"]));
+    let mut configs = order_layouts(&[
+        Layout {
+            target: legacy,
+            markers: windsurf_markers,
+        },
+        Layout {
+            target: current.clone(),
+            markers: devin_markers,
+        },
+    ]);
+    let dot_config = home_path(".config/devin/mcp_config.json");
+    if !configs.iter().any(|path| path == &dot_config) {
+        configs.push(dot_config);
+    }
+    configs
 }
 
 fn with_apps(mut paths: Vec<PathBuf>, app_names: &[&str]) -> Vec<PathBuf> {
@@ -248,14 +339,18 @@ fn with_apps(mut paths: Vec<PathBuf>, app_names: &[&str]) -> Vec<PathBuf> {
 }
 
 fn client_specs() -> Vec<ClientSpec> {
+    let codebuddy_dir = codebuddy_config_dir();
     vec![
         ClientSpec {
             id: "claude_code",
             name: "Claude Code",
             source: "claude_code",
-            mcp_config: Some(home_path(".claude.json")),
+            // User MCP lives in `~/.claude.json` on every OS (`%USERPROFILE%`
+            // on Windows). Project `.mcp.json` is per-repo and is not written
+            // from here.
+            mcp_configs: vec![home_path(".claude.json")],
             mcp_format: McpConfigFormat::Json,
-            skill_dir: Some(skill_install_dir(".claude")),
+            skill_dirs: vec![skill_install_dir(".claude")],
             detection_paths: vec![home_path(".claude"), home_path(".claude.json")],
             cli_names: &["claude"],
         },
@@ -263,9 +358,9 @@ fn client_specs() -> Vec<ClientSpec> {
             id: "codex",
             name: "Codex",
             source: "codex",
-            mcp_config: Some(home_path(".codex/config.toml")),
+            mcp_configs: vec![home_path(".codex/config.toml")],
             mcp_format: McpConfigFormat::Toml,
-            skill_dir: Some(skill_install_dir(".codex")),
+            skill_dirs: vec![skill_install_dir(".codex")],
             detection_paths: vec![home_path(".codex"), home_path(".codex/config.toml")],
             cli_names: &["codex"],
         },
@@ -273,9 +368,9 @@ fn client_specs() -> Vec<ClientSpec> {
             id: "claude_desktop",
             name: "Claude Desktop",
             source: "claude_desktop",
-            mcp_config: Some(user_config_file(&["Claude", "claude_desktop_config.json"])),
+            mcp_configs: user_config_candidates(&["Claude", "claude_desktop_config.json"]),
             mcp_format: McpConfigFormat::Json,
-            skill_dir: None,
+            skill_dirs: vec![],
             detection_paths: with_apps(vec![user_data_dir("Claude")], &["Claude"]),
             cli_names: &[],
         },
@@ -283,9 +378,9 @@ fn client_specs() -> Vec<ClientSpec> {
             id: "cursor",
             name: "Cursor",
             source: "cursor",
-            mcp_config: Some(home_path(".cursor/mcp.json")),
+            mcp_configs: vec![home_path(".cursor/mcp.json")],
             mcp_format: McpConfigFormat::Json,
-            skill_dir: Some(skill_install_dir(".cursor")),
+            skill_dirs: vec![skill_install_dir(".cursor")],
             detection_paths: with_apps(
                 vec![home_path(".cursor"), user_data_dir("Cursor")],
                 &["Cursor"],
@@ -296,11 +391,11 @@ fn client_specs() -> Vec<ClientSpec> {
             id: "codebuddy",
             name: "CodeBuddy",
             source: "codebuddy",
-            mcp_config: Some(home_path(".codebuddy/mcp.json")),
+            mcp_configs: codebuddy_mcp_configs(&codebuddy_dir, home_path(".codebuddy.json")),
             mcp_format: McpConfigFormat::Json,
-            skill_dir: Some(skill_install_dir(".codebuddy")),
+            skill_dirs: vec![codebuddy_dir.join("skills").join(SKILL_DIR_NAME)],
             detection_paths: with_apps(
-                vec![home_path(".codebuddy"), user_data_dir("CodeBuddy")],
+                vec![codebuddy_dir, user_data_dir("CodeBuddy")],
                 &["CodeBuddy"],
             ),
             cli_names: &["codebuddy"],
@@ -309,12 +404,20 @@ fn client_specs() -> Vec<ClientSpec> {
             id: "windsurf",
             name: "Windsurf",
             source: "windsurf",
-            mcp_config: Some(home_path(".codeium/windsurf/mcp_config.json")),
+            // Older Windsurf reads `~/.codeium/windsurf/mcp_config.json`. Devin
+            // Desktop (the current app) reads a different file, and which one
+            // is created follows the install that is actually present.
+            mcp_configs: windsurf_mcp_configs(),
             mcp_format: McpConfigFormat::Json,
-            skill_dir: None,
+            skill_dirs: vec![],
             detection_paths: with_apps(
-                vec![home_path(".codeium/windsurf"), user_data_dir("Windsurf")],
-                &["Windsurf"],
+                vec![
+                    home_path(".codeium/windsurf"),
+                    home_path(".config/devin"),
+                    user_data_dir("Windsurf"),
+                    user_data_dir("devin"),
+                ],
+                &["Windsurf", "Devin"],
             ),
             cli_names: &["windsurf"],
         },
@@ -322,9 +425,9 @@ fn client_specs() -> Vec<ClientSpec> {
             id: "workbuddy",
             name: "WorkBuddy",
             source: "workbuddy",
-            mcp_config: Some(home_path(".workbuddy/mcp.json")),
+            mcp_configs: vec![home_path(".workbuddy/mcp.json")],
             mcp_format: McpConfigFormat::Json,
-            skill_dir: Some(skill_install_dir(".workbuddy")),
+            skill_dirs: vec![skill_install_dir(".workbuddy")],
             detection_paths: with_apps(
                 vec![home_path(".workbuddy"), user_data_dir("WorkBuddy")],
                 &["WorkBuddy"],
@@ -337,9 +440,9 @@ fn client_specs() -> Vec<ClientSpec> {
             source: "qoder",
             // Connectors live in `mcpServers` inside settings.json. A bare
             // `~/.qoder` is not an install: this machine keeps leftover logs there.
-            mcp_config: Some(home_path(".qoder/settings.json")),
+            mcp_configs: vec![home_path(".qoder/settings.json")],
             mcp_format: McpConfigFormat::Json,
-            skill_dir: Some(skill_install_dir(".qoder")),
+            skill_dirs: vec![skill_install_dir(".qoder")],
             detection_paths: with_apps(
                 vec![
                     home_path(".qoder/settings.json"),
@@ -353,9 +456,9 @@ fn client_specs() -> Vec<ClientSpec> {
             id: "qoder_cn",
             name: "Qoder CN",
             source: "qoder_cn",
-            mcp_config: Some(home_path(".qoder-cn/settings.json")),
+            mcp_configs: vec![home_path(".qoder-cn/settings.json")],
             mcp_format: McpConfigFormat::Json,
-            skill_dir: Some(skill_install_dir(".qoder-cn")),
+            skill_dirs: vec![skill_install_dir(".qoder-cn")],
             detection_paths: with_apps(
                 vec![
                     home_path(".qoder-cn"),
@@ -369,9 +472,9 @@ fn client_specs() -> Vec<ClientSpec> {
             id: "trae",
             name: "Trae",
             source: "trae",
-            mcp_config: Some(user_config_file(&["Trae", "User", "mcp.json"])),
+            mcp_configs: user_config_candidates(&["Trae", "User", "mcp.json"]),
             mcp_format: McpConfigFormat::Json,
-            skill_dir: Some(skill_install_dir(".trae")),
+            skill_dirs: vec![skill_install_dir(".trae")],
             detection_paths: with_apps(vec![user_data_dir("Trae"), home_path(".trae")], &["Trae"]),
             cli_names: &["trae"],
         },
@@ -379,9 +482,9 @@ fn client_specs() -> Vec<ClientSpec> {
             id: "trae_cn",
             name: "Trae CN",
             source: "trae_cn",
-            mcp_config: Some(user_config_file(&["Trae CN", "User", "mcp.json"])),
+            mcp_configs: user_config_candidates(&["Trae CN", "User", "mcp.json"]),
             mcp_format: McpConfigFormat::Json,
-            skill_dir: Some(skill_install_dir(".trae-cn")),
+            skill_dirs: vec![skill_install_dir(".trae-cn")],
             detection_paths: with_apps(
                 vec![user_data_dir("Trae CN"), home_path(".trae-cn")],
                 &["Trae CN", "TRAE CN"],
@@ -392,9 +495,20 @@ fn client_specs() -> Vec<ClientSpec> {
             id: "agy",
             name: "Antigravity",
             source: "agy",
-            mcp_config: Some(agy_mcp_config_path()),
+            // Current builds read `~/.gemini/config/mcp_config.json`. Older
+            // installs still have `~/.gemini/antigravity/mcp_config.json`.
+            // The App and the CLI share `config/skills`; the CLI also reads
+            // the two later skill directories, which the App ignores.
+            mcp_configs: vec![
+                home_path(".gemini/config/mcp_config.json"),
+                home_path(".gemini/antigravity/mcp_config.json"),
+            ],
             mcp_format: McpConfigFormat::Json,
-            skill_dir: Some(agy_skill_dir()),
+            skill_dirs: vec![
+                home_path(".gemini/config/skills").join(SKILL_DIR_NAME),
+                home_path(".gemini/antigravity-cli/skills").join(SKILL_DIR_NAME),
+                home_path(".gemini/skills").join(SKILL_DIR_NAME),
+            ],
             // A bare `~/.gemini` is the old Gemini CLI, which is not this
             // client. Only the Antigravity layouts count, plus the app bundle
             // and the `agy` binary.
@@ -414,17 +528,14 @@ fn client_specs() -> Vec<ClientSpec> {
 pub fn mcp_client_candidates() -> Vec<McpClientCandidate> {
     client_specs()
         .into_iter()
-        .filter_map(|spec| {
-            let config_path = spec.mcp_config?;
-            Some(McpClientCandidate {
-                id: spec.id,
-                name: spec.name,
-                source: spec.source,
-                config_path,
-                format: spec.mcp_format,
-                detection_paths: spec.detection_paths,
-                cli_names: spec.cli_names,
-            })
+        .map(|spec| McpClientCandidate {
+            id: spec.id,
+            name: spec.name,
+            source: spec.source,
+            config_path: select_existing_file(&spec.mcp_configs),
+            format: spec.mcp_format,
+            detection_paths: spec.detection_paths,
+            cli_names: spec.cli_names,
         })
         .collect()
 }
@@ -948,11 +1059,13 @@ fn skill_harnesses() -> Vec<SkillHarness> {
     client_specs()
         .into_iter()
         .filter_map(|spec| {
-            let dir = spec.skill_dir?;
+            if spec.skill_dirs.is_empty() {
+                return None;
+            }
             Some(SkillHarness {
                 id: spec.id,
                 name: spec.name,
-                dir,
+                dir: select_installed_skill_dir(&spec.skill_dirs),
                 detection_paths: spec.detection_paths,
                 cli_names: spec.cli_names,
             })
@@ -1326,11 +1439,12 @@ mod tests {
         assert!(qoder_cn.cli_names.contains(&"qodercn"));
 
         let config_root = dirs::config_dir().expect("config dir");
+        let specs = client_specs();
+        let trae_spec = specs.iter().find(|spec| spec.id == "trae").unwrap();
+        assert!(trae_spec.mcp_configs[0].starts_with(&config_root));
         let trae = candidates.iter().find(|c| c.id == "trae").unwrap();
-        assert!(trae.config_path.starts_with(&config_root));
-        assert!(trae
-            .config_path
-            .ends_with(Path::new("Trae").join("User").join("mcp.json")));
+        let trae_config = trae.config_path.to_string_lossy().replace('\\', "/");
+        assert!(trae_config.ends_with("Trae/User/mcp.json"), "{trae_config}");
         assert!(trae
             .detection_paths
             .iter()
@@ -1340,11 +1454,14 @@ mod tests {
             .iter()
             .any(|path| component_is(path, ".trae")));
 
+        let trae_cn_spec = specs.iter().find(|spec| spec.id == "trae_cn").unwrap();
+        assert!(trae_cn_spec.mcp_configs[0].starts_with(&config_root));
         let trae_cn = candidates.iter().find(|c| c.id == "trae_cn").unwrap();
-        assert!(trae_cn.config_path.starts_with(&config_root));
-        assert!(trae_cn
-            .config_path
-            .ends_with(Path::new("Trae CN").join("User").join("mcp.json")));
+        let trae_cn_config = trae_cn.config_path.to_string_lossy().replace('\\', "/");
+        assert!(
+            trae_cn_config.ends_with("Trae CN/User/mcp.json"),
+            "{trae_cn_config}"
+        );
         assert!(trae_cn
             .detection_paths
             .iter()
@@ -1425,6 +1542,103 @@ mod tests {
         assert_eq!(select_installed_skill_dir(&candidates), shared);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn user_config_candidates_keep_the_native_directory_first() {
+        let parts = ["Claude", "claude_desktop_config.json"];
+        let configs = user_config_candidates(&parts);
+        assert_eq!(configs[0], user_config_file(&parts));
+        assert!(configs.len() >= 2);
+        assert!(configs.iter().all(|path| {
+            path.to_string_lossy()
+                .replace('\\', "/")
+                .ends_with("Claude/claude_desktop_config.json")
+        }));
+        let again = user_config_candidates(&parts);
+        assert_eq!(configs.len(), unique_paths(again).len());
+    }
+
+    #[test]
+    fn order_layouts_promotes_the_install_that_is_present() {
+        let base = temp_dir("layouts");
+        let older = base.join("older.json");
+        let newer = base.join("newer.json");
+        let older_marker = base.join("older-install");
+        let newer_marker = base.join("newer-install");
+        let layouts = [
+            Layout {
+                target: older.clone(),
+                markers: vec![older_marker.clone()],
+            },
+            Layout {
+                target: newer.clone(),
+                markers: vec![newer_marker.clone()],
+            },
+        ];
+
+        assert_eq!(order_layouts(&layouts), vec![older.clone(), newer.clone()]);
+
+        std::fs::create_dir_all(&newer_marker).unwrap();
+        assert_eq!(order_layouts(&layouts), vec![newer.clone(), older.clone()]);
+        assert_eq!(select_existing_file(&order_layouts(&layouts)), newer);
+
+        std::fs::write(&older, "{}\n").unwrap();
+        assert_eq!(select_existing_file(&order_layouts(&layouts)), older);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn codebuddy_prefers_the_current_mcp_file_and_keeps_an_older_one() {
+        let base = temp_dir("codebuddy");
+        let legacy = base.join(".codebuddy.json");
+        let configs = codebuddy_mcp_configs(&base.join(".codebuddy"), legacy.clone());
+        assert!(configs[0].ends_with(".mcp.json"));
+        assert!(configs[1].ends_with("mcp.json"));
+        assert_eq!(select_existing_file(&configs), configs[0]);
+
+        std::fs::write(&legacy, "{}\n").unwrap();
+        assert_eq!(select_existing_file(&configs), legacy);
+
+        std::fs::create_dir_all(configs[0].parent().unwrap()).unwrap();
+        std::fs::write(&configs[0], "{}\n").unwrap();
+        assert_eq!(select_existing_file(&configs), configs[0]);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn every_client_resolves_through_the_shared_detector() {
+        let harnesses = skill_harnesses();
+        for spec in client_specs() {
+            assert!(
+                !spec.mcp_configs.is_empty(),
+                "{} has no MCP candidates",
+                spec.id
+            );
+            let resolved = select_existing_file(&spec.mcp_configs);
+            let published = mcp_client_candidates()
+                .into_iter()
+                .find(|candidate| candidate.id == spec.id)
+                .unwrap_or_else(|| panic!("missing mcp candidate {}", spec.id));
+            assert_eq!(published.config_path, resolved, "{}", spec.id);
+
+            if spec.skill_dirs.is_empty() {
+                assert!(
+                    harnesses.iter().all(|harness| harness.id != spec.id),
+                    "{} should not install a skill",
+                    spec.id
+                );
+            } else {
+                let dir = select_installed_skill_dir(&spec.skill_dirs);
+                let harness = harnesses
+                    .iter()
+                    .find(|harness| harness.id == spec.id)
+                    .unwrap_or_else(|| panic!("missing skill harness {}", spec.id));
+                assert_eq!(harness.dir, dir, "{}", spec.id);
+            }
+        }
     }
 
     #[test]
