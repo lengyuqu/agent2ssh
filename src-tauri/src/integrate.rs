@@ -187,6 +187,61 @@ fn skill_install_dir(dot_dir: &str) -> PathBuf {
     home_path(dot_dir).join("skills").join(SKILL_DIR_NAME)
 }
 
+/// First candidate that is a real file, otherwise the first candidate.
+///
+/// A directory at the same path does not count: writing through it would fail,
+/// and it is not the config the client is reading.
+fn select_existing_file(candidates: &[PathBuf]) -> PathBuf {
+    candidates
+        .iter()
+        .find(|path| path.is_file())
+        .cloned()
+        .or_else(|| candidates.first().cloned())
+        .unwrap_or_default()
+}
+
+/// First skill directory that already holds `SKILL.md`, otherwise the first
+/// candidate. An empty skills folder is not an install.
+fn select_installed_skill_dir(candidates: &[PathBuf]) -> PathBuf {
+    candidates
+        .iter()
+        .find(|dir| dir.join("SKILL.md").is_file())
+        .cloned()
+        .or_else(|| candidates.first().cloned())
+        .unwrap_or_default()
+}
+
+/// Global MCP file for Antigravity (`agy`, the App, and the IDE).
+///
+/// `dirs::home_dir` is what makes one relative path land in the right home on
+/// macOS, Linux, and Windows (`%USERPROFILE%`). The file under that home is
+/// not stable across installs: current builds read
+/// `~/.gemini/config/mcp_config.json`, and older ones still have
+/// `~/.gemini/antigravity/mcp_config.json`. The docs do not say which wins
+/// when both exist, so prefer the current file when it is already there,
+/// otherwise the legacy file, otherwise the current path — a first
+/// registration then creates the file every current surface reads.
+fn agy_mcp_config_path() -> PathBuf {
+    select_existing_file(&[
+        home_path(".gemini/config/mcp_config.json"),
+        home_path(".gemini/antigravity/mcp_config.json"),
+    ])
+}
+
+/// Skill directory Antigravity will actually load.
+///
+/// The App and the CLI share `~/.gemini/config/skills/`. The CLI also reads
+/// `~/.gemini/antigravity-cli/skills/` and `~/.gemini/skills/`, which the App
+/// ignores. Update an existing install in place so a second copy is not
+/// written beside it; a machine with no install gets the shared directory.
+fn agy_skill_dir() -> PathBuf {
+    select_installed_skill_dir(&[
+        home_path(".gemini/config/skills").join(SKILL_DIR_NAME),
+        home_path(".gemini/antigravity-cli/skills").join(SKILL_DIR_NAME),
+        home_path(".gemini/skills").join(SKILL_DIR_NAME),
+    ])
+}
+
 fn with_apps(mut paths: Vec<PathBuf>, app_names: &[&str]) -> Vec<PathBuf> {
     paths.extend(install_evidence(app_names));
     paths
@@ -332,6 +387,26 @@ fn client_specs() -> Vec<ClientSpec> {
                 &["Trae CN", "TRAE CN"],
             ),
             cli_names: &["trae-cn", "traecn"],
+        },
+        ClientSpec {
+            id: "agy",
+            name: "Antigravity",
+            source: "agy",
+            mcp_config: Some(agy_mcp_config_path()),
+            mcp_format: McpConfigFormat::Json,
+            skill_dir: Some(agy_skill_dir()),
+            // A bare `~/.gemini` is the old Gemini CLI, which is not this
+            // client. Only the Antigravity layouts count, plus the app bundle
+            // and the `agy` binary.
+            detection_paths: with_apps(
+                vec![
+                    home_path(".gemini/config"),
+                    home_path(".gemini/antigravity"),
+                    home_path(".gemini/antigravity-cli"),
+                ],
+                &["Antigravity"],
+            ),
+            cli_names: &["agy"],
         },
     ]
 }
@@ -1219,6 +1294,7 @@ mod tests {
         assert!(candidates.iter().any(|c| c.id == "trae_cn"));
         assert!(candidates.iter().any(|c| c.id == "qoder"));
         assert!(candidates.iter().any(|c| c.id == "qoder_cn"));
+        assert!(candidates.iter().any(|c| c.id == "agy"));
         assert!(candidates.iter().all(|c| c.id != "gemini_cli"));
         assert!(candidates.iter().all(|c| c.id != "qoder_work"));
         assert!(candidates.iter().all(|c| c.id != "trae_solo"));
@@ -1277,6 +1353,78 @@ mod tests {
             .detection_paths
             .iter()
             .all(|path| !component_is(path, ".trae")));
+
+        let agy = candidates.iter().find(|c| c.id == "agy").unwrap();
+        let agy_config = agy.config_path.to_string_lossy().replace('\\', "/");
+        assert!(
+            agy_config.ends_with(".gemini/config/mcp_config.json")
+                || agy_config.ends_with(".gemini/antigravity/mcp_config.json"),
+            "{agy_config}"
+        );
+        assert!(agy.cli_names.contains(&"agy"));
+        assert!(agy
+            .detection_paths
+            .iter()
+            .all(|path| { path.file_name().and_then(|name| name.to_str()) != Some(".gemini") }));
+    }
+
+    #[test]
+    fn select_existing_file_prefers_the_first_file_that_is_present() {
+        let base = temp_dir("agy-mcp");
+        let current = base.join("config").join("mcp_config.json");
+        let legacy = base.join("antigravity").join("mcp_config.json");
+        std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, "{}\n").unwrap();
+
+        assert_eq!(
+            select_existing_file(&[current.clone(), legacy.clone()]),
+            legacy
+        );
+
+        std::fs::write(&current, "{}\n").unwrap();
+        assert_eq!(
+            select_existing_file(&[current.clone(), legacy.clone()]),
+            current
+        );
+
+        // A directory at the preferred path is not a config file.
+        let blocked = base.join("blocked.json");
+        std::fs::create_dir_all(&blocked).unwrap();
+        assert_eq!(select_existing_file(&[blocked, legacy.clone()]), legacy);
+
+        let missing = base.join("missing.json");
+        let also_missing = base.join("also-missing.json");
+        assert_eq!(
+            select_existing_file(&[missing.clone(), also_missing]),
+            missing
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn select_installed_skill_dir_keeps_an_existing_install() {
+        let base = temp_dir("agy-skill");
+        let shared = base.join("config").join("skills").join(SKILL_DIR_NAME);
+        let cli_only = base
+            .join("antigravity-cli")
+            .join("skills")
+            .join(SKILL_DIR_NAME);
+        let gemini = base.join("skills").join(SKILL_DIR_NAME);
+        let candidates = [shared.clone(), cli_only.clone(), gemini.clone()];
+
+        assert_eq!(select_installed_skill_dir(&candidates), shared);
+
+        std::fs::create_dir_all(&gemini).unwrap();
+        std::fs::write(gemini.join("SKILL.md"), "---\nversion: 1\n---\n").unwrap();
+        assert_eq!(select_installed_skill_dir(&candidates), gemini);
+
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("SKILL.md"), "---\nversion: 1\n---\n").unwrap();
+        assert_eq!(select_installed_skill_dir(&candidates), shared);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1305,6 +1453,13 @@ mod tests {
         assert!(
             dir_of("trae_cn").ends_with(".trae-cn/skills/agent2ssh")
                 || dir_of("trae_cn").ends_with(r".trae-cn\skills\agent2ssh")
+        );
+        let agy_skill = dir_of("agy").replace('\\', "/");
+        assert!(
+            agy_skill.ends_with(".gemini/config/skills/agent2ssh")
+                || agy_skill.ends_with(".gemini/antigravity-cli/skills/agent2ssh")
+                || agy_skill.ends_with(".gemini/skills/agent2ssh"),
+            "{agy_skill}"
         );
         assert!(harnesses
             .iter()
