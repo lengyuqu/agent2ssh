@@ -775,9 +775,7 @@ mod remove_system_known_host_matching {
     ///
     /// The premise this used to be pinned as a *failure* against — that
     /// `ssh-keygen -R` would sweep the bracketed form — was measured and is
-    /// false; the resolution recorded for L2-15
-    /// (`docs/reports/OPT-LOOP-L2-PENDING.md`) is the product reading taken
-    /// here: `forget` removes more spellings than the reference, and says so in
+    /// false. `forget` removes more spellings than the reference, and says so in
     /// the function's doc comment.
     #[test]
     fn an_ipv6_literal_at_port_22_is_removed() {
@@ -2415,7 +2413,7 @@ fn is_publickey_refused(error: &Error) -> bool {
 /// preference") was wrong on both counts: the preference is never applied, so
 /// nothing gets the chance to ignore it, and `apply_prefs` would drop it for RSA
 /// keys just the same. Kept, together with the caller's branch, because deleting
-/// it is a behaviour decision — recorded as L2-13 in `OPT-LOOP-L2-PENDING.md`.
+/// it is a behaviour decision, not a drive-by deletion.
 ///
 /// If it could return `true` it would be the second way a connection lands on
 /// SHA-1, and the caller would record it for the same reason it records the

@@ -1637,8 +1637,7 @@ fn creation_time_ticks(handle: isize) -> Option<u64> {
 /// Measured against `sysinfo::Process::start_time` on Windows 11 26300: equal
 /// in every sample (24/24 across four runs), because sysinfo divides the same
 /// tick count by 10^7. So a value read from a handle is directly comparable to
-/// [`OwnerMarker::start_time`] without a conversion table — see
-/// `docs/reports/CNB-ISSUE-24-WINDOWS-PRIMITIVES-2026-11-12.md`.
+/// [`OwnerMarker::start_time`] without a conversion table.
 #[cfg(windows)]
 fn creation_time_secs(handle: isize) -> Option<u64> {
     creation_time_ticks(handle).map(|ticks| ticks / 10_000_000 - FILETIME_TO_UNIX_SECS)

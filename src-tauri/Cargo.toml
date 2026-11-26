@@ -90,8 +90,8 @@ reqwest = { version = "0.12", features = ["json", "blocking"] }
 # becomes `rsa = "0.10"` and the rc-era API may need one more pass.
 rsa = "=0.10.0-rc.18"
 # Ed25519 key generation. Replaces `ssh-key`, whose exact pins on RustCrypto
-# pre-releases could not coexist with the transport (see
-# docs/plans/russh-migration.md §5). Only the public-key derivation is needed
+# pre-releases could not coexist with the transport. Only the public-key
+# derivation is needed
 # from it; the OpenSSH container is written by `openssh_key` so no second parser
 # is involved. The pin went from `=3.0.0-pre.6` to the finished `3` when the
 # transport moved to russh 0.64, which depends on the release.

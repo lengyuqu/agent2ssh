@@ -72,7 +72,7 @@ jobs:
   # minutes, and the Windows legs have twice stalled with no output at all (the
   # unit tests once, `cli_contract` once) — hours burned, and cancelling lost the
   # logs. A bounded timeout turns a hang into an ordinary failure that still
-  # uploads its logs. See docs/reports/WINDOWS-HANDOVER.md section 1.
+  # uploads its logs.
   #
   # The numbers are at least 2.5x the slowest observed run of each job, measured
   # over the 0.4.3 release run (39983100417) and the 2026-10-27 and 2026-11-02

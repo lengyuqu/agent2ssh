@@ -1,6 +1,0 @@
-app_before ad_hoc=1 runtime=1 disable-library-validation=1 allow-unsigned-executable-memory=1 allow-dyld-environment-variables=0 get-task-allow=0
-daemon_before ad_hoc=1 runtime=1 disable-library-validation=1 allow-unsigned-executable-memory=1 allow-dyld-environment-variables=0 get-task-allow=0
-app_after ad_hoc=1 runtime=1 disable-library-validation=1 allow-unsigned-executable-memory=1 allow-dyld-environment-variables=0 get-task-allow=0
-daemon_after ad_hoc=1 runtime=1 disable-library-validation=0 allow-unsigned-executable-memory=0 allow-dyld-environment-variables=0 get-task-allow=0
-restricted_resign deep_strict_verify=1
-restricted_daemon real_process_ready=1 dynamic_code_valid=1 runtime=1 library_validation_enabled=1 clean_exit=1

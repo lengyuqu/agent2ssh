@@ -16,7 +16,7 @@
 //! the phase-0/1 `.commit.json` redo log through the ordinary save path, and
 //! writes an `app.log` audit entry. Replays are idempotent.
 //!
-//! Known limit (measured, C8 in `docs/reports/evidence/c8-downgrade-2026-11-13/`):
+//! Known limit (K8 in `docs/KNOWN-ISSUES.md`):
 //! an *old* binary that unlocks the store runs `migrate_plaintext_secrets()` at
 //! startup and re-seals tagged references as plaintext, stripping the tags
 //! again. Retag does not protect against a later downgrade; downgrading still

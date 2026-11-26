@@ -13,9 +13,8 @@
 //!
 //! # No wrapper signer is needed
 //!
-//! `docs/plans/russh-migration.md` §10.3 said the transport shipped no `Signer`
-//! and that an `AgentSigner` must be written. That was a grep artifact: the
-//! trait is implemented on the agent client itself, and the impl header wraps
+//! No wrapper `Signer` is required. The trait is implemented on the agent
+//! client itself, and the impl header wraps
 //! across lines —
 //!
 //! ```text

@@ -8,10 +8,10 @@
 //! version) keeps the seconds-resolution behaviour; the record is what upgrades
 //! the comparison, never a second stop protocol.
 //!
-//! Shape relative to `docs/plans/daemon-identity-v1.md` §5: `version`,
-//! `instance_id`, `pid` and `config_id` are as designed. There is no `endpoint`
-//! field because Windows has no provable local control endpoint yet (§4.2
-//! keeps it `Unbound`); inventing one would name a channel that does not exist.
+//! Shape: `version`, `instance_id`, `pid` and `config_id`. There is no
+//! `endpoint` field because Windows has no provable local control endpoint yet
+//! (K14 keeps the named pipe `Unbound`); inventing one would name a channel
+//! that does not exist.
 //! `creation_ticks` replaces the diagnostic `start_hint`: on Windows the
 //! creation time is a binding input, which is the hook #24's closing review
 //! named (`bound_identity_matches`). It is still not a credential — the

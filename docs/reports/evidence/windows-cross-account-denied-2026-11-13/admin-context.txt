@@ -1,5 +1,0 @@
-﻿whoami: macheniker9\administrator
-is-elevated: True
-winlogon pid=1480 OpenProcess(QUERY_LIMITED_INFORMATION) OK
-services pid=1556 OpenProcess(QUERY_LIMITED_INFORMATION) OK
-lsass pid=1584 OpenProcess(QUERY_LIMITED_INFORMATION) OK

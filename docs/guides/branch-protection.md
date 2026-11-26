@@ -97,4 +97,4 @@ gh run list -R lengyuqu/agent2ssh -L 5                    # 最近的运行
 - [CI/Release 工作流](../../.github/workflows/ci.yml)
 - [CODEOWNERS](../../.github/CODEOWNERS)
 - [发布与版本](../RELEASE.md)
-- [Windows 验证交接记录](../reports/WINDOWS-HANDOVER.md)
+- [已知问题](../KNOWN-ISSUES.md)

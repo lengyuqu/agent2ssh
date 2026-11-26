@@ -14,7 +14,7 @@ type DialogProps = {
  *
  * The card declares `bg-popover text-popover-foreground`, so its children
  * inherit the popover text token. What that does *not* mean: `--text-1 →
- * --foreground` is the design system's text token (docs/plans/ui-v3-midnight-ops.md)
+ * --foreground` is the design system's text token
  * and the `*-foreground` surface variables are shadcn-compat aliases of it, so
  * inside this card `text-foreground` is a no-op in Midnight Ops rather than an
  * override. Eleven sites on popover surfaces spell it out anyway — six in

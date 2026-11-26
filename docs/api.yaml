@@ -78,7 +78,7 @@ info:
     step is skipped altogether — the request proceeds as if nothing had paused it.
     That collapse of "unreadable" into "not paused" is the third gap in this list,
     and it is why `/terminal` and `/terminal/broadcast` disagree about the same
-    broken file. See L2-153 in `docs/reports/OPT-LOOP-L2-PENDING.md`.
+    broken file.
 
     A request body is read one of three ways, and the three fail differently.
     `Json<T>` — 47 handlers — rejects a body with no `application/json` content
@@ -117,7 +117,7 @@ info:
     handler refused what was in it" by the status code — and a client that
     parses every 4xx as `Error` will fail to parse this one. Normalising the
     rejections into the `Error` shape is a daemon change, not a documentation
-    one; it is L2-83 in `docs/reports/OPT-LOOP-L2-PENDING.md`.
+    one.
 servers:
   - url: http://127.0.0.1:7722
     description: Local daemon
@@ -1983,7 +1983,7 @@ paths:
         the audit, not sent there. The handler sends its one {"type":"exit"} after the
         loop, which on this path is after the Close — so treat the close as final and
         do not wait for that frame. (A data frame after a close frame is a protocol
-        violation; the ordering is L2-87 in `docs/reports/OPT-LOOP-L2-PENDING.md`.)
+        violation.)
         Every authorization refusal after the upgrade — scope, execution gate, rate limit, approval — arrives as
         {"type":"error","error":"..."} over the socket, not as an HTTP status: the handler body only counts the
         request and then hands the socket to `on_upgrade`. The only HTTP-level failure is the handshake itself.
@@ -2099,8 +2099,7 @@ paths:
         rate limit is applied in `terminal_broadcast_run` and not in this shared
         verdict function, so a preview cannot report the `execution limit exceeded`
         refusals that follow it. `authorized: true` here keeps the meaning the
-        field description gives it — nothing has refused this target *yet*. See
-        L2-153 in `docs/reports/OPT-LOOP-L2-PENDING.md`.
+        field description gives it — nothing has refused this target *yet*.
       requestBody:
         required: true
         content:
@@ -2182,8 +2181,7 @@ paths:
         the `execution limit exceeded` refusals below. What this route reports
         about refusals is not a mirror of what it records: a target refused under
         `all_or_nothing: false`, and every target refused by the limit check, are
-        refused in the body with no audit entry written — see
-        `docs/reports/OPT-LOOP-L2-PENDING.md` L2-150 and L2-153.
+        refused in the body with no audit entry written.
       requestBody:
         required: true
         content:

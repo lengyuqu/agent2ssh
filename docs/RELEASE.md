@@ -1,6 +1,6 @@
-# 发布与版本（Release & Versioning）
+# Release and versioning
 
-本文件合并了原 `versioning.md`（版本策略）与 `release-checklist.md`（发布清单），是当前发布的唯一参考。
+This is the live release procedure. The checklist below is bilingual; follow it as written. Completed plans are not kept in the tree.
 
 当前发布收口版本：`v0.6.0`。
 

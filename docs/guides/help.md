@@ -66,12 +66,9 @@ SSH 主机指纹不再要求人工确认。首次连接时会自动信任并写�
 
 ## 项目与开发文档
 
-面向贡献者与维护者的规划、发布与质量文档：
-
-- [Agent2SSH 计划（合并版）](../PLAN.md) — 唯一规划源（活跃 Plan 2 + 历史归档）
-- [发布与版本](../RELEASE.md) — 版本策略与发布清单
-- [架构说明](../architecture.md) — 组件、安全模型与控制面
+- [文档索引](../README.md) — 当前还留在仓库里的文档
+- [架构说明](../architecture.md) — 组件、安全模型、传输矩阵与控制面（英文）
 - [MCP Tools Reference](../skills.md) — 76 个 MCP 工具定义
 - [Skill 分发指南](../skill-distribution.md) — 安装、权限与更新
-- [缺陷检查报告](../DEFECTS.md) — 测试状态与缺陷清理
-- [回归与研究报告](../reports/REGRESSION-LOG.md) — 历史回归/研究证据合集
+- [已知问题](../KNOWN-ISSUES.md) — 当前限制与未验证范围（英文）
+- [发布与版本](../RELEASE.md) — 版本策略与发布清单

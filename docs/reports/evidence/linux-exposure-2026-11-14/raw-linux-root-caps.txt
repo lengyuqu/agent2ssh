@@ -1,6 +1,0 @@
-kernel: 6.18.15  proc: proc proc rw
-target pid=9 Uid: 1005 1005 1005 1005  environ mode: 400
-root dropped=[none] CapEff=000001ffffffffff environ=marker-visible
-root dropped=[-sys_ptrace] CapEff=000001fffff7ffff environ=marker-visible
-root dropped=[-dac_override,-dac_read_search] CapEff=000001fffffffff9 environ=denied
-root dropped=[-sys_ptrace,-dac_override,-dac_read_search] CapEff=000001fffff7fff9 environ=denied

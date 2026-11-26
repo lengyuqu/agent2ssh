@@ -87,7 +87,8 @@ All runtime state is under `~/.agent2ssh/`: `hosts.json`, `audit.jsonl`, `policy
 
 ## Docs worth reading before changing related code
 
-- `docs/architecture.md` — system design
+- `docs/README.md` — index of the documents that are still in the tree
+- `docs/architecture.md` — system design; keep the transport matrix here in sync with the Execution Targets section below
 - `docs/api.yaml` — daemon REST/WS contract; `api_yaml_documents_every_daemon_route` fails in both directions, so a new route and its spec entry have to land together
 - `docs/skills.md` — full reference for the 76 MCP tools; `mcp_tools_match_skills_md_documentation` and `mcp_tool_list_contains_exactly_76_tools` fail when the count and the table drift apart
-- [PLAN.md](docs/PLAN.md) — 单一规划源（活跃 Plan 2 + 历史归档）
+- `docs/KNOWN-ISSUES.md` — open limits and unverified ranges. Completed plans and investigation notes are not in the tree; git history has them

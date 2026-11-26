@@ -944,8 +944,7 @@ enum SecretsCommands {
     /// LIMIT: retag does not protect against a later DOWNGRADE. An old
     /// agent2ssh binary that unlocks the store runs its plaintext migration at
     /// startup and re-seals tagged references as plaintext, stripping the tags
-    /// again (measured against a pre-phase-2 binary, see
-    /// docs/reports/evidence/c8-downgrade-2026-11-13/). Downgrading still
+    /// again (K8 in docs/KNOWN-ISSUES.md). Downgrading still
     /// requires reverting references to the bare $agent2ssh-secret$ marker
     /// first — see the configuration guide.
     Retag {

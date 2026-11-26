@@ -477,13 +477,13 @@ macOS 的普通 PID 发现、状态诊断和显式兼容停止也使用有界、
 
 显式旧式 HTTP 停止仍是未绑定的风险例外：如果发现 IPC 实例或 socket 记录，客户端先进行上面的无密钥发现；IPC 证据不一致、不可检查或超时时，不发送 HTTP token 或关闭请求；发送前保留原 socket，再次复核记录、对端 PID 与 audit token，若连接关闭、出现非预期数据或观察到变化则拒绝。旧 daemon 没有 IPC 记录时仍可使用该明确例外；即使检查一致，也不能证明 HTTP 端点与 IPC 端点属于同一进程，token 仍可能暴露给错误端点。旧程序不遵守锁时的路径变化仍存在竞态。
 
-**macOS 保守策略（#25）**：普通 `daemon stop`、`daemon restart` 和桌面停止都走本机 Mach 私有端口：先用发现名做不带令牌的握手，核对内核给出的进程身份，再只向 daemon 返回的私有端口发送管理员令牌和一次停止请求，并以观察到进程退出为准。握手不成立时不发送任何请求；请求可能已送达但没有观察到退出时报告结果未知，保留记录，不重试。两种情况都不回退到 HTTP，也不按 PID 发信号，没有强制终止。这条路径不检查代码签名，尚未完成正式验收，不能当作已证明的进程对象绑定（见 [daemon-identity-v1.md](../plans/daemon-identity-v1.md) 第 0 节）。退出桌面不会停止 daemon，也不向它发送停止请求或信号；但系统或进程托管环境仍可能使 daemon 退出，正在进行的会话等任务可能中断。macOS 退出前若有 PID 记录、损坏记录或健康端点迹象，会提示活动状态未知；此路径不自动向未绑定端点发送管理员 token。本机隔离桌面实验观察到 `loginwindow` 向测试 daemon 发送 SIGTERM；其他环境尚未验证。`/health` 和 PID 一致只是线索，不代表身份已绑定。新 daemon 的 HTTP `/shutdown` 默认返回 403；只有 daemon 启动环境显式设置 `AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN=1` 才开放旧路径；若 daemon 监听非回环地址，该开关也会允许有管理员令牌的远程 HTTP 请求。要承担风险并请求一次优雅关闭，可在数字 loopback 地址上使用 `agent2ssh daemon stop --allow-unbound-graceful` 或桌面确认操作：请求可能停错进程并向错误端点暴露管理员 token；客户端不会重试、强杀、清理 PID 或声称退出已确认；CLI 即使收到接受回执也以非零状态退出，提示结果未验证。旧 daemon 不认识此服务端开关，仍可能接收请求。这个开关仅影响 daemon 启动时的进程环境，设置在客户端环境里不能启用已运行 daemon 的路由。不要通过代理使用此例外；客户端无法识别所有本地代理。
+**macOS 保守策略（#25）**：普通 `daemon stop`、`daemon restart` 和桌面停止都走本机 Mach 私有端口：先用发现名做不带令牌的握手，核对内核给出的进程身份，再只向 daemon 返回的私有端口发送管理员令牌和一次停止请求，并以观察到进程退出为准。握手不成立时不发送任何请求；请求可能已送达但没有观察到退出时报告结果未知，保留记录，不重试。两种情况都不回退到 HTTP，也不按 PID 发信号，没有强制终止。这条路径不检查代码签名，尚未完成正式验收，不能当作已证明的进程对象绑定（见 [已知问题](../KNOWN-ISSUES.md) K14）。真正退出桌面时，macOS **不会**停止 daemon，也不向未绑定端点发送管理员 token；若存在 PID 记录、记录读失败，或健康端点报出 PID，会提示活动状态未知。系统或进程托管环境仍可能使 daemon 退出。关闭窗口默认只收到托盘。本机隔离桌面实验观察到 `loginwindow` 向测试 daemon 发送 SIGTERM；其他环境尚未验证。`/health` 和 PID 一致只是线索，不代表身份已绑定。新 daemon 的 HTTP `/shutdown` 默认返回 403；只有 daemon 启动环境显式设置 `AGENT2SSH_ALLOW_UNBOUND_HTTP_SHUTDOWN=1` 才开放旧路径；若 daemon 监听非回环地址，该开关也会允许有管理员令牌的远程 HTTP 请求。要承担风险并请求一次优雅关闭，可在数字 loopback 地址上使用 `agent2ssh daemon stop --allow-unbound-graceful` 或桌面确认操作：请求可能停错进程并向错误端点暴露管理员 token；客户端不会重试、强杀、清理 PID 或声称退出已确认；CLI 即使收到接受回执也以非零状态退出，提示结果未验证。旧 daemon 不认识此服务端开关，仍可能接收请求。这个开关仅影响 daemon 启动时的进程环境，设置在客户端环境里不能启用已运行 daemon 的路由。不要通过代理使用此例外；客户端无法识别所有本地代理。
 
 **HTTP 停止回执（#20）**：daemon 对携带匹配 `expect_pid` 的成功请求返回 `checked_pid`，表示响应者声称完成了 PID 比较；空请求体没有该字段。旧 daemon 可能返回无回执的成功响应，客户端会继续兼容停止并在 CLI、桌面和日志提示检查未验证；无法由此判断 daemon 的版本。回执不证明响应者身份或进程已经退出。macOS 的普通 Mach 停止不使用该回执，显式 HTTP 兼容请求会显示回执状态，同时仍不声称身份或退出已验证。
 
 **macOS IPC（#22，部分实现）**：daemon 在不可被其他用户写入、由当前用户拥有的配置目录中创建 0700 的 `.daemon-ipc`，在其中发布 socket `s`；`daemon.instance.json` 记录非秘密实例 ID、PID、配置 ID 和端点，`daemon.config-id` 是持久标识，不是认证凭据。配置目录末级或 socket 子目录若为符号链接、权限不安全，路径上的目录含 ACL 允许项、上级目录不可信或 socket 路径超长，启动会失败并保留已有内容；仅收紧权限的 ACL 拒绝项可保留。配置目录不存在时，仅在安全的现有父目录下创建最后一级；多级缺失时须先创建并检查父目录。首次启用时若旧 daemon 的 PID 仍在，需要先带外检查和停止旧实例，不自动认领或覆盖其记录。进程正常关闭时，daemon 校验记录和 socket inode 后清理自己的 PID、实例文件和 socket；PID 和实例分步发布/删除，不是断电原子事务，异常退出或不一致均保留检查。
 
-**Windows 实例记录（#24 阶段二）**：daemon 成功绑定地址后，在 `.daemon-pid.lock` 下先写 `daemon.pid` 再写 `daemon.instance.json`：version=1、32 位十六进制实例 ID、PID、来自持久 `daemon.config-id` 的配置 ID，以及 `creation_ticks`——`GetProcessTimes` 的原始 100 ns FILETIME（不是 Unix 秒，截断正是这条记录要避免的）。已有实例记录时启动被拒绝，崩溃残留不自动覆盖；确认进程已退出后用 `daemon clear-stale --expect-pid <PID> --expect-instance <实例ID>` 显式恢复。停止路径在绑定句柄前锁内重读记录：记录有效时先核对其 ticks 截断到秒与进程表观察一致（不一致按 PID 可能已复用拒绝），再按 100 ns 精度绑定，强杀复核同精度——同一整秒内被另一个 daemon 命名镜像复用的 PID 因此绑不上；没有记录的旧 daemon 保持整秒比较，同整秒边界对它仍在；记录损坏、命名别的 PID 或与配置 ID 冲突时拒绝停止并保留两份文件，不降级。正常关闭时两份文件逐字节一致才清理（先删记录再删 PID）；令牌轮换等条件清理同样要求记录也命名该 PID。记录是发现证据，不是凭据；Windows 仍没有可证明的本机控制端点，这条记录不构成第二条停止协议（见 [daemon-identity-v1.md](../plans/daemon-identity-v1.md) §4.2 与 K14）。
+**Windows 实例记录（#24 阶段二）**：daemon 成功绑定地址后，在 `.daemon-pid.lock` 下先写 `daemon.pid` 再写 `daemon.instance.json`：version=1、32 位十六进制实例 ID、PID、来自持久 `daemon.config-id` 的配置 ID，以及 `creation_ticks`——`GetProcessTimes` 的原始 100 ns FILETIME（不是 Unix 秒，截断正是这条记录要避免的）。已有实例记录时启动被拒绝，崩溃残留不自动覆盖；确认进程已退出后用 `daemon clear-stale --expect-pid <PID> --expect-instance <实例ID>` 显式恢复。停止路径在绑定句柄前锁内重读记录：记录有效时先核对其 ticks 截断到秒与进程表观察一致（不一致按 PID 可能已复用拒绝），再按 100 ns 精度绑定，强杀复核同精度——同一整秒内被另一个 daemon 命名镜像复用的 PID 因此绑不上；没有记录的旧 daemon 保持整秒比较，同整秒边界对它仍在；记录损坏、命名别的 PID 或与配置 ID 冲突时拒绝停止并保留两份文件，不降级。正常关闭时两份文件逐字节一致才清理（先删记录再删 PID）；令牌轮换等条件清理同样要求记录也命名该 PID。记录是发现证据，不是凭据；Windows 仍没有可证明的本机控制端点，这条记录不构成第二条停止协议（见 [已知问题](../KNOWN-ISSUES.md) K14）。
 
 macOS daemon PID 操作共用 `.daemon-pid.lock`：它须是当前用户拥有的单链接普通文件，权限为 `0600`（或仍允许本进程读写的更严格权限），且不能有 ACL 允许项；符号链接、硬链接、非私有权限、错误所有者和等待期间观察到的路径替换都会拒绝，锁被持有时最多等待约两秒。旧环境若已有不符合条件的锁文件，先检查其类型、所有者和用途，再由操作者处理；程序不会跟随链接或自动修改其目标权限。该锁只能协调遵守它的程序，不能排除旧版本或不配合进程在检查后替换路径。
 
@@ -837,7 +837,7 @@ prelude = "export JAVA_HOME=/opt/jdk-21"   # WSL 的变量写在这里，不能�
 常驻会话（`agent2ssh resident open -H local:wsl`）走另一条路径：它不带命令，直接打开发行版的交互式登录 shell，之后每条命令写进同一个 shell 的 stdin，所以 `cd`、`export` 的状态跨命令保留，bash 语法在那里也可用。
 
 **起始目录不是用户主目录，而是调用进程工作目录的翻译结果**（2026-11-13 实测，Windows 11
-10.0.26300 + WSL 2，证据见 `docs/reports/evidence/windows-wsl-cwd-2026-11-13/`）：
+10.0.26300 + WSL 2）：
 
 | 调用进程的 Windows cwd | 发行版内的起始目录 |
 |---|---|
@@ -998,7 +998,7 @@ secret = "my-secret-key"
 `notify_approval_pending` 走 `format_slack_approval_notification`（`notify.rs:162`），`fire_webhook` 走
 `format_slack_message`（`notify.rs:299`）。对 `approval_required` 事件**两者都会发**——`bin/agent2ssh-daemon.rs`
 里同一个 `tokio::spawn` 先 `notify_approval_pending` 再 `fire_webhook`——所以一次待审批在 Slack 里是
-**两条消息**。这条重复发送是已知缺口，记在 `OPT-LOOP-L2-PENDING.md` 的 L2-75。读下文时先分辨是哪一条：
+**两条消息**。这条重复发送仍在。读下文时先分辨是哪一条：
 
 | | 审批那条（`format_slack_approval_notification`） | 通用那条（`format_slack_message`） |
 |---|---|---|
@@ -1016,13 +1016,12 @@ secret = "my-secret-key"
 `/approval/{id}/respond`，按钮再各接一段 `/approve` 与 `/reject`——**后两段不存在**，点开是 404。
 即使去掉后缀，`/approval/{id}/respond` 也只是 `POST` + `{"approved": bool}` 的 admin 路由，浏览器的
 GET 一样打不动；换个机器点开时，`127.0.0.1` 还指向**点的人自己的机器**。
-实际批准或拒绝请用 `Open Approvals` 按钮或 `/console#approvals`。这是已知缺口，已在
-`docs/reports/OPT-LOOP-L2-PENDING.md` 的 L2-44 登记
+实际批准或拒绝请用 `Open Approvals` 按钮或 `/console#approvals`。这是已知缺口：按钮仍然点不动。
 
 ### 自定义 Webhook
 
 非 Slack URL 发送原始 JSON，**但审批事件有两个形状、而且会投递两次**（`notify_approval_pending` 先发，
-`fire_webhook` 再发；见上文 Slack 对照表与 L2-75）。审批那条的形状：
+`fire_webhook` 再发；见上文 Slack 对照表）。审批那条的形状：
 
 ```json
 {
@@ -1339,7 +1338,7 @@ agent2ssh webdav pull --force
 
 **`hosts.json.bak` 不是一致性快照（阶段 2 已落地，但 `.bak` 不在成对范围内）**：常规保存只把上一次的 `hosts.json` 用 `fs::copy` 复制成 `hosts.json.bak`（`store.rs:841-851`，复制失败仅告警、不阻断保存），它防的是「上一次内容写坏了可手工回卷」，不保证跨文件一致。成对快照是另一套机制：双文件提交会额外写 `hosts.json.pair` / `secrets.enc.pair` 与 `config_pair_index.json`，`agent2ssh config-repair --restore-pair <N>` 用它把两份文件一起回卷；`.bak` 不参与其中。**带 tag 的引用**在恢复旧配置快照、模板应用、WebDAV pull 与桌面云恢复这四条路径上都会先做内容判定：tag 与当前 `secrets.enc` 不匹配即拒绝写入并点名 account，不会静默用错凭据。仍然无法自证内容的是裸 `$agent2ssh-secret$` 与 `$agent2ssh-keyring$`——它们按 account 名解析到**当前** `secrets.enc` 中的密文，恢复这类旧配置只给告警；若这期间改过口令，仍可能用错凭据。请勿把 `.bak` 当作可安全回卷的成对备份；确需回卷时用 `config-repair --restore-pair`，或先另行备份当前 `secrets.enc` 并逐项核对主机凭据。
 
-**升级与降级（阶段 2 引用格式，已落地 A/B）**：自 2026-11-12 起，新写入的凭据引用为 `$agent2ssh-secret$:<tag>`，`secrets.enc` 条目同时带内容 `tag`。旧版本程序用精确相等判定识别引用，会把带 tag 的字符串当成**明文口令重新密封**，因此升级后的配置目录不能被旧版本直接读写；降级前必须先把引用改回 `$agent2ssh-secret$` 并备份 `secrets.enc`。**这一点已用阶段 A/B 之前的真实二进制实测（2026-11-13，`48ac012`，证据见 `docs/reports/evidence/c8-downgrade-2026-11-13/`）**，而且要强调时机：旧版本在启动时对除 `completions` 与 `webdav decrypt` 之外的每条命令都会跑一次明文迁移（`src-tauri/src/bin/agent2ssh.rs:1884`），所以**库处于解锁状态时，一条 `host list` 就足以**完成破坏——引用退化为裸 marker、`secrets.enc` 丢掉 `tag` 并退回 v2 形状、代次 +1，还会留下一个 `hosts.json.bak`；库未解锁时同一条命令不改动任何文件。**另外两条入口同样会触发迁移（同日补测）**：桌面端在设置里解锁时走 `secrets_unlock` 命令，它解锁后无条件调用同一个迁移，界面显示解锁成功而 tag 已被吃掉；daemon 若通过 `AGENT2SSH_MASTER_PASSWORD` 拿到主密码，会在**启动时、接受任何客户端请求之前**完成同样的降级（不设该变量时 daemon 不动文件）。旧 CLI 侧不存在这条通路——它没有任何「提示输入当前主密码」的命令，`AGENT2SSH_MASTER_PASSWORD` 是它唯一的解锁入口。所以「只要不写配置就安全」不成立：**锁着库的旧进程是安全的，一旦解锁就随时可能落盘**。新版本再读这种数据时会还原出当初被封存的那串引用文本、发现 tag 对不上，打印 `... the stored secret is NOT used` 并拒绝该凭据的登录；`agent2ssh config-repair --restore-pair <N> --confirm` 能把两个文件逐字节恢复到降级前（前提是降级前已写过成对快照）。多设备共享配置（含 WebDAV 只同步 `hosts.json`）需要所有端同时升级——`secrets.enc` 不在同步白名单内，远端只会拿到带 tag 的 `hosts.json` 而没有对应凭据库。恢复旧 `hosts.json` 时若 tag 与当前凭据库不匹配，引用会被保留并给出明确指引、登录被拒绝，不会静默使用改过的口令；修复方式是重新输入凭据或恢复成对快照。阶段 2 C 已落地成对索引与四条恢复路径的前置判定；**阶段 D 提供 `agent2ssh config-repair`**（显式、带确认与审计）：
+**升级与降级（阶段 2 引用格式，已落地 A/B）**：自 2026-11-12 起，新写入的凭据引用为 `$agent2ssh-secret$:<tag>`，`secrets.enc` 条目同时带内容 `tag`。旧版本程序用精确相等判定识别引用，会把带 tag 的字符串当成**明文口令重新密封**，因此升级后的配置目录不能被旧版本直接读写；降级前必须先把引用改回 `$agent2ssh-secret$` 并备份 `secrets.enc`。**这一点已用阶段 A/B 之前的真实二进制实测（2026-11-13，`48ac012`）**，而且要强调时机：旧版本在启动时对除 `completions` 与 `webdav decrypt` 之外的每条命令都会跑一次明文迁移（`src-tauri/src/bin/agent2ssh.rs:1884`），所以**库处于解锁状态时，一条 `host list` 就足以**完成破坏——引用退化为裸 marker、`secrets.enc` 丢掉 `tag` 并退回 v2 形状、代次 +1，还会留下一个 `hosts.json.bak`；库未解锁时同一条命令不改动任何文件。**另外两条入口同样会触发迁移（同日补测）**：桌面端在设置里解锁时走 `secrets_unlock` 命令，它解锁后无条件调用同一个迁移，界面显示解锁成功而 tag 已被吃掉；daemon 若通过 `AGENT2SSH_MASTER_PASSWORD` 拿到主密码，会在**启动时、接受任何客户端请求之前**完成同样的降级（不设该变量时 daemon 不动文件）。旧 CLI 侧不存在这条通路——它没有任何「提示输入当前主密码」的命令，`AGENT2SSH_MASTER_PASSWORD` 是它唯一的解锁入口。所以「只要不写配置就安全」不成立：**锁着库的旧进程是安全的，一旦解锁就随时可能落盘**。新版本再读这种数据时会还原出当初被封存的那串引用文本、发现 tag 对不上，打印 `... the stored secret is NOT used` 并拒绝该凭据的登录；`agent2ssh config-repair --restore-pair <N> --confirm` 能把两个文件逐字节恢复到降级前（前提是降级前已写过成对快照）。多设备共享配置（含 WebDAV 只同步 `hosts.json`）需要所有端同时升级——`secrets.enc` 不在同步白名单内，远端只会拿到带 tag 的 `hosts.json` 而没有对应凭据库。恢复旧 `hosts.json` 时若 tag 与当前凭据库不匹配，引用会被保留并给出明确指引、登录被拒绝，不会静默使用改过的口令；修复方式是重新输入凭据或恢复成对快照。阶段 2 C 已落地成对索引与四条恢复路径的前置判定；**阶段 D 提供 `agent2ssh config-repair`**（显式、带确认与审计）：
 
 - `agent2ssh config-repair --list`（可加 `--json`）：列出成对快照记录。
 - `agent2ssh config-repair --discard-pending`：预览不可重放的 `.commit.json`（代次差、孤儿凭据 account）；加 `--confirm` 才删除日志。**只删日志，不改 `hosts.json` / `secrets.enc`，也不清理孤儿密文**，删除后写入可恢复。
@@ -1347,7 +1346,7 @@ agent2ssh webdav pull --force
 
 不带 `--confirm` 时命令只打印预览、绝不改动文件；只有成对副本的 hash 仍与索引记录吻合时才允许回卷（历史记录因共用同一副本会自然失效，属 fail-closed）。两次替换不是单一原子事务，中途崩溃仍需人工检查（C7 未实测）。
 
-**升级阶段 2 之前写入的旧凭据（issue #38 的 `secrets retag`）**：阶段 2 上线前保存的凭据在 `secrets.enc` 里 tag 为空、在 `hosts.json` 里引用为裸 `$agent2ssh-secret$`，普通保存永远不会补上 tag（`entry_tags()` 会丢弃不合法的 tag），四条恢复路径对裸引用也只告警不拒绝。`agent2ssh secrets retag` 是显式出路：不带 `--confirm` 只打印只读预览（几条凭据无 tag、几条裸引用可升级）；带 `--confirm` 才执行——给每条无 tag 条目分配新的内容 tag（**明文不变**）、把 `hosts.json` 中可解析的裸引用升级为 `$agent2ssh-secret$:<tag>`，并复用普通保存路径重对齐 `secrets_generation`（`.commit.json` redo log 与成对快照照常生效）。库锁定时命令在任何锁与任何文件写入**之前**就拒绝，配置目录逐字节不变；预览或成功执行会写 `app.log` 审计；已完成时重复执行不改写 `hosts.json` 或 `secrets.enc`；两处 rename 注入真实 SIGKILL 后重跑同一条命令即可补完（`docs/reports/evidence/issue38-retag-2026-11-13/`）。`doctor` 只在检测到无 tag 条目时提示这条命令。**retag 后的降级注意**：retag 把原本就是裸引用的旧引用也变成了带 tag 引用，因此「降级前必须把引用改回裸 `$agent2ssh-secret$` 并备份 `secrets.enc`」这条规则从阶段 2 新写入的凭据**扩展到全部凭据**；且 retag 本身不抵抗降级——如上文 C8 所测，解锁状态下的旧版本二进制在启动时就会把带 tag 引用当明文重新密封、吃掉 tag，retag 之后再用旧版本解锁库，结果与从未 retag 相同。v1 库没有逐条目结构，需先在解锁状态下普通保存一次完成 v1→v2 迁移后才能 retag；指向不存在条目的裸引用会被预览点名（`no store entry`）但保持原样，不会伪造 tag。
+**升级阶段 2 之前写入的旧凭据（issue #38 的 `secrets retag`）**：阶段 2 上线前保存的凭据在 `secrets.enc` 里 tag 为空、在 `hosts.json` 里引用为裸 `$agent2ssh-secret$`，普通保存永远不会补上 tag（`entry_tags()` 会丢弃不合法的 tag），四条恢复路径对裸引用也只告警不拒绝。`agent2ssh secrets retag` 是显式出路：不带 `--confirm` 只打印只读预览（几条凭据无 tag、几条裸引用可升级）；带 `--confirm` 才执行——给每条无 tag 条目分配新的内容 tag（**明文不变**）、把 `hosts.json` 中可解析的裸引用升级为 `$agent2ssh-secret$:<tag>`，并复用普通保存路径重对齐 `secrets_generation`（`.commit.json` redo log 与成对快照照常生效）。库锁定时命令在任何锁与任何文件写入**之前**就拒绝，配置目录逐字节不变；预览或成功执行会写 `app.log` 审计；已完成时重复执行不改写 `hosts.json` 或 `secrets.enc`；两处 rename 注入真实 SIGKILL 后重跑同一条命令即可补完（回归见 `tests/store_retag.rs`）。`doctor` 只在检测到无 tag 条目时提示这条命令。**retag 后的降级注意**：retag 把原本就是裸引用的旧引用也变成了带 tag 引用，因此「降级前必须把引用改回裸 `$agent2ssh-secret$` 并备份 `secrets.enc`」这条规则从阶段 2 新写入的凭据**扩展到全部凭据**；且 retag 本身不抵抗降级——如上文 C8 所测，解锁状态下的旧版本二进制在启动时就会把带 tag 引用当明文重新密封、吃掉 tag，retag 之后再用旧版本解锁库，结果与从未 retag 相同。v1 库没有逐条目结构，需先在解锁状态下普通保存一次完成 v1→v2 迁移后才能 retag；指向不存在条目的裸引用会被预览点名（`no store entry`）但保持原样，不会伪造 tag。
 
 `secrets retag` 会先检查 `hosts.json` 和 v2 凭据库能否读取；配置缺失、损坏或库版本不受支持时拒绝，不把错误显示为“无需处理”。缺少凭据条目的裸引用在升级和崩溃重放后仍保留；如果只剩此类引用且代次已对齐，再次执行不会改写配置或凭据库，需先恢复对应凭据才能升级引用。
 

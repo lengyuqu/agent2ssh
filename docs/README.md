@@ -1,37 +1,30 @@
-# Agent2SSH 文档
+# Agent2SSH documentation
 
-这里是 Agent2SSH 所有技术文档的入口，按使用场景分为三类。
+English is the language of the product README, this index, the architecture note, the MCP tool reference, and the daemon API contract. The operator guides under `guides/` are written in Chinese.
 
-## 快速入门
+This tree keeps documents that describe the current product. Completed plans, design proposals, regression logs, and investigation evidence are not kept here; git history still has them. Open limits live in [KNOWN-ISSUES.md](KNOWN-ISSUES.md).
 
-面向新用户的一站式指南：
+## Start here
 
-- [帮助总览](guides/help.md) — 桌面端功能区、常用命令与安全说明
-- [CLI 快速入门](guides/cli-quickstart.md) — 命令行主入口
-- [MCP 快速入门](guides/mcp-quickstart.md) — 让 AI 客户端调用 SSH 能力
-- [10 分钟接入剧本](guides/external-user-10min.md) — 外部用户快速上手
-- [Web 控制台指南](guides/web-console-guide.md) — 浏览器端操作面
-- [Daemon API 快速入门](guides/daemon-api-quickstart.md) — HTTP/WebSocket 接口
+- [Help overview](guides/help.md) — desktop areas, common commands, safety notes
+- [CLI quickstart](guides/cli-quickstart.md)
+- [MCP quickstart](guides/mcp-quickstart.md)
+- [10-minute external setup](guides/external-user-10min.md)
+- [Web console](guides/web-console-guide.md)
+- [Daemon API quickstart](guides/daemon-api-quickstart.md)
 
-## 配置与参考
+## Reference
 
-运行时配置和 API 文档：
+- [Configuration guide](guides/configuration-guide.md) — `~/.agent2ssh/` layout and fields
+- [MCP client templates](guides/mcp-client-templates.md)
+- [Architecture](architecture.md) — components, safety model, transport matrix, control plane
+- [MCP tools](skills.md) — the 76 tools; `tools/list` offers the 26 `core` tools unless `AGENT2SSH_MCP_TOOLS=all`
+- [Skill distribution](skill-distribution.md) — install, update, and uninstall the bundled Agent Skill
+- [API contract](api.yaml) — daemon HTTP and WebSocket. A new daemon route and its `paths:` entry land together
+- [Known issues](KNOWN-ISSUES.md) — current limits and unverified ranges
+- [Release](RELEASE.md) — version policy and the release checklist
+- [Branch protection](guides/branch-protection.md) — direct-to-`main` rules on GitHub
 
-- [配置指南](guides/configuration-guide.md) — `~/.agent2ssh/` 全部文件布局与字段说明
-- [MCP 客户端模板](guides/mcp-client-templates.md) — Claude/Cursor/Codex/Windsurf 等配置
-- [架构说明](architecture.md) — 组件、安全模型、控制面与持久化
-- [MCP Tools Reference](skills.md) — 76 个 MCP 工具完整定义
-- [Skill 分发指南](skill-distribution.md) — 安装方式、权限分级与更新策略
-- [API 契约](api.yaml) — OpenAPI 规范（daemon HTTP/WS 端点）
+## 简体中文
 
-## 项目与维护
-
-面向贡献者与维护者的规划、发布与质量文档：
-
-- [计划（合并版）](PLAN.md) — 活跃 Plan 2 + 历史归档（P0–K）+ Q1/Q2 执行报告
-- [发布与版本](RELEASE.md) — 版本策略与发布清单
-- [缺陷检查报告](DEFECTS.md) — 测试状态与已知缺陷跟踪
-- [回归与研究报告](reports/REGRESSION-LOG.md) — 11 份历史回归/研究证据合集
-- [已知问题与未覆盖范围](KNOWN-ISSUES.md) — 已知未解决的问题、环境限制，以及没有验证过的范围
-- [Windows 验证交接](reports/WINDOWS-HANDOVER.md) — CI 上的 Windows 现象、平台相关改动的复核做法，以及 Windows 真机验证结果（§7）
-- [RSSH 设计分析与可吸收清单](rssh-design-analysis.md) — 对比 RSSH 与 Agent2SSH，梳理已吸收能力与可吸收 gap（含落点/优先级/验收）
+索引以英文为准。日常操作说明在 `guides/`，是中文。当前限制见 [KNOWN-ISSUES.md](KNOWN-ISSUES.md)。已完成的计划和调查记录不在仓库里，需要时从 git 历史取出。

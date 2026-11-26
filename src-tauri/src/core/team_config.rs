@@ -23,12 +23,11 @@ pub struct TeamConfigExport {
 /// `policy.toml` exists, `load_risk_rules` never opens that file — it reads
 /// `[risk.*]` out of the policy instead — so this export reports "not
 /// configured" for a machine whose risk rules are very much in force, and the
-/// import that follows overwrites a legacy file nothing reads. Tracked as
-/// L2-108 in `docs/reports/OPT-LOOP-L2-PENDING.md`, which fixes the target
-/// file (the policy, via `existing_policy_path()`) and leaves one question
-/// open: whether an import replaces the whole `[risk.*]` section or merges
-/// into it. "When the export carries no `risk_rules`" is *not* open — the
-/// import already answers it, by touching nothing: every branch below is
+/// import that follows overwrites a legacy file nothing reads. The open
+/// question is whether an import should replace the whole `[risk.*]` section
+/// of `policy.toml` or merge into it. "When the export carries no
+/// `risk_rules`" is *not* open — the import already answers it, by touching
+/// nothing: every branch below is
 /// inside `if let Some(...)`, so an export without that half neither rewrites
 /// nor clears the local section.
 pub fn export_team_config() -> Result<TeamConfigExport> {

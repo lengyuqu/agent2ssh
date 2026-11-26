@@ -17,8 +17,7 @@
 //!
 //! # Deliberate gaps in this slice
 //!
-//! These return a named error rather than pretending to work; they are the
-//! remaining S1 work, listed in `docs/plans/russh-migration.md`:
+//! These return a named error rather than pretending to work:
 //!
 //! - `auth_methods` — russh does not expose the server's advertised list, so
 //!   the "do not attempt a method the server never offered" short-circuit is

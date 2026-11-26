@@ -4,6 +4,8 @@ All notable changes to Agent2SSH are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+Entries below are a record of what shipped. Paths they cite under `docs/plans/` and `docs/reports/` were removed from the tree; recover those notes from git history. Current limits are in `docs/KNOWN-ISSUES.md`.
+
 ## [Unreleased]
 
 ## [0.6.0] - 2026-11-24
