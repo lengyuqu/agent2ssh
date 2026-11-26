@@ -422,6 +422,8 @@ Get-Content -Raw .\password.txt | agent2ssh host add example --host example.com 
 
 记录当前运行的守护进程 PID，用于 `daemon stop` 和 `daemon status` 命令。
 
+> 停止时每个平台实际走哪条路径、什么情况下拒绝、如何恢复，集中写在 [daemon 身份与安全停止](daemon-identity.md)；本节只讲字段、诊断输出和清理命令。
+
 ### 只读诊断（`daemon status`）
 
 `agent2ssh daemon status` 只读、不阻塞、不发信号，输出下面这些字段；加 `--json` 得到同一份

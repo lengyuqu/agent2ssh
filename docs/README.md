@@ -16,6 +16,7 @@ This tree keeps documents that describe the current product. Completed plans, de
 ## Reference
 
 - [Configuration guide](guides/configuration-guide.md) — `~/.agent2ssh/` layout and fields
+- [Daemon identity and safe stop](guides/daemon-identity.md) — instance records, the stop path each platform actually takes, refusal and recovery rules
 - [MCP client templates](guides/mcp-client-templates.md)
 - [Architecture](architecture.md) — components, safety model, transport matrix, control plane
 - [MCP tools](skills.md) — the 76 tools; `tools/list` offers the 26 `core` tools unless `AGENT2SSH_MCP_TOOLS=all`
