@@ -108,6 +108,8 @@ Two contract tests parse sources rather than calling code, and both have to be s
 
 Recent commits use short, imperative, sentence-case messages, for example `Add desktop daemon lifecycle controls` and `Document R5 regression retest`. Keep commits scoped to one behavior or documentation update. Pull requests should explain the change, list validation commands, link related issues or reports, and include screenshots for desktop UI changes.
 
+Before a release, the documentation refinement and alignment gate in `docs/RELEASE.md` §2.1.1 is mandatory, not advisory: `python3 scripts/check-docs.py` must pass (0 broken internal links, no Markdown left under `docs/plans/` or `docs/reports/`, no orphan document under `docs/`), and the manual spot checks in that section are run. Documentation that describes a shipped product is what the gate protects; completed plans and investigation reports belong to git history.
+
 ## Security & Configuration Tips
 
 Local runtime data is stored under `~/.agent2ssh/`, including daemon tokens and policy files. Do not commit secrets, host keys, private SSH config, or generated local tokens. For policy and storage details, update `docs/guides/configuration-guide.md` alongside behavior changes.

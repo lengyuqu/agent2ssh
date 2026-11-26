@@ -59,6 +59,7 @@ This is the live release procedure. The checklist below is bilingual; follow it 
 
 - [ ] 确认 `main` 分支 CI 全绿（`build` job + `tauri-bundle` job）
 - [ ] 更新 `CHANGELOG.md`
+- [ ] 执行文档精炼与对齐关（见 2.1.1），失败即阻断发版
 - [ ] 版本号同步修改：
   - `src-tauri/Cargo.toml` — `[package] version`
   - `package.json` — `"version"`
@@ -111,6 +112,33 @@ This is the live release procedure. The checklist below is bilingual; follow it 
   cargo build --manifest-path src-tauri/Cargo.toml --release --target "$TARGET" --no-default-features --features daemon --bin agent2ssh-daemon
   ./scripts/prepare-sidecars.sh "$TARGET"
   ```
+
+### 2.1.1 文档精炼与对齐关
+
+约定：**发版前必须过这一关**。工作树里的文档只保留「描述当前产品」的内容；已完成的设计、调查与回归记录归 git 历史。判据是脚本 + 人工抽查，两者都过才算通过。
+
+自动判据（失败即阻断发版）：
+
+```bash
+python3 scripts/check-docs.py --verbose
+```
+
+它检查三件事，任一不满足即返回非零：
+
+| 检查 | 通过标准 |
+| --- | --- |
+| 内部 Markdown 链接 | 断链 0（行内 `[..](x.md)` 与引用式链接都算） |
+| 历史文档残留 | `docs/plans/`、`docs/reports/` 不持有 Markdown 文件 |
+| 孤儿文档 | `docs/` 下除入口文件外，每篇都被至少一篇文档链接到 |
+
+人工抽查（脚本判断不了的部分）：
+
+- [ ] 新增或改动的文档已挂进 `docs/README.md` 的导航，入口描述仍然准确
+- [ ] 文档中引用的默认值、环境变量、命令行开关与代码一致；改动涉及的条目逐条抽查（例：`/shutdown` 在 macOS 上默认 403、停止的 8 秒宽限、`--allow-unbound-graceful` 仅 macOS）
+- [ ] 被替代的说明就地删除，不叠加「已废弃」段落；要留历史就写进 commit message 或 CHANGELOG，不写进指南
+- [ ] 入口文件体积没有失控：`README.md`、`AGENTS.md`、`docs/KNOWN-ISSUES.md` 相对上一版没有明显增长（`--verbose` 会打印按体积排序的表）
+
+> 为什么是这三条自动判据：2026-11-26 的文档清理把 80 篇 Markdown 收到 28 篇（删掉的部分占总量 63.7%），同时引入了 1 处指向已删报告的断链。断链、历史残留、孤儿文档正是那次清理暴露的三个失效面，所以它们被固定成可复算的判据，而不是一句「注意文档质量」。
 
 ### 2.2 打标签并推送（Tag and Push）
 
